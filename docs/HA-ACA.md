@@ -352,14 +352,18 @@ vlite-server failover policy show|enable|disable --target-file <json> [--shared-
 Turning it on needs the unqualified acknowledgement and the revision last
 read (32 lowercase hexadecimal characters, required once a policy exists),
 so two operators cannot silently overwrite each other. Turning it off needs
-neither and replaces an unreadable policy: it is the **kill switch**. The
-command-line `failover policy disable` is the primary kill switch because it
-needs neither the dashboard nor a running writer. A missing or unreadable
-policy counts as off; if the store cannot be reached, supervisors hold with
-`policy_unavailable` and fence nothing. Supervisors read the switch
-before every probe, immediately before fencing and again after fencing, so
-turning it off stops a promotion that has not yet transferred authority. It
-cannot recall a fence command that is already running.
+neither and always writes a fresh disabled revision, even if the policy is
+already off or missing; this invalidates an enable based on an older
+observation. It is the **kill switch**. The command-line
+`failover policy disable` is the primary kill switch because it needs neither
+the dashboard nor a running writer. A missing or unreadable policy counts as
+off; if the store cannot be reached, supervisors hold with
+`policy_unavailable` and fence nothing. Supervisors read the switch before
+every probe, immediately before fencing and again after fencing. They check
+it once more after building the loss report, immediately before authority
+transfer. Disabling before that final check aborts promotion; a transfer
+already past that check may still complete. Disabling cannot recall a fence
+command that is already running.
 
 **Run a supervisor** with a private config file of at most 64 KiB; unknown
 fields are refused:
@@ -387,9 +391,12 @@ vlite-server failover auto --config C:\private\auto-failover.json
 `/ready`, not `/health`, which always succeeds. `/ready` needs a credential
 unless the writer trusts a proxy: `probe_token_file` (optional) holds one
 bearer token of any role, at most 4096 printable ASCII characters. Only
-HTTP 200 counts as healthy and redirects are not followed; HTTP 401 or 403
-holds the supervisor with `probe_unauthorized`, and a redirect with
-`probe_redirected`, instead of counting as a failure. `probe_interval_ms` is
+HTTP 200 with JSON `status: "ready"`, `mode: "writer"` and the expected
+authority `epoch` counts as healthy. HTTP 401 or 403 holds the supervisor
+with `probe_unauthorized`, a redirect with `probe_redirected`, throttling
+(429) with `probe_throttled`, and a mismatched or malformed identity also
+holds instead of counting as a failure. Redirects are not followed.
+`probe_interval_ms` is
 500 to 60000,
 `probe_timeout_ms` is 100 or more and below the interval, and
 `failure_threshold` is 2 to 100 consecutive failures. These are examples,
@@ -404,7 +411,9 @@ also receives `VLITE_FAILOVER_NEW_EPOCH`.
 
 Run **exactly one** supervisor per authority target; nothing stops a second
 one. Turn the switch off before any planned maintenance, restart or manual
-failover of the writer, or the supervisor may fence it.
+failover of the writer, or the supervisor may fence it. The switch is shared
+by the target; starting multiple supervisors does not create independent
+switches.
 
 **What it does.** The supervisor counts consecutive failed probes for the
 same authority epoch and revision; a healthy probe or any authority change
@@ -425,8 +434,11 @@ the threshold it:
 3. Checks the switch again.
 4. Takes a loss report as `failover report` does and refuses if the epoch
    or revision changed.
-5. Runs the same transfer as `failover execute`, acknowledging that report.
-6. Runs `promote_command`, if any, to start the replacement writer.
+5. Re-reads the switch immediately before transfer. If it is off, promotion
+   aborts. This is the disable cutoff; a transfer already past this check may
+   complete.
+6. Runs the same transfer as `failover execute`, acknowledging that report.
+7. Runs `promote_command`, if any, to start the replacement writer.
 
 It makes **one** attempt and then exits. It never restores, verifies or
 routes traffic itself; the replacement starts exactly as after a manual
@@ -443,8 +455,10 @@ as in [writer failover](#planned-or-unplanned-writer-failover).
 
 If authority moved but `promote_command` failed, the supervisor exits
 nonzero with `auto_failover_standby_failed`, naming both epochs and the
-report; the logged tick has `standby` `start_failed`. No writer is running:
-start one manually as after `failover execute`.
+report; the logged tick has `standby` `start_failed`. The replacement's
+state is unconfirmed: the command may have partially succeeded or timed out
+after starting it. Inspect the authority and actual writer replicas before
+deciding whether to start a writer manually as after `failover execute`.
 
 Any other outcome exits nonzero with `auto_failover_aborted: <reason>`:
 `fence_failed` or `fence_unconfirmed` (the fence command failed, or did not

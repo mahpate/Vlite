@@ -1,7 +1,7 @@
 //! feature-aca-ha EPIC-010: opt-in automatic failover. Unqualified until
 //! GATE-005 passes: off by default, switched by a shared policy object that a
-//! person can turn off at any time (the kill switch), and built only from the
-//! operator-acknowledged failover steps (fence, loss report, transfer).
+//! person can disable it (with a final pre-transfer cutoff), and built only
+//! from the operator-acknowledged failover steps (fence, loss report, transfer).
 
 use std::{
     ffi::OsString,
@@ -144,8 +144,8 @@ impl PolicyStore {
     }
 
     /// Turning on needs the revision the caller saw (`None` when no policy
-    /// exists). Turning off always wins: it ignores the revision, replaces an
-    /// invalid or oversized policy and retries a lost race.
+    /// exists). Turning off ignores the revision and always writes a fresh
+    /// disabled revision, replacing invalid policies and retrying lost races.
     pub fn set(
         &self,
         enabled: bool,
@@ -179,8 +179,8 @@ impl PolicyStore {
         loop {
             attempt += 1;
             let result = match self.current()? {
-                Current::Missing => return Ok(None),
-                Current::Valid(policy, _) if !policy.enabled => return Ok(Some(policy)),
+                Current::Missing => self.write(false, source, now_ms, Cond::Create),
+                Current::Valid(_, etag) => self.write(false, source, now_ms, Cond::Match(&etag)),
                 // Too large to read, so it has no ETag to match: remove it,
                 // then create the off policy (a racing create retries).
                 Current::Invalid(None) => match self.store.delete(&self.key) {
@@ -189,7 +189,7 @@ impl PolicyStore {
                     }
                     Err(_) => return Err(PolicyError::Unavailable),
                 },
-                Current::Valid(_, etag) | Current::Invalid(Some(etag)) => {
+                Current::Invalid(Some(etag)) => {
                     self.write(false, source, now_ms, Cond::Match(&etag))
                 }
             };
@@ -269,6 +269,8 @@ pub(super) enum Probe {
     /// The writer answered but refused or redirected the probe: a
     /// configuration fault, never evidence that the writer is down.
     Refused(&'static str),
+    /// The response was inconclusive; do not count it as a failed probe.
+    Hold(&'static str),
 }
 
 /// Counts consecutive failed probes of one authority revision. Any change of
@@ -338,7 +340,7 @@ impl Detector {
 
 /// The side effects of one supervisor, replaced by fakes in the drills.
 pub(super) trait Actions {
-    fn probe(&self) -> Probe;
+    fn probe(&self, expected: &Record) -> Probe;
     /// Stops the writer named by `record` and returns its remaining replicas.
     fn fence(&self, record: &Record) -> Result<u64, String>;
     /// Starts the standby after `old` moved to `new_epoch`; `Ok(false)` when
@@ -432,10 +434,14 @@ impl<A: Actions> Supervisor<A> {
                 return Tick::Held("authority_unavailable");
             }
         };
-        let ready = match self.actions.probe() {
+        let ready = match self.actions.probe(&record) {
             Probe::Ready => true,
             Probe::Down => false,
             Probe::Refused(reason) => {
+                self.detector.reset();
+                return Tick::Held(reason);
+            }
+            Probe::Hold(reason) => {
                 self.detector.reset();
                 return Tick::Held(reason);
             }
@@ -469,11 +475,6 @@ impl<A: Actions> Supervisor<A> {
             Ok(0) => {}
             Ok(_) => return Tick::Aborted("fence_unconfirmed"),
         }
-        match self.policy.current() {
-            Ok(current) if current.enabled() => {}
-            Ok(_) => return Tick::Aborted("disabled_during_promotion"),
-            Err(_) => return Tick::Aborted("policy_unavailable_during_promotion"),
-        }
         let Ok(report) = build_report(&self.authority, None, None) else {
             return Tick::Aborted("report_failed");
         };
@@ -486,6 +487,13 @@ impl<A: Actions> Supervisor<A> {
             expected_revision: report.revision.clone(),
             old_replicas: 0,
         };
+        // This is the cancellation cutoff: disabling before this check aborts
+        // promotion; a transfer already past it may still complete.
+        match self.policy.current() {
+            Ok(current) if current.enabled() => {}
+            Ok(_) => return Tick::Aborted("disabled_during_promotion"),
+            Err(_) => return Tick::Aborted("policy_unavailable_during_promotion"),
+        }
         let transferred = match execute(&self.authority, &report, &ack) {
             Ok(transferred) => transferred,
             Err(FailoverError::ReportStale | FailoverError::Conflict) => {
@@ -536,20 +544,55 @@ fn record_env(record: &Record) -> Vec<(&'static str, String)> {
     env
 }
 
+fn classify_probe_status(status: reqwest::StatusCode) -> Probe {
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        Probe::Hold("probe_throttled")
+    } else if status == reqwest::StatusCode::UNAUTHORIZED
+        || status == reqwest::StatusCode::FORBIDDEN
+    {
+        Probe::Refused("probe_unauthorized")
+    } else if status.is_redirection() {
+        Probe::Refused("probe_redirected")
+    } else if status.is_server_error() {
+        Probe::Down
+    } else {
+        Probe::Refused("probe_unexpected_status")
+    }
+}
+
+fn classify_probe_body(body: &[u8], expected_epoch: u64) -> Probe {
+    let Ok(value) = serde_json::from_slice::<Value>(body) else {
+        return Probe::Hold("probe_response_invalid");
+    };
+    if value["status"] == "ready"
+        && value["mode"] == "writer"
+        && value["epoch"].as_u64() == Some(expected_epoch)
+    {
+        Probe::Ready
+    } else {
+        Probe::Refused("probe_identity_mismatch")
+    }
+}
+
 impl Actions for Live {
-    fn probe(&self) -> Probe {
+    fn probe(&self, expected: &Record) -> Probe {
         let mut request = self.client.get(&self.url);
         if let Some(token) = &self.token {
             request = request.bearer_auth(token);
         }
-        match request.send().map(|response| response.status()) {
-            Ok(reqwest::StatusCode::OK) => Probe::Ready,
-            Ok(reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN) => {
-                Probe::Refused("probe_unauthorized")
-            }
-            Ok(status) if status.is_redirection() => Probe::Refused("probe_redirected"),
-            _ => Probe::Down,
+        let response = match request.send() {
+            Ok(response) => response,
+            Err(_) => return Probe::Down,
+        };
+        let status = response.status();
+        if status != reqwest::StatusCode::OK {
+            return classify_probe_status(status);
         }
+        let mut body = Vec::new();
+        if response.take(4097).read_to_end(&mut body).is_err() || body.len() > 4096 {
+            return Probe::Hold("probe_response_invalid");
+        }
+        classify_probe_body(&body, expected.epoch)
     }
 
     fn fence(&self, record: &Record) -> Result<u64, String> {
@@ -732,9 +775,8 @@ fn log(event: &str, detail: Value) {
     super::log_stderr("info", "failover", line.to_string());
 }
 
-/// A promotion prints its result; an abort, or a transfer whose standby did
-/// not start, exits nonzero so that wrappers checking only the exit status
-/// never mistake it for a working writer.
+/// A promotion prints its result; an abort, or a failed standby-start command,
+/// exits nonzero so wrappers never mistake it for a confirmed ready writer.
 fn outcome(tick: &Tick) -> Result<Value, String> {
     match tick {
         Tick::Aborted(reason) => Err(format!(
@@ -746,7 +788,7 @@ fn outcome(tick: &Tick) -> Result<Value, String> {
             report,
             standby: "start_failed",
         } => Err(format!(
-            "auto_failover_standby_failed: authority moved from epoch {old_epoch} to {new_epoch} (report {}) but promote_command failed: start a writer manually",
+            "auto_failover_standby_failed: authority moved from epoch {old_epoch} to {new_epoch} (report {}) but promote_command failed; replacement state is unconfirmed: inspect authority and actual writer replicas before starting another writer",
             report.report_id
         )),
         tick => Ok(tick.json()),
@@ -938,6 +980,13 @@ async fn update(
     input: Result<Json<Update>, JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
     let input = super::body(input)?;
+    if service.admin.is_open() {
+        return Err(ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "admin_auth_required",
+            "automatic failover policy changes require configured administrator authentication",
+        ));
+    }
     if input.enabled && !input.acknowledge_unqualified {
         return Err(ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -980,14 +1029,15 @@ async fn update(
     .await
     .map_err(super::internal)?
     .map_err(api_error)?;
+    let revision = policy.as_ref().map(|policy| policy.revision.as_str());
     if let Some(log) = &service.admin.audit_log
         && log
             .append(
                 json!({
                     "event": "auto_failover_policy_changed",
-                    "actor": actor,
+                    "actor": actor.clone(),
                     "enabled": enabled,
-                    "revision": policy.as_ref().map(|policy| policy.revision.as_str()),
+                    "revision": revision,
                 }),
                 false,
             )
@@ -1000,7 +1050,7 @@ async fn update(
     }
     log(
         "auto_failover_policy_changed",
-        json!({"enabled": enabled, "source": "rest"}),
+        json!({"actor": actor, "enabled": enabled, "revision": revision}),
     );
     Ok(Json(view(policy.as_ref(), false)))
 }
@@ -1088,7 +1138,7 @@ mod tests {
     }
 
     impl Actions for &Fake {
-        fn probe(&self) -> Probe {
+        fn probe(&self, _expected: &Record) -> Probe {
             if let Some(during) = self.during_probe.lock().unwrap().take() {
                 during();
             }
@@ -1174,8 +1224,13 @@ mod tests {
     fn turning_off_always_wins() {
         let (memory, _, _) = setup();
         let store = policies(&memory);
-        assert_eq!(store.set(false, None, "test", 1).unwrap(), None);
-        enable(&memory);
+        let disabled = store.set(false, None, "test", 1).unwrap().unwrap();
+        assert!(!disabled.enabled);
+        assert_eq!(store.set(true, None, "test", 1), Err(PolicyError::Conflict));
+        store
+            .set(true, Some(&disabled.revision), "test", 1)
+            .unwrap()
+            .unwrap();
         memory.fault(Op::Get, POLICY, Fault::Refuse, 0, 1);
         assert_eq!(
             store.set(false, None, "test", 2),
@@ -1208,6 +1263,30 @@ mod tests {
         ));
         assert_eq!(store.set(true, None, "test", 4), Err(PolicyError::Invalid));
         assert!(!store.set(false, None, "test", 5).unwrap().unwrap().enabled);
+    }
+
+    #[test]
+    fn probe_requires_the_expected_ready_writer_and_holds_on_throttling() {
+        assert_eq!(
+            classify_probe_body(br#"{"status":"ready","mode":"writer","epoch":7}"#, 7),
+            Probe::Ready
+        );
+        assert_eq!(
+            classify_probe_body(br#"{"status":"ready","mode":"writer","epoch":8}"#, 7),
+            Probe::Refused("probe_identity_mismatch")
+        );
+        assert_eq!(
+            classify_probe_body(br#"{"status":"ready"}"#, 7),
+            Probe::Refused("probe_identity_mismatch")
+        );
+        assert_eq!(
+            classify_probe_status(reqwest::StatusCode::TOO_MANY_REQUESTS),
+            Probe::Hold("probe_throttled")
+        );
+        assert_eq!(
+            classify_probe_status(reqwest::StatusCode::SERVICE_UNAVAILABLE),
+            Probe::Down
+        );
     }
 
     #[test]
@@ -1712,8 +1791,14 @@ mod tests {
         use axum::{body::Body, http::Request};
         use tower::ServiceExt;
 
+        const ADMIN_TOKEN: &str = "auto-failover-admin-test-token-0123456789";
+
         fn service() -> Service {
-            Service::new(Database::create_in_memory(1, crate::CreateOptions::default()).unwrap())
+            let service = Service::new(
+                Database::create_in_memory(1, crate::CreateOptions::default()).unwrap(),
+            );
+            service.admin.auth.lock().unwrap().admin = Some(BearerToken::new(ADMIN_TOKEN).unwrap());
+            service
         }
 
         fn writer(memory: &Arc<Memory>) -> Service {
@@ -1740,6 +1825,7 @@ mod tests {
                         .method(method)
                         .uri("/v1/admin/auto-failover")
                         .header(header::CONTENT_TYPE, "application/json")
+                        .header(header::AUTHORIZATION, format!("Bearer {ADMIN_TOKEN}"))
                         .body(Body::from(body.to_owned()))
                         .unwrap(),
                 )
@@ -1753,8 +1839,19 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn open_administration_cannot_change_the_policy() {
+            let service = Service::new(
+                Database::create_in_memory(1, crate::CreateOptions::default()).unwrap(),
+            );
+            let router = router(service);
+            let (status, body) = call(&router, "PUT", r#"{"enabled":false}"#).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+            assert_eq!(body["error"]["code"], "admin_auth_required");
+        }
+
+        #[tokio::test]
         async fn without_an_authority_it_is_unavailable_and_cannot_be_turned_on() {
-            let router = router(service());
+            let router = authenticated_router(service(), BearerToken::new(ADMIN_TOKEN).unwrap());
             let (status, body) = call(&router, "GET", "").await;
             assert_eq!(status, StatusCode::OK);
             assert_eq!(body["available"], false);
@@ -1774,7 +1871,8 @@ mod tests {
         #[tokio::test]
         async fn a_writer_turns_it_on_with_acknowledgement_and_off_without() {
             let memory = Arc::new(Memory::default());
-            let router = router(writer(&memory));
+            let router =
+                authenticated_router(writer(&memory), BearerToken::new(ADMIN_TOKEN).unwrap());
             let (status, body) = call(&router, "GET", "").await;
             assert_eq!(status, StatusCode::OK);
             assert_eq!(body["available"], true);

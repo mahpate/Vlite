@@ -112,6 +112,27 @@ function Get-Replicas([string]$App, [int]$Count, [string]$Suffix = 'x') {
     return ,$list
 }
 
+function New-MutationReport([string]$Profile = 'pilot', [long]$PollMs = 100) {
+    $count = if ($Profile -ceq 'full') { 20 } else { 3 }
+    $deadline = if ($Profile -ceq 'full') { 30000 } else { 1000 }
+    $revocations = [int][Math]::Floor($count / 2)
+    [ordered]@{ schema = 'vlite-meas005/1'; stage = 'mutations'; complete = $false
+        mutation_and_ingress_checks_complete = $true
+        requested = [ordered]@{ mutations = $count; seed = 1; poll_interval_ms = $PollMs; observation_deadline_ms = $deadline
+            labels = [ordered]@{ gateway_replicas = '2'; writer_replicas = '1'; reader_replicas = '1'
+                gateway_cpu = '1'; gateway_memory = '2Gi'; writer_cpu = '1'; writer_memory = '2Gi'
+                reader_cpu = '0.5'; reader_memory = '1Gi'; driver_cpu = '1'; driver_memory = '2Gi'
+                routing = 'writer_only'; load = 'idle' } }
+        mutations = @(for ($i = 0; $i -lt $count; $i++) {
+            $kind, $status = if ($i -lt $revocations) { 'revocation', 401 }
+                elseif (($i - $revocations) % 2 -eq 0) { 'suspension', 403 } else { 'resumption', 200 }
+            [ordered]@{ index = $i; kind = $kind
+                outcome = 'acknowledged'; generation = 2 + $i; observation_deadline_ms = $deadline
+                behavior = [ordered]@{ affected_status = $status; unaffected_semantic_match = $true
+                    old_generation_envelope = 'envelope_stale'; scope = 'ingress_behavior_only_not_replica_coverage' } }
+        }) }
+}
+
 function Reset-Mock([string]$Measurement, [string[]]$Dirty = @()) {
     $script:SourceDirty = @($Dirty)
     $script:Now = 1800000000000L
@@ -139,8 +160,7 @@ function Reset-Mock([string]$Measurement, [string[]]$Dirty = @()) {
     $script:PublishLog = New-Frame (Report ([ordered]@{ schema = 'vlite-meas-runtime/1'; operation = 'publish'; generation = 1
         control_state_published = $true; authority_mode = 'off'; read_routing = 'writer_only' }))
     $script:DriverLog = if ($Measurement -ceq 'MEAS-005') {
-        $script:MutationJson = Report ([ordered]@{ schema = 'vlite-meas005/1'; stage = 'mutations'; complete = $true
-            mutation_and_ingress_checks_complete = $true; mutations = @() })
+        $script:MutationJson = Report (New-MutationReport)
         $script:CompanionJson = Report ([ordered]@{ schema = 'vlite-meas005-driver-clock/1'; scope = 'job_local_driver_process_only'
             binding = [ordered]@{ job_name = 'vlite-meas-t26-drv'; job_execution = 'vlite-meas-t26-drv-abc12' } })
         # The companion precedes the unchanged mutation frame; console lines may carry a prefix.
@@ -539,6 +559,27 @@ try {
     Assert ($mutate.target_file -ceq '/measurement/control-target.json' -and $mutate.server -ceq '/usr/local/bin/vlite-server' -and $mutate.mode -ceq 'run') 'Mutate config differs'
     Assert-Cleaned $result 'MEAS-005'
 
+    Reset-Mock 'MEAS-005'
+    $script:MutationJson = Report (New-MutationReport 'full' 250)
+    $script:DriverLog = New-Frame $script:MutationJson
+    $result = Invoke-Live 'MEAS-005' @{ GatewayProfile = 'full'; GatewayPollMs = '250' }
+    Assert (-not $result.Error -and $result.Summary.profile -ceq 'full' -and
+        -not ($result.Summary.incompleteReasons -contains 'MutationChecksIncomplete')) 'Valid full-profile mutation checks must be accepted'
+    Assert ([IO.File]::ReadAllText((Join-Path $result.Out 'MEAS-005-mutations.json')) -ceq $script:MutationJson) 'Full-profile evidence is preserved unchanged'
+    Assert-Cleaned $result 'MEAS-005-full'
+
+    Reset-Mock 'MEAS-005'
+    $report = New-MutationReport
+    $report.complete = $true
+    $report.mutations[0].generation = 18446744073709551613uL
+    $report.mutations[1].generation = 18446744073709551614uL
+    $report.mutations[2].generation = [ulong]::MaxValue
+    $script:MutationJson = Report $report
+    $script:DriverLog = New-Frame $script:MutationJson
+    $result = Invoke-Live 'MEAS-005'
+    Assert (-not $result.Error) 'Valid complete checks and adjacent u64 generations must be accepted'
+    Assert-Cleaned $result 'MEAS-005-complete'
+
     # Driver clock evidence is job-local and advisory: problems add incomplete reasons, never failures or retries.
     # Each case: reason, whether the offline check runs, and the setup.
     $clockCases = @(
@@ -615,17 +656,71 @@ try {
         Assert ($result.Summary.failureReason -ceq 'Inventory') 'Missing, foreign or duplicate identity was accepted'
     }
 
-    Reset-Mock 'MEAS-005'
-    $script:JobStatus['vlite-meas-t26-drv'] = 'Failed'
-    $script:DriverLog = New-Frame (Report ([ordered]@{ schema = 'vlite-meas005/1'; stage = 'mutations'; complete = $false
-        mutation_and_ingress_checks_complete = $false; mutations = @() }))
-    $script:ObserverMissing = 'vlite-meas-t26-gw--r1-x2'
-    $result = Invoke-Live 'MEAS-005'
-    Assert (-not $result.Error -and $result.Summary.measurementStatus -ceq 'Incomplete') 'Incomplete mutation evidence is recorded, not failed'
-    foreach ($reason in 'MutationChecksIncomplete', 'ObserverReportMissing', 'AnalysisNotRun') {
-        Assert ($result.Summary.incompleteReasons -contains $reason) "Missing incomplete reason $reason"
+    foreach ($mutationTamper in @(
+        { param($r) $r.complete = $true; $r.mutations = @(); $r.Remove('requested') },
+        { param($r) $r.complete = $true; $r.mutations = @() },
+        { param($r) $r.mutation_and_ingress_checks_complete = 'false' },
+        { param($r) $r.Remove('mutations') },
+        { param($r) $r.mutations = @($r.mutations[0]) },
+        { param($r) $r.requested.mutations = 20 },
+        { param($r) $r.requested.seed = 2 },
+        { param($r) $r.requested.poll_interval_ms = 1000 },
+        { param($r) $r.requested.observation_deadline_ms = 30000 },
+        { param($r) $r.requested.labels.routing = 'reader_preferred' },
+        { param($r) $r.requested.labels.Remove('reader_cpu') },
+        { param($r) $r.mutations[0].outcome = 'unknown_do_not_retry'; $r.mutations[0].generation = $null },
+        { param($r) $r.mutations[0].generation = $null },
+        { param($r) $r.mutations[0].generation = '2' },
+        { param($r) $r.mutations[1].generation = 2 },
+        { param($r) $r.mutations[1].index = 0 },
+        { param($r) $r.mutations[1].kind = 'revocation' },
+        { param($r) $r.mutations[0].behavior = $null },
+        { param($r) $r.mutations[1].behavior.affected_status = 200 },
+        { param($r) $r.mutations[1].behavior.unaffected_semantic_match = 'true' },
+        { param($r) $r.mutations[1].behavior.unaffected_semantic_match = $false },
+        { param($r) $r.mutations[1].behavior.old_generation_envelope = 'accepted' },
+        { param($r) $r.mutations[1].behavior.scope = 'per_replica_coverage' },
+        { param($r) $r.mutations[1].observation_deadline_ms = 30000 }
+    )) {
+        Reset-Mock 'MEAS-005'
+        $report = New-MutationReport
+        & $mutationTamper $report
+        $script:DriverLog = New-Frame (Report $report)
+        $result = Invoke-Live 'MEAS-005'
+        Assert ($result.Summary.failedStep -ceq 'ReadDriver' -and $result.Summary.failureReason -ceq 'MutationEvidence') 'Invalid successful mutation evidence must fail closed'
+        Assert (-not (Test-Path (Join-Path $result.Out 'MEAS-005-mutations.json')) -and
+            @($result.Summary.evidence | Where-Object kind -ceq 'mutations').Count -eq 0) 'Rejected mutation evidence must not be saved'
+        Assert (-not ($script:LocalCalls | Where-Object { $_.Operation -cin @('analyze', 'check_driver_clock') })) 'Rejected mutation evidence must not reach offline consumers'
+        Assert-Cleaned $result 'invalid-mutations'
     }
-    Assert (-not ($script:LocalCalls | Where-Object { $_.Operation -ceq 'analyze' })) 'Analysis must not run with missing observers'
+
+    # A failed driver can preserve a valid prefix, including no attempted mutations, without claiming completion.
+    foreach ($partial in @(
+        @(),
+        @([ordered]@{ index = 0; kind = 'revocation'; outcome = 'unknown_do_not_retry'; generation = $null }),
+        @([ordered]@{ index = 0; kind = 'revocation'; outcome = 'not_attempted_signing_read_failed'; generation = $null }),
+        @((New-MutationReport).mutations[0]),
+        @([ordered]@{ index = 0; kind = 'revocation'; outcome = 'acknowledged'; generation = 2
+            behavior = $null; observation_deadline_ms = 1000 })
+    )) {
+        Reset-Mock 'MEAS-005'
+        $script:JobStatus['vlite-meas-t26-drv'] = 'Failed'
+        $report = New-MutationReport
+        $report.mutation_and_ingress_checks_complete = $false
+        $report.mutations = @($partial)
+        $script:MutationJson = Report $report
+        $script:DriverLog = New-Frame $script:MutationJson
+        if ($partial.Count) { $script:ObserverMissing = 'vlite-meas-t26-gw--r1-x2' }
+        $result = Invoke-Live 'MEAS-005'
+        Assert (-not $result.Error -and $result.Summary.measurementStatus -ceq 'Incomplete') 'Incomplete mutation evidence is recorded, not failed'
+        $reasons = @('MutationChecksIncomplete', 'AnalysisNotRun')
+        if ($partial.Count) { $reasons += 'ObserverReportMissing' }
+        foreach ($reason in $reasons) {
+            Assert ($result.Summary.incompleteReasons -contains $reason) "Missing incomplete reason $reason"
+        }
+        Assert ([IO.File]::ReadAllText((Join-Path $result.Out 'MEAS-005-mutations.json')) -ceq $script:MutationJson) 'Partial mutation evidence is preserved unchanged'
+        Assert (-not ($script:LocalCalls | Where-Object { $_.Operation -ceq 'analyze' })) 'Analysis must not run without mutations or with missing observers'
+    }
 
     Reset-Mock 'MEAS-005'
     $script:JobStatus['vlite-meas-t26-drv'] = 'Failed'  # status disagrees with complete mutation checks

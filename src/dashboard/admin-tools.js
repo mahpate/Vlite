@@ -699,7 +699,7 @@
     }
     return { headline, tone, facts, available, enabled, invalid, canToggle: available };
   }
-  // PUT body for the toggle: turning on acknowledges the warning and guards against a concurrent change; turning off always wins.
+  // PUT body for the toggle: turning on acknowledges the warning and guards against a concurrent change; turning off writes a fresh disabled revision.
   function autoFailoverRequest(state, enable) {
     if (!enable) return { enabled: false };
     const revision = object(state) && typeof state.revision === "string" && state.revision ? state.revision : null;
@@ -1340,7 +1340,7 @@
       $("auto-failover-help").textContent = !allowed ? gates.autoFailover.reason
         : !afState ? "Select Refresh status first."
         : !afView.available ? "This server cannot switch automatic failover. Manual failover still works."
-        : turnOff ? "Turning it off stops every supervisor from failing over on its own. It takes effect at their next check."
+        : turnOff ? "Turning it off writes a fresh disabled revision. A promotion that has not passed its final transfer check will stop; one already past that check may complete."
         : "Turning it on lets supervisors fail over without review. It does not start a supervisor.";
     }
     on("auto-failover-refresh", "autoFailover", async (mark) => {
@@ -1356,7 +1356,7 @@
       const enable = !(afView.enabled || afView.invalid);
       const prompt = enable
         ? "Turn on automatic failover? It is NOT yet proven safe (GATE-005 has not passed). A supervisor that loses contact with the writer will fence it and promote its standby without asking anyone, and changes the writer had not yet copied can be lost. Turn it off at any time to stop it."
-        : "Turn off automatic failover? Every supervisor stops failing over on its own at its next check. Manual failover still works.";
+        : "Turn off automatic failover? This writes a fresh disabled revision. A promotion that has not passed its final transfer check will stop; one already past that check may complete. Manual failover still works.";
       if (!await ctx.confirm(prompt)) return;
       if (!current(mark)) return;
       const body = autoFailoverRequest(afState, enable);

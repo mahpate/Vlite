@@ -1824,7 +1824,7 @@ def exercise_serve_status_mocked(browser):
             assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), width
         page.set_viewport_size({"width": 1280, "height": 900})
 
-    expect_rows({"Role": "Standalone (single server)", "Accepts writes": "Yes", "Draining": "No", "Writer epoch": "Not used",
+    expect_rows({"Role": "Standalone (single server)", "Write behavior": "Standalone role; admission depends on server state", "Draining": "No", "Writer epoch": "Not used",
                  "Data lineage": "a" * 16, "Change-feed position": "1", "Storage format": "Version 4", "Uptime": "5.0 s",
                  "Cloud archive": "No cloud archive configured"})
     expect(control(page, status)).to_contain_text("No problems reported")
@@ -1833,7 +1833,7 @@ def exercise_serve_status_mocked(browser):
 
     show({**STANDALONE_SERVE_STATUS, "mode": "reader", "read_only": True, "epoch": 3, "sequence": 40, "uptime_ms": 7_500_000,
           "reader": {"applied_sequence": 40, "age_ms": 12000, "bound_ms": 5000, "stale": True, "failed": False}})
-    expect_rows({"Role": "Reader (read-only replica)", "Accepts writes": "No — read-only replica (writes get 403 reader_mode)",
+    expect_rows({"Role": "Reader (read-only replica)", "Write behavior": "Read-only role; writes are rejected",
                  "Writer epoch": "3", "Change-feed position": "40", "Uptime": "2 h 5 min",
                  "Reader freshness": "Stale — reads get 503 reader_stale; send reads to the writer",
                  "Confirmed data age": "12.0 s (limit 5.0 s)", "Applied position": "40"}, {"Reader freshness": "warn"})

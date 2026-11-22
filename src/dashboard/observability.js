@@ -135,10 +135,10 @@
     const data = status && typeof status === "object" ? status : {};
     const withheld = (finite(data.binding_generation) ?? 0) > 0;
     const position = (value) => finite(value) !== null ? String(value) : withheld ? "Withheld while agent memory is on" : "Not available";
-    const roles = { standalone: "Standalone (single server)", writer: "Writer (accepts every write)", reader: "Reader (read-only replica)" };
+    const roles = { standalone: "Standalone (single server)", writer: "Writer (configured role)", reader: "Reader (read-only replica)" };
     const rows = [
       { label: "Role", value: roles[data.mode] ?? (data.mode ? `Unknown (${data.mode})` : "Unknown") },
-      { label: "Accepts writes", value: data.read_only ? "No — read-only replica (writes get 403 reader_mode)" : "Yes" },
+      { label: "Write behavior", value: data.mode === "reader" ? "Read-only role; writes are rejected" : data.mode === "writer" ? "Writer role; admission may be fenced" : data.mode === "standalone" ? "Standalone role; admission depends on server state" : "Not reported" },
       data.draining ? { label: "Draining", value: "Yes — shutting down, not ready for new traffic", level: "warn" } : { label: "Draining", value: "No" },
       { label: "Writer epoch", value: finite(data.epoch) !== null ? String(data.epoch) : "Not used" },
       { label: "Data lineage", value: data.lineage ? String(data.lineage) : "Not recorded" },

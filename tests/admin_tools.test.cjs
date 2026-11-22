@@ -1119,7 +1119,7 @@ async function autoFailoverTests() {
   assert.match(missing.headline, /^Not set up/);
   assert.deepEqual([missing.enabled, missing.invalid, missing.canToggle, missing.facts.length], [false, false, false, 0]);
 
-  // Request: turning on acknowledges the warning and carries the revision it saw; turning off always wins.
+  // Request: turning on acknowledges the warning and carries the revision it saw; turning off needs no revision.
   assert.deepEqual(plain(autoFailoverRequest(base, true)), { enabled: true, acknowledge_unqualified: true });
   assert.deepEqual(plain(autoFailoverRequest({ ...base, revision: "r1" }, true)), { enabled: true, acknowledge_unqualified: true, expected_revision: "r1" });
   assert.deepEqual(plain(autoFailoverRequest(on, false)), { enabled: false });
@@ -1167,7 +1167,8 @@ async function autoFailoverTests() {
   assert.equal(el("result").textContent, "Automatic failover is on (not yet proven safe).");
   assert.equal(el("status").attributes["data-tone"], "blocked");
   assert.deepEqual([el("toggle").textContent, el("facts").children.length], ["Turn off automatic failover", 5]);
-  assert.match(el("help").textContent, /stops every supervisor/);
+  assert.match(el("help").textContent, /fresh disabled revision/);
+  assert.match(el("help").textContent, /one already past that check may complete/);
   // Turning off: plain PUT.
   ctx.responses.push({ ...base, revision: "r3", updated_unix_ms: T, source: "rest:admin" });
   await el("toggle").click();

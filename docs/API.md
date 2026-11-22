@@ -1018,12 +1018,17 @@ and rejects other fields.
   revision that is not 32 lowercase hexadecimal characters is 422
   `invalid_json`.
 * Turning it **off** ignores any revision and replaces an invalid policy. It
-  is the kill switch: off always wins. `vlite-server failover policy disable`
-  does the same without the dashboard or a running writer.
+  always writes a fresh disabled revision, including when already off or no
+  policy exists; this invalidates an enable based on an earlier revision.
+  `vlite-server failover policy disable` does the same without the dashboard
+  or a running writer. Disabling before the supervisor's final transfer check
+  aborts promotion; a transfer already past that check may still complete.
 * Storage errors return 503 `auto_failover_unavailable` or
   `auto_failover_indeterminate` (the change may have been written; read it
   again before retrying).
-* A reader refuses the PUT with 403 `reader_mode`. A successful change is
+* Open development administration refuses the PUT with 401
+  `admin_auth_required`; configure administrator authentication before using
+  this mutation. A reader refuses the PUT with 403 `reader_mode`. A successful change is
   audited as `auto_failover_policy_changed` with `actor`, `enabled` and
   `revision`. Super admins use the same switch in the dashboard under
   **Administration → Backup & recovery → Automatic failover**.
@@ -1043,8 +1048,10 @@ token for `/ready`, needed unless the writer trusts a proxy),
 `promote_command` and `command_timeout_ms` (1000 to 3600000, default 300000)
 are optional. It counts consecutive failed readiness probes of the serving
 writer for the same authority epoch and revision, and acts only on a writer
-it has itself seen ready in that epoch. A 401, 403 or redirect from the probe
-holds it instead of counting. At the threshold it checks the switch and
+it has itself seen ready in that epoch. A successful response must identify
+`status: "ready"`, `mode: "writer"` and the expected authority `epoch`;
+otherwise it holds instead of counting. HTTP 401, 403, redirects, 429
+throttling and other unexpected responses hold instead of counting. At the threshold it checks the switch and
 authority again, runs the fence command, which must stop every old writer
 replica and print exactly `{"old_replicas":0}`, checks the switch again,
 takes a loss report as `failover report` does, refuses if authority changed,

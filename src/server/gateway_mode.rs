@@ -62,8 +62,8 @@ const CONTROL_USAGE: &str = "vlite-server control-state publish|update --target-
 const MAX_SEED_FILE_BYTES: u64 = 1024;
 const MAX_IN_FLIGHT: usize = 65_536;
 const MAX_BUCKETS: usize = 1_000_000;
-/// After the drain deadline: how long cancelled requests get to release their
-/// in-flight slots, and separately how long the control-state poller gets to
+/// After the drain deadline: how long graceful HTTP connections get to settle
+/// after cancellation, and separately how long the control-state poller gets to
 /// stop before it is left to finish its read on its own.
 const SHUTDOWN_SETTLE: Duration = Duration::from_secs(1);
 
@@ -174,8 +174,8 @@ pub(super) fn read_config(path: &Path) -> Result<Settings, String> {
 /// Runs a gateway until `shutdown` resolves, then drains: `/ready` answers
 /// 503 `draining` for `readiness_propagation_ms` while the listener still
 /// serves, the listener closes, in-flight requests get `drain_timeout_ms`
-/// and are then cancelled (at most `SHUTDOWN_SETTLE` more to release their
-/// slots), and the control-state poller stops (at most `SHUTDOWN_SETTLE`).
+/// and are then cancelled (at most `SHUTDOWN_SETTLE` more to flush responses),
+/// and the control-state poller stops (at most `SHUTDOWN_SETTLE`).
 pub async fn run_gateway(
     args: Vec<OsString>,
     shutdown: impl Future<Output = std::io::Result<()>> + Send,
@@ -283,23 +283,21 @@ pub async fn run_gateway(
                 Ok(Ok(Err(error))) => outcome = Err(format!("gateway_serve_failed: {error}")),
                 Ok(Err(error)) => outcome = Err(format!("gateway_serve_failed: {error}")),
                 Err(_) => {
-                    // Aborting the server task leaves its connection tasks
-                    // running, so cancel every request explicitly.
-                    gateway.cancel.send_replace(true);
-                    server.abort();
-                    let settled = matches!(
-                        tokio::time::timeout(
-                            SHUTDOWN_SETTLE,
-                            gateway.in_flight.acquire_many(file.max_in_flight as u32),
-                        )
-                        .await,
-                        Ok(Ok(_))
-                    );
+                    let settled = cancel_and_settle(
+                        &mut server,
+                        &gateway.cancel,
+                        SHUTDOWN_SETTLE,
+                    ).await;
+                    match &settled {
+                        Some(Ok(Ok(()))) | None => {}
+                        Some(Ok(Err(error))) => outcome = Err(format!("gateway_serve_failed: {error}")),
+                        Some(Err(error)) => outcome = Err(format!("gateway_serve_failed: {error}")),
+                    }
                     log_stderr(
                         "warn",
                         "gateway",
                         json!({"event":"drain_timeout","drain_timeout_ms":file.drain_timeout_ms,
-                            "settled":settled})
+                            "settled":matches!(settled, Some(Ok(Ok(()))))})
                         .to_string(),
                     );
                 }
@@ -321,6 +319,22 @@ pub async fn run_gateway(
         json!({"event":"server_shutdown"}).to_string(),
     );
     outcome
+}
+
+async fn cancel_and_settle(
+    server: &mut tokio::task::JoinHandle<std::io::Result<()>>,
+    cancel: &tokio::sync::watch::Sender<bool>,
+    settle: Duration,
+) -> Option<Result<std::io::Result<()>, tokio::task::JoinError>> {
+    cancel.send_replace(true);
+    // Released handler permits do not prove that HTTP responses were flushed.
+    match tokio::time::timeout(settle, &mut *server).await {
+        Ok(result) => Some(result),
+        Err(_) => {
+            server.abort();
+            None
+        }
+    }
 }
 
 /// Stops the poll thread, waiting at most `settle` for a read in progress;
@@ -537,21 +551,17 @@ impl Gateway {
                 HeaderName::from_static(principal_envelope::HEADER),
                 envelope.parse().map_err(super::internal)?,
             );
-            let sent = tokio::select! {
-                biased;
-                // Nothing is retried after a cancel, not even a read.
-                () = cancelled(&mut cancel) => {
-                    return Err(drain_cancelled("dispatch", target.operation, true));
-                }
-                sent = tokio::time::timeout(
-                    self.upstream_timeout,
-                    self.client
-                        .request(parts.method.clone(), url)
-                        .headers(headers)
-                        .body(body.clone())
-                        .send(),
-                ) => sent,
-            };
+            let sent = dispatch(
+                self.client
+                    .request(parts.method.clone(), url)
+                    .headers(headers)
+                    .body(body.clone())
+                    .send(),
+                self.upstream_timeout,
+                &mut cancel,
+                target.operation,
+            )
+            .await?;
             let (delivery, failure) = match sent {
                 Ok(Ok(upstream)) => {
                     if target.fallback.is_none()
@@ -624,6 +634,26 @@ impl Gateway {
         *response.status_mut() = status;
         *response.headers_mut() = headers;
         Ok(response)
+    }
+}
+
+async fn dispatch<F: Future>(
+    send: F,
+    timeout: Duration,
+    cancel: &mut tokio::sync::watch::Receiver<bool>,
+    operation: Operation,
+) -> Result<Result<F::Output, tokio::time::error::Elapsed>, ApiError> {
+    let started = AtomicBool::new(false);
+    tokio::pin!(send);
+    let send = std::future::poll_fn(|cx| {
+        started.store(true, Ordering::Relaxed);
+        send.as_mut().poll(cx)
+    });
+    tokio::select! {
+        biased;
+        // Nothing is retried after a cancel, not even a read.
+        () = cancelled(cancel) => Err(drain_cancelled("dispatch", operation, started.load(Ordering::Relaxed))),
+        sent = tokio::time::timeout(timeout, send) => Ok(sent),
     }
 }
 
@@ -2158,6 +2188,162 @@ mod tests {
         assert_eq!(error_code(response).await, "draining");
         assert!(writer.requests.lock().unwrap().is_empty());
         drop(body_tx);
+    }
+
+    #[tokio::test]
+    async fn a_drain_cancel_before_the_first_send_poll_is_not_an_unknown_write() {
+        let (cancel, mut cancel_rx) = tokio::sync::watch::channel(true);
+        let send = std::future::poll_fn(|_| -> std::task::Poll<()> {
+            panic!("a cancelled request must not be dispatched");
+        });
+        let response = dispatch(
+            send,
+            Duration::from_secs(1),
+            &mut cancel_rx,
+            Operation::Write,
+        )
+        .await
+        .unwrap_err()
+        .into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error_code(response).await, "draining");
+        drop(cancel);
+    }
+
+    #[tokio::test]
+    async fn a_drain_cancel_after_the_first_send_poll_is_an_unknown_write() {
+        let (cancel, mut cancel_rx) = tokio::sync::watch::channel(false);
+        let polls = std::cell::Cell::new(0);
+        let send = std::future::poll_fn(|_| -> std::task::Poll<()> {
+            polls.set(polls.get() + 1);
+            cancel.send_replace(true);
+            std::task::Poll::Pending
+        });
+        let response = dispatch(
+            send,
+            Duration::from_secs(1),
+            &mut cancel_rx,
+            Operation::Write,
+        )
+        .await
+        .unwrap_err()
+        .into_response();
+        assert_eq!(polls.get(), 1);
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(error_code(response).await, "write_outcome_unknown");
+    }
+
+    #[tokio::test]
+    async fn drain_settle_waits_for_the_http_error_body_after_handler_permits_are_free() {
+        let writer = upstream(
+            StatusCode::OK,
+            map(&[("x-vlite-epoch", "5")]),
+            Duration::from_secs(5),
+        )
+        .await;
+        let (mut gateway, token) = routed_gateway(
+            &writer.endpoint,
+            &writer.endpoint,
+            control_state::ReadRouting::Readers,
+        );
+        Arc::get_mut(&mut gateway).unwrap().upstream_timeout = Duration::from_secs(10);
+        let generated = Arc::new(tokio::sync::Notify::new());
+        let flush = Arc::new(tokio::sync::Notify::new());
+        let router = Router::new().fallback({
+            let gateway = gateway.clone();
+            let generated = generated.clone();
+            let flush = flush.clone();
+            move |request: Request| {
+                let gateway = gateway.clone();
+                let generated = generated.clone();
+                let flush = flush.clone();
+                async move {
+                    let response = handle(State(gateway), request).await;
+                    let (parts, body) = response.into_parts();
+                    let bytes = axum::body::to_bytes(body, 4096).await.unwrap();
+                    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(1);
+                    tokio::spawn(async move {
+                        generated.notify_one();
+                        flush.notified().await;
+                        tx.send(Ok(bytes)).await.unwrap();
+                    });
+                    Response::from_parts(
+                        parts,
+                        Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx)),
+                    )
+                }
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (stop, mut stop_rx) = tokio::sync::watch::channel(false);
+        let mut server = tokio::spawn(
+            axum::serve(listener, router)
+                .with_graceful_shutdown(async move {
+                    stop_rx.wait_for(|stop| *stop).await.unwrap();
+                })
+                .into_future(),
+        );
+        let client = tokio::spawn(async move {
+            reqwest::Client::builder()
+                .no_proxy()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap()
+                .post(format!("http://{address}/v1/collections"))
+                .bearer_auth(token)
+                .body(r#"{"name":"docs"}"#)
+                .send()
+                .await
+                .unwrap()
+        });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while writer.requests.lock().unwrap().is_empty() {
+            assert!(Instant::now() < deadline, "the write was not dispatched");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        stop.send_replace(true);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut server)
+                .await
+                .is_err()
+        );
+        let settling = tokio::spawn({
+            let gateway = gateway.clone();
+            async move { cancel_and_settle(&mut server, &gateway.cancel, Duration::from_secs(2)).await }
+        });
+        tokio::time::timeout(Duration::from_secs(1), generated.notified())
+            .await
+            .expect("cancellation produces an HTTP error");
+        assert_eq!(gateway.in_flight.available_permits(), 8);
+        assert!(
+            !settling.is_finished(),
+            "permits do not prove HTTP completion"
+        );
+        flush.notify_one();
+        assert!(matches!(settling.await.unwrap(), Some(Ok(Ok(())))));
+        let response = client.await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            response.json::<Value>().await.unwrap()["error"]["code"],
+            "write_outcome_unknown"
+        );
+    }
+
+    #[tokio::test]
+    async fn drain_settle_aborts_only_after_its_deadline() {
+        let (cancel, _) = tokio::sync::watch::channel(false);
+        let mut server = tokio::spawn(std::future::pending::<std::io::Result<()>>());
+        let settle = Duration::from_millis(20);
+        let started = Instant::now();
+        assert!(
+            cancel_and_settle(&mut server, &cancel, settle)
+                .await
+                .is_none()
+        );
+        assert!(*cancel.borrow());
+        assert!(started.elapsed() >= settle);
+        assert!(server.await.unwrap_err().is_cancelled());
     }
 
     /// Starts a request against a backend that answers after 5 s, waits

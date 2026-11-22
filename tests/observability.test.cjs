@@ -89,10 +89,10 @@ const serveRows = (status) => Object.fromEntries(serveStatusView(status).map((ro
 const standalone = { mode: "standalone", draining: false, read_only: false, lineage: null, binding_generation: 0, format_version: 5, sequence: 42, epoch: null, archive: null, reader: null, uptime_ms: 65000 };
 test("serve status view explains a standalone server in plain language", () => {
   const rows = serveStatusView(standalone);
-  assert.deepEqual(rows.map((row) => row.label), ["Role", "Accepts writes", "Draining", "Writer epoch", "Data lineage", "Change-feed position", "Storage format", "Uptime", "Cloud archive"]);
+  assert.deepEqual(rows.map((row) => row.label), ["Role", "Write behavior", "Draining", "Writer epoch", "Data lineage", "Change-feed position", "Storage format", "Uptime", "Cloud archive"]);
   const view = serveRows(standalone);
   assert.equal(view.Role.value, "Standalone (single server)");
-  assert.equal(view["Accepts writes"].value, "Yes");
+  assert.equal(view["Write behavior"].value, "Standalone role; admission depends on server state");
   assert.equal(view.Draining.value, "No");
   assert.equal(view["Writer epoch"].value, "Not used");
   assert.equal(view["Data lineage"].value, "Not recorded");
@@ -101,7 +101,7 @@ test("serve status view explains a standalone server in plain language", () => {
   assert.equal(view.Uptime.value, "1 min 5 s");
   assert.equal(view["Cloud archive"].value, "No cloud archive configured");
   assert.ok(rows.every((row) => row.level === undefined));
-  assert.deepEqual(serveStatusView(null).map((row) => row.value).slice(0, 3), ["Unknown", "Yes", "No"]);
+  assert.deepEqual(serveStatusView(null).map((row) => row.value).slice(0, 3), ["Unknown", "Not reported", "No"]);
   assert.equal(serveRows({ ...standalone, mode: "gateway" }).Role.value, "Unknown (gateway)");
 });
 test("serve status view reports writer epoch, draining and archive health", () => {
@@ -109,7 +109,8 @@ test("serve status view reports writer epoch, draining and archive health", () =
   const rows = serveStatusView({ ...standalone, mode: "writer", draining: true, lineage: "00000000000000ab", epoch: 7, archive, uptime_ms: 90000000 });
   assert.deepEqual(rows.map((row) => row.label).slice(-3), ["Cloud archive", "Last archive checkpoint", "Last archive error"]);
   const view = Object.fromEntries(rows.map((row) => [row.label, row]));
-  assert.equal(view.Role.value, "Writer (accepts every write)");
+  assert.equal(view.Role.value, "Writer (configured role)");
+  assert.equal(view["Write behavior"].value, "Writer role; admission may be fenced");
   assert.equal(view.Draining.value, "Yes — shutting down, not ready for new traffic");
   assert.equal(view.Draining.level, "warn");
   assert.equal(view["Writer epoch"].value, "7");
@@ -131,7 +132,7 @@ test("serve status view shows reader freshness against its bound", () => {
   assert.deepEqual(rows.map((row) => row.label).slice(-3), ["Reader freshness", "Confirmed data age", "Applied position"]);
   let view = serveRows(reader);
   assert.equal(view.Role.value, "Reader (read-only replica)");
-  assert.equal(view["Accepts writes"].value, "No — read-only replica (writes get 403 reader_mode)");
+  assert.equal(view["Write behavior"].value, "Read-only role; writes are rejected");
   assert.equal(view["Reader freshness"].value, "Fresh");
   assert.equal(view["Reader freshness"].level, undefined);
   assert.equal(view["Confirmed data age"].value, "1.5 s (limit 5.0 s)");

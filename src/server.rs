@@ -2543,7 +2543,7 @@ async fn ready(State(service): State<Service>) -> Result<Json<Value>, ApiError> 
     }
     if let Some(trust) = &service.trust {
         // Fresh control state is what lets this backend authorize anything.
-        let body = trust.ready()?;
+        let body = ready_identity(&service, trust.ready()?);
         return service
             .run_read(move |db| {
                 db.get(0)?;
@@ -2551,12 +2551,23 @@ async fn ready(State(service): State<Service>) -> Result<Json<Value>, ApiError> 
             })
             .await;
     }
+    let body = ready_identity(&service, json!({"status": "ready"}));
     service
-        .run_read(|db| {
+        .run_read(move |db| {
             db.get(0)?;
-            Ok(Json(json!({"status": "ready"})))
+            Ok(Json(body))
         })
         .await
+}
+
+fn ready_identity(service: &Service, mut body: Value) -> Value {
+    if service.serve.mode == ServeMode::Writer
+        && let Some(epoch) = service.writer_fence.epoch()
+    {
+        body["mode"] = json!("writer");
+        body["epoch"] = json!(epoch);
+    }
+    body
 }
 
 async fn info(
