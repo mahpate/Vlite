@@ -895,7 +895,7 @@ fn analyze_with(config: Analyze, envelope: Option<f64>) -> Result<Value> {
         .map_err(|reason| reasons.push(reason))
         .ok();
         let slo_margin = policy.map_or(0., |p| p.slo_margin_ms);
-        let mut max_applied_error = 0f64;
+        let mut max_applied_error: Option<f64> = None;
         if report["terminated_early"] != false || report["interrupted"] != false {
             complete = false;
         }
@@ -963,7 +963,8 @@ fn analyze_with(config: Analyze, envelope: Option<f64>) -> Result<Value> {
                 let lifetime_end = stop - stop_error;
                 let (c0_reference, c0_error) = pair.mutator_reference(c0);
                 let sample_error = install_error.max(end_error);
-                max_applied_error = max_applied_error.max(sample_error);
+                max_applied_error =
+                    Some(max_applied_error.map_or(sample_error, |error| error.max(sample_error)));
                 let mut sample_ok = true;
                 if !pair.brackets(c0_reference - c0_error, end_reference + end_error) {
                     reasons.push("calibration_does_not_bracket_run");
@@ -1011,7 +1012,7 @@ fn analyze_with(config: Analyze, envelope: Option<f64>) -> Result<Value> {
         }
         let clock_calibration = json!({"status":if calibrated {"accepted"} else {"rejected"},
             "reasons":reasons,"observer":pair.as_ref().map(|p| p.observer.json()),
-            "max_applied_error_ms":pair.as_ref().map(|_| max_applied_error)});
+            "max_applied_error_ms":max_applied_error});
         reports.push(json!({"replica":replica.replica,"role":replica.role,"boot_id":report["boot_id"],
             "clock_calibrated":calibrated,"clock_calibration":clock_calibration,
             "samples":samples,"incomplete_or_censored":missing,
@@ -1442,6 +1443,7 @@ mod tests {
                 false
             );
             assert!(calibration["observer"]["continuity_envelope_ms"].is_null());
+            assert!(calibration["max_applied_error_ms"].is_null());
             assert_eq!(report["replicas"][replica]["clock_calibrated"], false);
             assert!(report["replicas"][replica]["successful_upper_ms"]["p99"].is_null());
             for sample in report["replicas"][replica]["samples"].as_array().unwrap() {

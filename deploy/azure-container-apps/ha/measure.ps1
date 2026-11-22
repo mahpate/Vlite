@@ -504,8 +504,11 @@ function Get-VLiteMeasEvidence([string[]]$ConsoleArguments, [string[]]$QueryArgu
             $Diagnostic.logAnalyticsEvidence = 'Verified'
             return @{ Bytes = $bytes; Lines = $lines }
         } catch {
-            $outcome, $queryReason = Get-VLiteMeasEvidenceOutcome $_.Exception
-            $Diagnostic.logAnalyticsEvidence = $outcome
+            $outcome, $reason = Get-VLiteMeasEvidenceOutcome $_.Exception
+            if ($Diagnostic.logAnalyticsEvidence -cne 'IntegrityFailure') {
+                $Diagnostic.logAnalyticsEvidence = $outcome
+                $queryReason = $reason
+            }
             if (Stop-OnFailedMarker $_.Exception) { throw }
             $lastFailure = $_.Exception.Message
             if ($attempt -lt $attempts - 1) { Start-Sleep -Seconds $script:VLiteMeasLogIntervalSecs }

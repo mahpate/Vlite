@@ -597,6 +597,72 @@ function Assert-VLiteMeasGatewayTime([long]$Deadline, [long]$NeededMs) {
     }
 }
 
+function Assert-VLiteMeasMutationReport($Report, [Collections.IDictionary]$Native) {
+    # Mutation checks can complete while run-wide timing remains explicitly incomplete.
+    $checks = $Report.mutation_and_ingress_checks_complete
+    if ($Report.complete -isnot [bool] -or ($Report.complete -and -not $checks) -or
+        $Report.requested -isnot [Collections.IDictionary] -or $Report.mutations -isnot [array]) {
+        throw (New-VLiteMeasFailure 'MutationEvidence' 'Mutation evidence has an invalid completion or run description.')
+    }
+    foreach ($name in 'mutations', 'seed', 'poll_interval_ms', 'observation_deadline_ms') {
+        $expected = [long]$Native[$name]
+        if (-not (Test-VLiteMeasInteger $Report.requested[$name] $expected $expected)) {
+            throw (New-VLiteMeasFailure 'MutationEvidence' 'Mutation evidence differs from the requested run.')
+        }
+    }
+    $labels = $Report.requested.labels
+    if ($labels -isnot [Collections.IDictionary] -or
+        ((@($labels.Keys) | Sort-Object) -join ',') -cne ((@($Native.requested.Keys) | Sort-Object) -join ',')) {
+        throw (New-VLiteMeasFailure 'MutationEvidence' 'Mutation evidence has mismatched profile labels.')
+    }
+    foreach ($name in $Native.requested.Keys) {
+        if ($labels[$name] -isnot [string] -or $labels[$name] -cne $Native.requested[$name]) {
+            throw (New-VLiteMeasFailure 'MutationEvidence' 'Mutation evidence has mismatched profile labels.')
+        }
+    }
+    $records = $Report.mutations
+    if ($records.Count -gt $Native.mutations -or ($checks -and $records.Count -ne $Native.mutations)) {
+        throw (New-VLiteMeasFailure 'MutationEvidence' 'Mutation evidence has an inconsistent record count.')
+    }
+    $previous = $null
+    $revocations = [int][Math]::Floor($Native.mutations / 2)
+    for ($i = 0; $i -lt $records.Count; $i++) {
+        $record = $records[$i]
+        $kind, $status = if ($i -lt $revocations) { 'revocation', 401 }
+            elseif (($i - $revocations) % 2 -eq 0) { 'suspension', 403 } else { 'resumption', 200 }
+        if ($record -isnot [Collections.IDictionary] -or
+            -not (Test-VLiteMeasInteger $record.index $i $i) -or $record.kind -cne $kind) {
+            throw (New-VLiteMeasFailure 'MutationEvidence' 'Mutation evidence has inconsistent record identities.')
+        }
+        if ($record.outcome -cne 'acknowledged') {
+            if ($checks -or $i -ne $records.Count - 1 -or $null -ne $record.generation -or
+                $record.outcome -cnotin @('unknown_do_not_retry', 'not_attempted_signing_read_failed')) {
+                throw (New-VLiteMeasFailure 'MutationEvidence' 'Mutation evidence has an invalid commit outcome.')
+            }
+            continue
+        }
+        $generation = $record.generation
+        if (($generation -isnot [int] -and $generation -isnot [long] -and $generation -isnot [ulong] -and $generation -isnot [bigint]) -or
+            $generation -lt 1 -or $generation -gt [ulong]::MaxValue -or
+            ($checks -and $null -ne $previous -and [decimal]$generation -ne [decimal]$previous + 1)) {
+            throw (New-VLiteMeasFailure 'MutationEvidence' 'Mutation evidence has an invalid acknowledged generation.')
+        }
+        $previous = $generation
+        $behavior = $record.behavior
+        if (($checks -or $null -ne $behavior) -and
+            ($behavior -isnot [Collections.IDictionary] -or
+                -not (Test-VLiteMeasInteger $behavior.affected_status $status $status) -or
+                $behavior.unaffected_semantic_match -isnot [bool] -or $behavior.unaffected_semantic_match -ne $true -or
+                $behavior.old_generation_envelope -cne 'envelope_stale' -or
+                $behavior.scope -cne 'ingress_behavior_only_not_replica_coverage')) {
+            throw (New-VLiteMeasFailure 'MutationEvidence' 'Mutation evidence has inconsistent ingress checks.')
+        }
+        if (-not (Test-VLiteMeasInteger $record.observation_deadline_ms $Native.observation_deadline_ms $Native.observation_deadline_ms)) {
+            throw (New-VLiteMeasFailure 'MutationEvidence' 'Mutation evidence has a mismatched observation deadline.')
+        }
+    }
+}
+
 # ---- Live orchestration. ----
 
 function Invoke-VLiteMeasGateway([hashtable]$Config) {
@@ -876,6 +942,9 @@ function Invoke-VLiteMeasGateway([hashtable]$Config) {
                 ($status -ceq 'Succeeded') -ne $checks -or $status -cnotin @('Succeeded', 'Failed')) {
                 throw (New-VLiteMeasFailure 'MutationEvidence' 'Mutation evidence is inconsistent with its job result.')
             }
+            $native = ((Find 'CreateDriverJob' 'driver').Manifest.properties.configuration.secrets |
+                Where-Object name -ceq 'cfg-native').value | ConvertFrom-Json -AsHashtable
+            Assert-VLiteMeasMutationReport $mutation $native
             if (-not $checks) { Add-Incomplete 'MutationChecksIncomplete' }
             Save-Evidence 'MEAS-005-mutations.json' $bytes 'mutations'
         } else {
@@ -962,7 +1031,7 @@ function Invoke-VLiteMeasGateway([hashtable]$Config) {
             # Replica-specific exec is not implemented, so cross-clock calibration stays unavailable; the driver
             # clock companion is job-local and never supplies offsets, so timing remains incomplete.
             Add-Incomplete 'ClockCalibrationUnavailable'
-            if ($summary.incompleteReasons.Contains('ObserverReportMissing')) {
+            if ($summary.incompleteReasons.Contains('ObserverReportMissing') -or $mutation.mutations.Count -eq 0) {
                 Add-Incomplete 'AnalysisNotRun'
             } else {
                 $stage = 'Analyze'

@@ -374,6 +374,8 @@ try {
         LogsMissingBegin = @('EvidenceUnavailable', 'MissingBegin', $null, 'Unavailable', 'Incomplete', $script:VLiteMeasLogAttempts)
         LogsIncomplete = @('EvidenceUnavailable', 'MissingEnd', $null, 'Incomplete', 'Incomplete', $script:VLiteMeasLogAttempts)
         BadChecksum = @('EvidenceIntegrity', 'ChecksumMismatch', $null, 'IntegrityFailure', 'IntegrityFailure', $script:VLiteMeasLogAttempts)
+        QueryIntegrityThenUnavailable = @('EvidenceIntegrity', 'ChecksumMismatch', $null, 'Unavailable', 'IntegrityFailure', $script:VLiteMeasLogAttempts)
+        QueryIntegrityThenIncomplete = @('EvidenceIntegrity', 'ChecksumMismatch', $null, 'Unavailable', 'IntegrityFailure', $script:VLiteMeasLogAttempts)
         BadEvidence = @('EvidenceRejected', 'PrivateIdentifier', $null, 'Verified', 'NotQueried', 0)
         BothFailures = @('EvidenceRejected', 'PrivateIdentifier', $null, 'Verified', 'NotQueried', 0)
         BadSchema = @('EvidenceRejected', 'Schema', $null, 'Verified', 'NotQueried', 0)
@@ -395,6 +397,7 @@ try {
         LogsMissingBegin = @('Succeeded', $null, $null, $null, $null, $late006, 'Incomplete', $null)
         LogsIncomplete = @('Succeeded', $false, $null, $null, $null, $late006, 'Incomplete', $null)
         BadChecksum = $verifiedLiveness006; BadEvidence = $verifiedLiveness006; BothFailures = $verifiedLiveness006
+        QueryIntegrityThenUnavailable = $verifiedLiveness006; QueryIntegrityThenIncomplete = $verifiedLiveness006
         BadSchema = $verifiedLiveness006; BadProvenance = $verifiedLiveness006
         NotSucceeded = @('Failed', $true, '6-ENCODE', 120, $null, 0, 'NotQueried', $null)
         LogsStartedNoResult = @('Succeeded', $true, '6-COLLECT', 120, $null, $late006, 'Incomplete', $null)
@@ -409,7 +412,8 @@ try {
         'ForeignGroupResponse', 'ForeignIdentity', 'ForeignStorageResponse', 'ForeignJobResponse', 'ForeignExecution',
         'MissingClient', 'BadEvidence', 'BadChecksum', 'CleanupFailure', 'BothFailures', 'WaitFailure', 'Dirty', 'WrongRevision',
         'JobFailedExit', 'JobFailedBadCode', 'JobFailedViaLogAnalytics', 'LogsUnavailable', 'LogsMissingBegin', 'LogsIncomplete',
-        'BadSchema', 'BadProvenance', 'NotSucceeded', 'LogsStartedNoResult', 'LogsSignal', 'LogsNeverStarted', 'LogsLateVerified') {
+        'BadSchema', 'BadProvenance', 'NotSucceeded', 'LogsStartedNoResult', 'LogsSignal', 'LogsNeverStarted', 'LogsLateVerified',
+        'QueryIntegrityThenUnavailable', 'QueryIntegrityThenIncomplete', 'QueryIntegrityThenVerified') {
         $script:case006 = $case006
         $script:sentinel006 = $sentinel006
         $script:delete006 = $false
@@ -480,6 +484,14 @@ try {
                 }
                 '^containerapp job logs show |^monitor log-analytics query ' {
                     $s006 = $script:sentinel006
+                    if ($script:case006 -like 'QueryIntegrityThen*') {
+                        if ($Raw) { throw "console unavailable $s006" }
+                        $script:query006++
+                        if ($script:query006 -gt 1 -and $script:case006 -eq 'QueryIntegrityThenUnavailable') {
+                            throw "query unavailable $s006"
+                        }
+                        if ($script:query006 -gt 1 -and $script:case006 -eq 'QueryIntegrityThenIncomplete') { return ,@() }
+                    }
                     if ($script:case006 -eq 'LogsUnavailable' -or ($Raw -and $script:case006 -in 'JobFailedViaLogAnalytics', 'LogsMissingBegin',
                             'LogsStartedNoResult', 'LogsSignal', 'LogsNeverStarted', 'LogsLateVerified')) {
                         throw "native failure $s006 client-secret-001 principal-001 workspace-001 never-print-this-subscription"
@@ -502,7 +514,7 @@ try {
                     if ($script:case006 -eq 'BadSchema') { $d006.schema = "unknown-$s006" }
                     if ($script:case006 -eq 'BadProvenance') { $d006.source.revision = 'b' * 40 }
                     $lines006 = @(New-TestLog ($d006 | ConvertTo-Json -Depth 10 -Compress))
-                    if ($script:case006 -eq 'BadChecksum') {
+                    if ($script:case006 -eq 'BadChecksum' -or ($script:case006 -like 'QueryIntegrityThen*' -and $script:query006 -eq 1)) {
                         $lines006 = @($lines006 | ForEach-Object { $_ -replace '(BEGIN )[a-f0-9]{64}', ('${1}' + ('0' * 64)) })
                     }
                     if ($script:case006 -eq 'LogsIncomplete') { $lines006 = @($lines006 | Where-Object { $_ -notmatch ' END ' }) + "raw $s006" }
@@ -530,7 +542,7 @@ try {
         $thrown006 = $null
         try { Invoke-VLiteMeas -Options $live006 *>&1 | ForEach-Object { $captured006.Add($_) } }
         catch { $thrown006 = $_.Exception.Message; $captured006.Add($thrown006) }
-        if ($case006 -eq 'Success') { Assert (-not $thrown006) 'MEAS-006 success case failed' }
+        if ($case006 -in 'Success', 'QueryIntegrityThenVerified') { Assert (-not $thrown006) 'MEAS-006 success case failed' }
         else { Assert ($thrown006 -match 'MEAS-006|already exists|Dirty working tree|CLEANUP FAILED|clean checkout HEAD') "Expected MEAS-006 refusal; received: $thrown006" }
         if ($case006 -in 'Dirty', 'WrongRevision') {
             Assert ($script:calls006.Count -eq 0) 'Invalid MEAS-006 provenance must fail before Azure'
