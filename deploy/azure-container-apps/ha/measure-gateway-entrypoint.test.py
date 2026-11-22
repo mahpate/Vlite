@@ -816,12 +816,16 @@ class RuntimeTests(unittest.TestCase):
             report_path = self.work / (role + "-report.json")
             self.put(report_path, self.report("vlite-meas005-observer/1", role=role, replica=role))
             replicas.append({"role": role, "replica": role, "report_file": str(report_path),
-                             "clock_offset_ms": None, "clock_uncertainty_ms": None})
+                             "calibration": None})
         config_path = self.work / "analyze.json"
         native_config = {"mode": "analyze", "mutation_evidence_file": str(mutation_path),
-                         "replicas": replicas, "fixed_inventory_confirmed": True}
+                         "replicas": replicas, "fixed_inventory_confirmed": True,
+                         "calibration": {"reference": "mutator", "mutator": None,
+                                         "min_samples": 8, "max_rtt_ms": 250,
+                                         "slo_margin_ms": 1000}}
         self.put(config_path, native_config)
         output = self.report("vlite-meas005/1", stage="analysis", complete=False,
+            mutator_clock_calibration={"status": "accepted", "reference": "mutator"},
             replicas=[{"role": "backend", "successful_upper_ms": {"count": 0, "p99": None},
                        "logical_feed_polls": None, "physical_blob_GETs": None,
                        "samples": [{"latency_ms": None, "censoring": "clock_unknown"}]}])
@@ -830,6 +834,11 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual((code, data), (2, output))
         self.assertEqual(process.call_args.args[0][-1], config_path)
         self.assertIsNone(json.loads(data)["replicas"][0]["successful_upper_ms"]["p99"])
+        legacy = copy.deepcopy(native_config)
+        legacy["replicas"][0]["clock_offset_ms"] = None
+        self.put(config_path, legacy)
+        self.fail(self.config_for("analyze", native_config=str(config_path)),
+                  "invalid_config").assert_not_called()
         native_config["replicas"].append(copy.deepcopy(replicas[0]))
         self.put(config_path, native_config)
         self.fail(self.config_for("analyze", native_config=str(config_path)),

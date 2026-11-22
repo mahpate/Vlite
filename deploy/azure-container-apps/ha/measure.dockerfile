@@ -40,8 +40,18 @@ RUN cargo test --locked --release --features server --lib --no-run --message-for
 RUN printf '%s\n' \
     '#!/bin/sh' \
     'set -eu' \
+    'case "${VLITE_MEAS_KIND:-MEAS-007}" in MEAS-007|MEAS-006|MEAS-002) started=${VLITE_MEAS_KIND:-MEAS-007} ;; *) started=UNKNOWN ;; esac' \
+    'printf "VLITE-MEAS START %s\n" "$started"' \
+    'hb=' \
+    'child=' \
+    'work=' \
+    'cleanup() { [ -z "$hb" ] || kill "$hb" 2>/dev/null || :; [ -z "$child" ] || kill "$child" 2>/dev/null || :; [ -z "$work" ] || rm -rf "$work"; }' \
+    'on_signal() { printf "VLITE-MEAS SIGNAL %s\n" "$1"; exit "$2"; }' \
+    'trap cleanup EXIT' \
+    'trap "on_signal 1 129" HUP' \
+    'trap "on_signal 2 130" INT' \
+    'trap "on_signal 15 143" TERM' \
     'work=$(mktemp -d)' \
-    'trap '\''rm -rf "$work"'\'' EXIT HUP INT TERM' \
     'case "${VLITE_MEAS_KIND:-MEAS-007}" in' \
     '  MEAS-007) set -- /app/target/release/examples/ha-reader-apply --resource-evidence ;;' \
     '  MEAS-006) set -- /bin/sh /usr/local/bin/meas006-collect.sh /usr/local/bin/vlite-meas006-tests ;;' \
@@ -59,7 +69,19 @@ RUN printf '%s\n' \
     '    ;;' \
     '  *) printf "VLITE-MEAS FAILED 2\n"; exit 2 ;;' \
     'esac' \
-    'if "$@" >"$work/out" 2>"$work/err"; then' \
+    'if [ "${VLITE_MEAS_KIND:-MEAS-007}" = MEAS-006 ]; then' \
+    '  printf "VLITE-MEAS STAGE 6-COLLECT\n"' \
+    '  ( s=0; while sleep 60 </dev/null >/dev/null 2>&1; do s=$((s + 60)); printf "VLITE-MEAS ALIVE %s\n" "$s"; done ) &' \
+    '  hb=$!' \
+    'fi' \
+    '"$@" >"$work/out" 2>"$work/err" &' \
+    'child=$!' \
+    'code=0' \
+    'wait "$child" || code=$?' \
+    'child=' \
+    'if [ -n "$hb" ]; then kill "$hb" 2>/dev/null || :; wait "$hb" 2>/dev/null || :; hb=; fi' \
+    'if [ "$code" -eq 0 ]; then' \
+    '  [ "${VLITE_MEAS_KIND:-MEAS-007}" != MEAS-006 ] || printf "VLITE-MEAS STAGE 6-ENCODE\n"' \
     '  gzip -n -c "$work/out" >"$work/out.gz"' \
     '  hash=$(sha256sum "$work/out.gz"); hash=${hash%% *}' \
     '  bytes=$(wc -c <"$work/out.gz" | tr -d "[:space:]")' \
@@ -67,7 +89,6 @@ RUN printf '%s\n' \
     '  printf "VLITE-MEAS BEGIN %s %s\n" "$hash" "$bytes"' \
     '  awk '\''{ printf "VLITE-MEAS %d %s\n", NR, $0 } END { printf "VLITE-MEAS END %d\n", NR }'\'' "$work/payload"' \
     'else' \
-    '  code=$?' \
     '  printf "VLITE-MEAS FAILED %s\n" "$code"' \
     '  if [ "${VLITE_MEAS_KIND:-MEAS-007}" != MEAS-006 ]; then tail -n 50 "$work/err" | sed "s/^/VLITE-MEAS-ERR /"; fi' \
     '  exit "$code"' \

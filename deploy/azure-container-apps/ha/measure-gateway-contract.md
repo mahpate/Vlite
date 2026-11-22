@@ -466,12 +466,115 @@ mutation report, its schema and its exit semantics are not altered.
 Run it in the mutator job/host and via **replica-specific exec** on each observer
 replica before and after each trial. It returns `vlite-meas005-clock/1` with
 remote UTC start/end and monotonic elapsed. Bracket remote exec locally.
-Derive conservative **observer UTC minus mutator UTC** offset intervals, including
-both command RTT brackets, their reference-host calibration, rounding, drift and
-any before/after disagreement. The implementation does not claim that ACA exec,
-NTP, or cross-host drift has a prevalidated precision. If no defensible bound is
-available, use nulls, preserve generation/floor coverage, and expect incomplete
-timing. Do not estimate host offset from load-balanced HTTP RTT.
+Cross-clock correction uses only the four-timestamp calibration below. The
+implementation does not claim that ACA exec, NTP, or cross-host drift has a
+prevalidated precision. If no defensible exchange is available, supply
+`"calibration": null`, preserve generation/floor coverage, and expect
+`clock_unknown` timing. Do not estimate host offset from load-balanced HTTP RTT.
+
+### Cross-clock calibration protocol (offline analyzer; advisory)
+
+Each calibrated **subject** clock (every observer replica, plus the mutator for
+a common reference) is calibrated against a **reference** clock by `N`
+four-timestamp exchanges taken **before** the measurement window (`pre`) and
+`N` **after** it (`post`): `t0` reference send, `t1` subject receive, `t2`
+subject reply, `t3` reference receive (Unix ms; `t0`/`t3` on the reference
+clock, `t1`/`t2` on the subject clock). The reference is either the mutator's
+own clock (`reference:"mutator"`) or a separate common host
+(`reference:"common"`, which then also requires a `mutator` bracket). Each
+exchange must address one exact replica, never a load-balanced endpoint.
+
+Per side, with `theta = subject - reference` and resolution `r`:
+
+- `net = (t3 - t0) - (t2 - t1)` (round trip minus subject processing)
+- `offset = ((t1 - t0) + (t2 - t3)) / 2` of the **minimum-net** exchange
+- `error = net / 2 + r` of that exchange, which bounds any forward/back
+  asymmetry: the truth lies in `[t2 - t3 - r, t1 - t0 + r]` for every exchange,
+  and an empty intersection is rejected
+- `at = (t0 + t3) / 2` of that exchange
+
+The two bracket endpoints bound only the *mean* offset change across the run.
+They cannot bound an interior clock excursion (a step or slew that returns to
+baseline before the post exchanges), so no drift rate is inferred from them
+and none is assumed. Correction therefore requires an independent run-wide
+continuity envelope `E` (ms): a measured bound on how far the offset may depart
+from its nearest endpoint at any interior instant. A subject reading at
+reference time `x` uses the nearest endpoint and
+`error_x = endpoint.error + E`, and the bracket is rejected when
+`|post.offset - pre.offset| > E + pre.error + post.error`. For a common
+reference, the observer-minus-mutator offset is
+`theta_observer - theta_mutator` and the errors add (the mutator bracket needs
+its own envelope). Every corrected observer timestamp is then widened by that
+error, the observed observer jump (<= 10 ms) and the declared 10 ms mutator
+drift allowance.
+
+**No current evidence source supplies `E`.** The analyzer therefore rejects
+every replica (and a common-reference mutator bracket) with
+`calibration_continuity_unbounded`: all samples are `clock_unknown` and the
+analysis is incomplete, not merely advisory. This holds even when the pre and
+post offsets are identical.
+
+Exchange evidence, policy and results:
+
+- `analyze.json` adds `calibration`:
+  `{reference, mutator, min_samples 1..=64, max_rtt_ms (0,60000], slo_margin_ms (0,60000], resolution_ms 0..=1000 (default 1)}`.
+  `mutator` is a bracket that is required if and only if the reference is
+  common.
+- Each replica entry adds `calibration`: `null` or
+  `{"pre":[{"t0_ms","t1_ms","t2_ms","t3_ms"}...],"post":[...]}`, with at most
+  64 exchanges per side.
+- Each output replica reports `clock_calibration`:
+  `{status: accepted|rejected, reasons, observer: {pre, post, elapsed_ms, endpoint_mean_rate_ms_per_s, endpoint_rate_bounds_interior: false, continuity_envelope_ms}, max_applied_error_ms}`.
+  `endpoint_mean_rate_ms_per_s` is diagnostic only; `continuity_envelope_ms`
+  is `null` until a measured envelope exists.
+  Each side shows `offset_ms`, `error_ms`, `at_reference_unix_ms`,
+  `min_rtt_net_ms` and `samples`.
+- The top level reports `mutator_clock_calibration`.
+- `uncertainty` reports `clock_calibration:"four_timestamp_min_rtt_exchanges_bracketing_run"`,
+  `drift_model:"endpoint_offsets_do_not_bound_interior_excursion"`,
+  `continuity_envelope:"required_none_available_rejects_clock_unknown"` and
+  `calibration_qualification:"advisory_unqualified_until_live_run"`.
+
+The analyzer fails closed. A rejected replica censors every sample as
+`clock_unknown`, is never counted in distributions, and makes the analysis
+incomplete. Static reason codes, sorted and deduplicated:
+
+- `calibration_missing`: no policy, a null replica calibration, or a common
+  reference without a mutator bracket.
+- `calibration_policy_invalid`: the policy is out of range, or a mutator
+  bracket is supplied for the mutator reference.
+- `calibration_exchange_invalid`: a non-finite value, `t3 < t0`, `t2 < t1`,
+  a negative net, or more than 64 exchanges.
+- `calibration_too_few_samples`: fewer than `min_samples` exchanges on a side.
+- `calibration_rtt_exceeds_bound`: the minimum net RTT on a side is above
+  `max_rtt_ms`.
+- `calibration_exchange_inconsistent`: the exchanges admit no common offset.
+- `calibration_does_not_bracket_run`: the pre exchanges do not all end before
+  the post exchanges start, or a command/observation does not lie between them.
+- `calibration_continuity_unbounded`: no finite, non-negative run-wide
+  continuity envelope is available (currently always).
+- `calibration_endpoints_exceed_continuity_envelope`: the endpoint offset
+  change exceeds the envelope plus both endpoint errors.
+- `calibration_uncertainty_exceeds_slo_margin`: a sample's applied error is
+  above `slo_margin_ms`.
+- `observer_clock_jump_exceeds_allowance`: the observer clock jump is missing,
+  or above 10 ms.
+
+**Live-run gap.** No exchange channel is implemented yet. The ACA driver is a
+Manual job with no exec path, and the gateway/backends are load balanced. The
+harness therefore still records `ClockCalibrationUnavailable` unconditionally
+and supplies null calibration, so MEAS-005 timing remains `clock_unknown`. A
+future live run must take timestamps through a per-replica channel and record
+them as the evidence above, and must also supply a measured run-wide
+continuity envelope (for example dense interior exchanges or another
+independent bound); the endpoint pair alone never qualifies. Candidates are a Blob-coordinated request/reply
+with the coordinator as the common reference, or an exec-bracketed
+`clock_sample` where the sample start/end give `t1`/`t2` and the harness exec
+bracket gives `t0`/`t3`. Until an approved live throwaway run captures real
+exchanges and the bounds are reviewed against the SLO, **MEAS-005 remains
+unqualified**. Offline synthetic tests show only that the math recovers known
+offsets within a supplied (hypothetical) envelope, and that identical endpoints
+with an unconstrained interior excursion are rejected.
 
 ### Job-local driver clock continuity (`VLITE-CLOCK`)
 
@@ -525,7 +628,7 @@ A complete receipt means only that the **sampled points** of one driver
 container's clocks were continuous and stayed within the declared allowance
 across this execution. It does not bound motion between samples, does not
 measure any observer clock, does not derive an observer-minus-mutator offset,
-and does not supply `clock_offset_ms`/`clock_uncertainty_ms` for analysis.
+and does not supply cross-clock `calibration` for analysis.
 
 After observers finish, collect all reports, after-inventory and calibration.
 `analyze.json`:
@@ -535,20 +638,26 @@ After observers finish, collect all reports, after-inventory and calibration.
   "mode": "analyze",
   "mutation_evidence_file": "/measurement/evidence/mutations.json",
   "fixed_inventory_confirmed": true,
+  "calibration": {
+    "reference": "mutator",
+    "mutator": null,
+    "min_samples": 8,
+    "max_rtt_ms": 250,
+    "slo_margin_ms": 1000,
+    "resolution_ms": 1
+  },
   "replicas": [
     {
       "replica": "ACTUAL-GATEWAY-REPLICA-NAME",
       "role": "gateway",
       "report_file": "/measurement/evidence/gateway-1.json",
-      "clock_offset_ms": null,
-      "clock_uncertainty_ms": null
+      "calibration": null
     },
     {
       "replica": "ACTUAL-WRITER-REPLICA-NAME",
       "role": "backend",
       "report_file": "/measurement/evidence/writer.json",
-      "clock_offset_ms": null,
-      "clock_uncertainty_ms": null
+      "calibration": null
     }
   ]
 }
@@ -562,9 +671,12 @@ and backend must be present. `fixed_inventory_confirmed:true` is the harness's
 explicit assertion that the list is exhaustive, not the analyzer discovering
 all replicas. Never set it from ingress sampling.
 
-Invoke `& $Control --config $AnalyzeConfig`. Calibration values must be finite,
-uncertainty 0..60000 ms. The analyzer additionally expands bounds by observed
-observer clock drift plus a declared 10 ms mutator drift allowance. A >10 ms
+The policy values shown are illustrative placeholders, not validated
+thresholds. Invoke `& $Control --config $AnalyzeConfig`. Exchange values must
+be finite (see the calibration protocol above). The analyzer additionally
+expands bounds by the calibration error plus the required run-wide continuity
+envelope (absent today, so timing is rejected `clock_unknown`) and a
+declared 10 ms mutator drift allowance. A >10 ms
 observer clock jump or command wall/monotonic mismatch makes timing incomplete.
 It requires observed lifetime to conservatively cover each whole command and
 the entire observation deadline (`command_end + observation_deadline_ms`),
@@ -573,9 +685,13 @@ backend floor >= target, and first
 observation by the declared deadline. A skipped target generation is not a
 successful sample. For calibrated brackets:
 
-`lower=max(0, last_old_ready_send - command_end - clock_uncertainty)`
+`lower=max(0, corrected(last_old_ready_send) - applied_error - command_end)`
 
-`upper=max(0, first_new_ready_receive - command_start + clock_uncertainty)`
+`upper=max(0, corrected(first_new_ready_receive) + applied_error - command_start)`
+
+Here `corrected(x) = x - observer_minus_mutator_offset(x)`. `applied_error` is
+the calibration error at `x`, plus the observer jump and the 10 ms mutator
+allowance. Observer lifetime start and end are shrunk by the same error.
 
 Analysis also requires non-null matching source provenance and the requested
 mutation count. Observation before command acknowledgement is legitimate, not negative latency.

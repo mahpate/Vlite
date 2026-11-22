@@ -91,6 +91,8 @@ struct Analyze {
     /// The harness must inventory the same app/revision/replica set before
     /// and after. False/null never establishes fixed-set coverage.
     fixed_inventory_confirmed: Option<bool>,
+    /// Cross-clock calibration policy; absent means every replica is rejected.
+    calibration: Option<CalibrationPolicy>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -98,9 +100,240 @@ struct Replica {
     replica: String,
     role: String,
     report_file: PathBuf,
-    /// Observer UTC minus mutator UTC, calibrated externally before/after.
-    clock_offset_ms: Option<f64>,
-    clock_uncertainty_ms: Option<f64>,
+    /// Exchanges against the policy reference clock bracketing the run.
+    calibration: Option<Bracket>,
+}
+fn resolution() -> f64 {
+    1.
+}
+const MAX_EXCHANGES: usize = 64;
+const MUTATOR_DRIFT_ALLOWANCE_MS: f64 = 10.;
+/// One NTP-style exchange: t0/t3 on the reference clock, t1/t2 on the subject
+/// clock (subject receive/reply). Values are floor-rounded to `resolution_ms`.
+#[derive(Deserialize, Clone, Copy)]
+#[serde(deny_unknown_fields)]
+struct Exchange {
+    t0_ms: f64,
+    t1_ms: f64,
+    t2_ms: f64,
+    t3_ms: f64,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Bracket {
+    pre: Vec<Exchange>,
+    post: Vec<Exchange>,
+}
+#[derive(Deserialize, Clone, Copy, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum Reference {
+    /// t0/t3 were read from the mutator's own clock.
+    Mutator,
+    /// t0/t3 were read from a common reference; `mutator` is then required.
+    Common,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CalibrationPolicy {
+    reference: Reference,
+    mutator: Option<Bracket>,
+    min_samples: usize,
+    /// Upper bound on the chosen exchange's RTT net of subject processing.
+    max_rtt_ms: f64,
+    /// Largest clock error any corrected latency bound may carry.
+    slo_margin_ms: f64,
+    #[serde(default = "resolution")]
+    resolution_ms: f64,
+}
+type Rejection = &'static str;
+#[derive(Clone, Copy)]
+struct Estimate {
+    /// Subject clock minus reference clock at `at` (reference ms).
+    offset: f64,
+    error: f64,
+    at: f64,
+    rtt: f64,
+    samples: usize,
+    start: f64,
+    end: f64,
+}
+fn policy_valid(policy: &CalibrationPolicy) -> bool {
+    (1..=MAX_EXCHANGES).contains(&policy.min_samples)
+        && policy.max_rtt_ms.is_finite()
+        && policy.max_rtt_ms > 0.
+        && policy.max_rtt_ms <= 60000.
+        && policy.slo_margin_ms.is_finite()
+        && policy.slo_margin_ms > 0.
+        && policy.slo_margin_ms <= 60000.
+        && (0.0..=1000.).contains(&policy.resolution_ms)
+}
+/// Causality bounds the offset to [t2-t3-r, t1-t0+r] under any delay asymmetry;
+/// the min-RTT exchange supplies the midpoint and half-width.
+fn estimate(
+    exchanges: &[Exchange],
+    policy: &CalibrationPolicy,
+) -> std::result::Result<Estimate, Rejection> {
+    let r = policy.resolution_ms;
+    let net = |e: &Exchange| (e.t3_ms - e.t0_ms) - (e.t2_ms - e.t1_ms);
+    if exchanges.len() > MAX_EXCHANGES
+        || exchanges.iter().any(|e| {
+            ![e.t0_ms, e.t1_ms, e.t2_ms, e.t3_ms]
+                .iter()
+                .all(|x| x.is_finite())
+                || e.t3_ms < e.t0_ms
+                || e.t2_ms < e.t1_ms
+                || net(e) < -2. * r
+        })
+    {
+        return Err("calibration_exchange_invalid");
+    }
+    if exchanges.len() < policy.min_samples {
+        return Err("calibration_too_few_samples");
+    }
+    let best = exchanges
+        .iter()
+        .min_by(|a, b| net(a).total_cmp(&net(b)))
+        .ok_or("calibration_too_few_samples")?;
+    if net(best) > policy.max_rtt_ms {
+        return Err("calibration_rtt_exceeds_bound");
+    }
+    let low = exchanges
+        .iter()
+        .map(|e| e.t2_ms - e.t3_ms - r)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let high = exchanges
+        .iter()
+        .map(|e| e.t1_ms - e.t0_ms + r)
+        .fold(f64::INFINITY, f64::min);
+    if low > high {
+        return Err("calibration_exchange_inconsistent");
+    }
+    Ok(Estimate {
+        offset: ((best.t1_ms - best.t0_ms) + (best.t2_ms - best.t3_ms)) / 2.,
+        error: net(best) / 2. + r,
+        at: (best.t0_ms + best.t3_ms) / 2.,
+        rtt: net(best),
+        samples: exchanges.len(),
+        start: exchanges
+            .iter()
+            .map(|e| e.t0_ms)
+            .fold(f64::INFINITY, f64::min),
+        end: exchanges
+            .iter()
+            .map(|e| e.t3_ms)
+            .fold(f64::NEG_INFINITY, f64::max),
+    })
+}
+struct Clock {
+    pre: Estimate,
+    post: Estimate,
+    /// Independent run-wide bound on |theta(t) - theta(endpoint)| for any t
+    /// between the brackets. Endpoint offsets alone bound only the mean
+    /// change: an interior excursion that returns to baseline is invisible to
+    /// them, so without this bound every interior offset is unknown.
+    envelope: Option<f64>,
+}
+fn bracket(bracket: &Bracket, policy: &CalibrationPolicy) -> std::result::Result<Clock, Rejection> {
+    let pre = estimate(&bracket.pre, policy)?;
+    let post = estimate(&bracket.post, policy)?;
+    if pre.end >= post.start {
+        return Err("calibration_does_not_bracket_run");
+    }
+    // No evidence source yet supplies a measured run-wide continuity envelope.
+    Ok(Clock {
+        pre,
+        post,
+        envelope: None,
+    })
+}
+impl Clock {
+    fn continuity(&self) -> std::result::Result<(), Rejection> {
+        let envelope = self
+            .envelope
+            .filter(|e| e.is_finite() && *e >= 0.)
+            .ok_or("calibration_continuity_unbounded")?;
+        if (self.post.offset - self.pre.offset).abs() > envelope + self.pre.error + self.post.error
+        {
+            return Err("calibration_endpoints_exceed_continuity_envelope");
+        }
+        Ok(())
+    }
+    /// Nearest calibration offset, widened by the run-wide envelope (no rate is
+    /// assumed). Unbounded continuity yields an infinite error.
+    fn at(&self, reference_ms: f64) -> (f64, f64) {
+        let near = if (reference_ms - self.pre.at).abs() <= (self.post.at - reference_ms).abs() {
+            &self.pre
+        } else {
+            &self.post
+        };
+        (
+            near.offset,
+            near.error + self.envelope.unwrap_or(f64::INFINITY),
+        )
+    }
+    fn json(&self) -> Value {
+        let side = |e: &Estimate| {
+            json!({"offset_ms":e.offset,"error_ms":e.error,"at_reference_unix_ms":e.at,
+                "min_rtt_net_ms":e.rtt,"samples":e.samples})
+        };
+        let elapsed = self.post.at - self.pre.at;
+        json!({"pre":side(&self.pre),"post":side(&self.post),"elapsed_ms":elapsed,
+            "endpoint_mean_rate_ms_per_s":(self.post.offset - self.pre.offset) / elapsed * 1000.,
+            "endpoint_rate_bounds_interior":false,
+            "continuity_envelope_ms":self.envelope})
+    }
+}
+/// Observer-minus-mutator correction for one replica.
+struct Pair<'a> {
+    observer: Clock,
+    mutator: Option<&'a Clock>,
+}
+impl Clock {
+    /// Offset and error for a reading taken on the subject clock. The envelope
+    /// holds over the whole run, so the uncertain reference time does not widen it.
+    fn subject(&self, subject_ms: f64) -> (f64, f64) {
+        self.at(subject_ms - self.pre.offset)
+    }
+}
+impl Pair<'_> {
+    /// (reference time, error) for a reading on the mutator clock.
+    fn mutator_reference(&self, mutator_ms: f64) -> (f64, f64) {
+        self.mutator.map_or((mutator_ms, 0.), |m| {
+            let (offset, error) = m.subject(mutator_ms);
+            (mutator_ms - offset, error)
+        })
+    }
+    /// (observer-minus-mutator offset, error, reference time) for an observer reading.
+    fn observer_at(&self, observer_ms: f64) -> (f64, f64, f64) {
+        let (offset, error) = self.observer.subject(observer_ms);
+        let reference = observer_ms - offset;
+        let (mutator, mutator_error) = self.mutator.map_or((0., 0.), |m| m.at(reference));
+        (offset - mutator, error + mutator_error, reference)
+    }
+    /// Whether a reference interval lies between every pre and post exchange.
+    fn brackets(&self, first: f64, last: f64) -> bool {
+        let mut pre_end = self.observer.pre.end;
+        let mut post_start = self.observer.post.start;
+        if let Some(m) = self.mutator {
+            pre_end = pre_end.max(m.pre.end);
+            post_start = post_start.min(m.post.start);
+        }
+        first >= pre_end && last <= post_start
+    }
+}
+fn mutator_clock(
+    policy: Option<&CalibrationPolicy>,
+) -> std::result::Result<Option<Clock>, Rejection> {
+    let policy = policy.ok_or("calibration_missing")?;
+    if !policy_valid(policy) {
+        return Err("calibration_policy_invalid");
+    }
+    match (policy.reference, &policy.mutator) {
+        (Reference::Mutator, None) => Ok(None),
+        (Reference::Mutator, Some(_)) => Err("calibration_policy_invalid"),
+        (Reference::Common, None) => Err("calibration_missing"),
+        (Reference::Common, Some(bracket_)) => bracket(bracket_, policy).map(Some),
+    }
 }
 #[derive(Deserialize)]
 struct Manifest {
@@ -565,6 +798,14 @@ fn observe(config: Observe) -> Result<Value> {
 }
 
 fn analyze(config: Analyze) -> Result<Value> {
+    // No accepted evidence source supplies a run-wide continuity envelope, so
+    // production analysis rejects every cross-clock correction.
+    analyze_with(config, None)
+}
+/// `envelope` is an independent run-wide continuity bound applied to every
+/// calibrated clock. It is not configurable: only tests inject one, to
+/// exercise the correction that a future measured envelope would enable.
+fn analyze_with(config: Analyze, envelope: Option<f64>) -> Result<Value> {
     if config.replicas.is_empty() || config.replicas.len() > 64 {
         return Err("replica_count_invalid".into());
     }
@@ -589,6 +830,21 @@ fn analyze(config: Analyze) -> Result<Value> {
         && config.fixed_inventory_confirmed == Some(true)
         && evidence["source"].is_object()
         && evidence["requested"]["mutations"].as_u64() == Some(mutations.len() as u64);
+    let policy = config.calibration.as_ref();
+    let mutator_clock = mutator_clock(policy).and_then(|clock| match clock {
+        Some(mut clock) => {
+            clock.envelope = envelope;
+            clock.continuity().map(|()| Some(clock))
+        }
+        None => Ok(None),
+    });
+    let mutator_calibration = match &mutator_clock {
+        Ok(Some(clock)) => {
+            json!({"status":"accepted","reference":"common","bracket":clock.json()})
+        }
+        Ok(None) => json!({"status":"accepted","reference":"mutator","bracket":null}),
+        Err(reason) => json!({"status":"rejected","reasons":[reason]}),
+    };
     for replica in &config.replicas {
         if !label(&replica.replica)
             || !identities.insert(replica.replica.clone())
@@ -614,12 +870,33 @@ fn analyze(config: Analyze) -> Result<Value> {
         if events.len() > 2048 {
             return Err("observer_events_invalid".into());
         }
-        let calibrated = matches!((replica.clock_offset_ms, replica.clock_uncertainty_ms),
-            (Some(offset), Some(error)) if offset.is_finite() && error.is_finite() && (0.0..=60000.).contains(&error))
-            && report["max_clock_jump_ms"]
-                .as_f64()
-                .is_some_and(|x| x <= 10.);
-        if !calibrated || report["terminated_early"] != false || report["interrupted"] != false {
+        let mut reasons: Vec<Rejection> = Vec::new();
+        let jump = report["max_clock_jump_ms"]
+            .as_f64()
+            .filter(|x| (0.0..=MUTATOR_DRIFT_ALLOWANCE_MS).contains(x));
+        if jump.is_none() {
+            reasons.push("observer_clock_jump_exceeds_allowance");
+        }
+        let pair = match (&mutator_clock, policy, replica.calibration.as_ref()) {
+            (Err(reason), _, _) => Err(*reason),
+            (Ok(_), Some(policy), Some(observer)) => bracket(observer, policy),
+            _ => Err("calibration_missing"),
+        }
+        .map(|mut observer| {
+            observer.envelope = envelope;
+            if let Err(reason) = observer.continuity() {
+                reasons.push(reason);
+            }
+            Pair {
+                observer,
+                mutator: mutator_clock.as_ref().ok().and_then(Option::as_ref),
+            }
+        })
+        .map_err(|reason| reasons.push(reason))
+        .ok();
+        let slo_margin = policy.map_or(0., |p| p.slo_margin_ms);
+        let mut max_applied_error = 0f64;
+        if report["terminated_early"] != false || report["interrupted"] != false {
             complete = false;
         }
         let mut samples = Vec::new();
@@ -646,42 +923,56 @@ fn analyze(config: Analyze) -> Result<Value> {
             let mut interval = Value::Null;
             let mut covered = false;
             if let Some(event) = observed
-                && calibrated
+                && let Some(pair) = pair.as_ref().filter(|_| reasons.is_empty())
+                && let Some(jump) = jump
             {
-                let offset = replica.clock_offset_ms.unwrap();
-                // Expand by both calibration and observed local clock drift.
-                let error = replica.clock_uncertainty_ms.unwrap()
-                    + report["max_clock_jump_ms"].as_f64().unwrap()
-                    + 10.;
+                // Observer reading -> mutator clock: (corrected, applied error, reference time).
+                let correct = |value: Option<f64>, code: &'static str| {
+                    let value = value.ok_or(code)?;
+                    let (offset, error, reference) = pair.observer_at(value);
+                    Ok::<_, &'static str>((
+                        value - offset,
+                        error + jump + MUTATOR_DRIFT_ALLOWANCE_MS,
+                        reference,
+                    ))
+                };
                 let c0 = commit["start_unix_ms"]
                     .as_f64()
                     .ok_or("commit_bracket_invalid")?;
                 let c1 = commit["end_unix_ms"]
                     .as_f64()
                     .ok_or("commit_bracket_invalid")?;
-                let o0 = event["install_lower_unix_ms"]
-                    .as_f64()
-                    .ok_or("observation_bracket_invalid")?
-                    - offset
-                    - error;
-                let o1 = event["end_unix_ms"]
-                    .as_f64()
-                    .ok_or("observation_bracket_invalid")?
-                    - offset
-                    + error;
+                let (install, install_error, _) = correct(
+                    event["install_lower_unix_ms"].as_f64(),
+                    "observation_bracket_invalid",
+                )?;
+                let (end, end_error, end_reference) =
+                    correct(event["end_unix_ms"].as_f64(), "observation_bracket_invalid")?;
+                let o0 = install - install_error;
+                let o1 = end + end_error;
                 let deadline = mutation["observation_deadline_ms"]
                     .as_f64()
                     .ok_or("observation_deadline_invalid")?;
-                let lifetime_start = report["start_unix_ms"]
-                    .as_f64()
-                    .ok_or("observer_lifetime_invalid")?
-                    - offset
-                    + error;
-                let lifetime_end = report["end_unix_ms"]
-                    .as_f64()
-                    .ok_or("observer_lifetime_invalid")?
-                    - offset
-                    - error;
+                let (start, start_error, _) = correct(
+                    report["start_unix_ms"].as_f64(),
+                    "observer_lifetime_invalid",
+                )?;
+                let lifetime_start = start + start_error;
+                let (stop, stop_error, _) =
+                    correct(report["end_unix_ms"].as_f64(), "observer_lifetime_invalid")?;
+                let lifetime_end = stop - stop_error;
+                let (c0_reference, c0_error) = pair.mutator_reference(c0);
+                let sample_error = install_error.max(end_error);
+                max_applied_error = max_applied_error.max(sample_error);
+                let mut sample_ok = true;
+                if !pair.brackets(c0_reference - c0_error, end_reference + end_error) {
+                    reasons.push("calibration_does_not_bracket_run");
+                    sample_ok = false;
+                }
+                if sample_error > slo_margin {
+                    reasons.push("calibration_uncertainty_exceeds_slo_margin");
+                    sample_ok = false;
+                }
                 let command_elapsed = commit["elapsed_ms"]
                     .as_f64()
                     .ok_or("commit_bracket_invalid")?;
@@ -694,7 +985,8 @@ fn analyze(config: Analyze) -> Result<Value> {
                     && lifetime_end >= c1 + deadline
                     && o1 <= c1 + deadline
                     && o1 >= c0
-                    && clock_consistent;
+                    && clock_consistent
+                    && sample_ok;
                 if covered {
                     let lower = (o0 - c1).max(0.);
                     let upper = (o1 - c0).max(0.);
@@ -709,10 +1001,20 @@ fn analyze(config: Analyze) -> Result<Value> {
             }
             samples.push(json!({"generation":generation,"generation_and_floor_observed":observed.is_some(),
                 "timing_complete":covered,"latency_ms":interval,
-                "censoring":if covered {"interval"} else if !calibrated {"clock_unknown"} else if observed.is_some() {"deadline_or_lifetime_incomplete"} else {"not_observed"}}));
+                "censoring":if covered {"interval"} else if !reasons.is_empty() {"clock_unknown"} else if observed.is_some() {"deadline_or_lifetime_incomplete"} else {"not_observed"}}));
         }
+        reasons.sort_unstable();
+        reasons.dedup();
+        let calibrated = reasons.is_empty();
+        if !calibrated {
+            complete = false;
+        }
+        let clock_calibration = json!({"status":if calibrated {"accepted"} else {"rejected"},
+            "reasons":reasons,"observer":pair.as_ref().map(|p| p.observer.json()),
+            "max_applied_error_ms":pair.as_ref().map(|_| max_applied_error)});
         reports.push(json!({"replica":replica.replica,"role":replica.role,"boot_id":report["boot_id"],
-            "clock_calibrated":calibrated,"samples":samples,"incomplete_or_censored":missing,
+            "clock_calibrated":calibrated,"clock_calibration":clock_calibration,
+            "samples":samples,"incomplete_or_censored":missing,
             "successful_lower_ms":summary(&lower_values),"successful_upper_ms":summary(&upper_values),
             "readiness_polls":report["polls"],"readiness_failures":report["readiness_failures"],
             "max_sample_start_gap_ms":report["max_sample_start_gap_ms"],
@@ -728,9 +1030,13 @@ fn analyze(config: Analyze) -> Result<Value> {
         "source":evidence["source"],"complete":complete,"requested":evidence["requested"],
         "limits":{"replicas":64,"mutations":100,"events_per_replica":2048},
         "fixed_inventory_confirmed":config.fixed_inventory_confirmed,
+        "mutator_clock_calibration":mutator_calibration,
         "uncertainty":{"timing":"interval_censored_command_bracket","physical_blob_GETs":null,
-            "logical_feed_polls":null,"clock_calibration":"supplied_external_bounds_not_inferred_from_ingress_RTT",
-            "mutator_clock_drift_allowance_ms":10,
+            "logical_feed_polls":null,"clock_calibration":"four_timestamp_min_rtt_exchanges_bracketing_run",
+            "drift_model":"endpoint_offsets_do_not_bound_interior_excursion",
+            "continuity_envelope":"required_none_available_rejects_clock_unknown",
+            "calibration_qualification":"advisory_unqualified_until_live_run",
+            "mutator_clock_drift_allowance_ms":MUTATOR_DRIFT_ALLOWANCE_MS,
             "install_time":"between_last_old_ready_sample_start_and_first_new_ready_sample_end",
             "coverage":"only_explicit_inventory_and_owned_process_observers",
             "qualification":"no_S_ctl_or_deployment_approval_inferred"},
@@ -821,30 +1127,366 @@ mod tests {
             let report_file = root.join(format!("{role}.json"));
             std::fs::write(&report_file,report.to_string()).unwrap();
             Replica { replica:role.into(), role:role.into(), report_file,
-                clock_offset_ms:calibrated.then_some(0.), clock_uncertainty_ms:calibrated.then_some(0.) }
+                calibration:calibrated.then(|| exact_bracket(0., 100_000.)) }
         }).collect();
         Analyze {
             mutation_evidence_file: file,
             replicas,
             fixed_inventory_confirmed: Some(true),
+            calibration: Some(policy(Reference::Mutator, 1)),
         }
+    }
+
+    fn policy(reference: Reference, min_samples: usize) -> CalibrationPolicy {
+        CalibrationPolicy {
+            reference,
+            mutator: None,
+            min_samples,
+            max_rtt_ms: 1000.,
+            slo_margin_ms: 60000.,
+            resolution_ms: 0.,
+        }
+    }
+    fn instant(at: f64, offset: f64) -> Exchange {
+        Exchange {
+            t0_ms: at,
+            t1_ms: at + offset,
+            t2_ms: at + offset,
+            t3_ms: at,
+        }
+    }
+    fn exact_bracket(pre: f64, post: f64) -> Bracket {
+        Bracket {
+            pre: vec![instant(pre, 0.)],
+            post: vec![instant(post, 0.)],
+        }
+    }
+    /// Subject clock = reference + 500 ms + 50 ppm; delays are asymmetric.
+    fn truth(reference_ms: f64) -> f64 {
+        500. + 50e-6 * reference_ms
+    }
+    fn exchange(at: f64, forward: f64, processing: f64, back: f64) -> Exchange {
+        let receive = at + forward;
+        let reply = receive + processing;
+        Exchange {
+            t0_ms: at,
+            t1_ms: receive + truth(receive),
+            t2_ms: reply + truth(reply),
+            t3_ms: reply + back,
+        }
+    }
+    fn synthetic(start: f64) -> Vec<Exchange> {
+        (0..8)
+            .map(|i| {
+                let i = i as f64;
+                exchange(start + i * 100., 1. + i, 3., 9. + 2. * i)
+            })
+            .collect()
+    }
+
+    /// Analysis with a hypothetical verified run-wide continuity envelope. No
+    /// production path supplies one; this exercises the correction logic only.
+    fn verified(config: Analyze, envelope: f64) -> Value {
+        analyze_with(config, Some(envelope)).unwrap()
+    }
+
+    #[test]
+    fn calibration_recovers_known_offset_within_supplied_envelope() {
+        let policy = policy(Reference::Mutator, 4);
+        let pre = synthetic(10_000.);
+        let mut clock = bracket(
+            &Bracket {
+                pre: pre.clone(),
+                post: synthetic(1_010_000.),
+            },
+            &policy,
+        )
+        .unwrap();
+        // The first exchange has the smallest net round trip (1 + 9 ms).
+        assert!((clock.pre.rtt - 10.).abs() < 1e-3);
+        assert_eq!(clock.pre.samples, 8);
+        for estimate in [clock.pre, clock.post] {
+            let truth = truth(estimate.at);
+            assert!((estimate.offset - truth).abs() <= estimate.error + 1e-9);
+            // Asymmetric delay biases the midpoint, but never past the bound.
+            assert!((estimate.offset - truth).abs() > 1.);
+        }
+        // Endpoints alone never bound the interior.
+        assert_eq!(clock.envelope, None);
+        assert_eq!(
+            clock.continuity().err(),
+            Some("calibration_continuity_unbounded")
+        );
+        assert!(clock.at(510_000.).1.is_infinite());
+        // The true offset moves 50 ms over the run; a smaller envelope contradicts
+        // the endpoints, an adequate one bounds every interior reading.
+        clock.envelope = Some(1.);
+        assert_eq!(
+            clock.continuity().err(),
+            Some("calibration_endpoints_exceed_continuity_envelope")
+        );
+        clock.envelope = Some(51.);
+        assert_eq!(clock.continuity(), Ok(()));
+        for reference in [10_000., 300_000., 510_000., 900_000., 1_010_500.] {
+            let (offset, error) = clock.at(reference);
+            assert!((offset - truth(reference)).abs() <= error + 1e-9);
+            let subject = reference + truth(reference);
+            let (offset, error) = clock.subject(subject);
+            assert!((offset - truth(reference)).abs() <= error + 1e-9);
+            assert!((subject - offset - reference).abs() <= error + 1e-9);
+        }
+        let mut worse = pre;
+        worse.rotate_left(3);
+        assert!((estimate(&worse, &policy).unwrap().rtt - 10.).abs() < 1e-3);
+    }
+
+    #[test]
+    fn calibration_rejections_use_static_reason_codes() {
+        let base = policy(Reference::Mutator, 2);
+        let one = [instant(0., 0.)];
+        assert_eq!(
+            estimate(&one, &base).err(),
+            Some("calibration_too_few_samples")
+        );
+        let slow = [exchange(0., 600., 1., 600.), exchange(10., 700., 1., 700.)];
+        assert_eq!(
+            estimate(&slow, &base).err(),
+            Some("calibration_rtt_exceeds_bound")
+        );
+        let backwards = [
+            instant(0., 0.),
+            Exchange {
+                t3_ms: -1.,
+                ..instant(0., 0.)
+            },
+        ];
+        assert_eq!(
+            estimate(&backwards, &base).err(),
+            Some("calibration_exchange_invalid")
+        );
+        let nan = [instant(0., 0.), instant(f64::NAN, 0.)];
+        assert_eq!(
+            estimate(&nan, &base).err(),
+            Some("calibration_exchange_invalid")
+        );
+        let disjoint = [instant(0., 0.), instant(10., 50.)];
+        assert_eq!(
+            estimate(&disjoint, &base).err(),
+            Some("calibration_exchange_inconsistent")
+        );
+        let overlapping = Bracket {
+            pre: vec![instant(0., 0.), instant(100., 0.)],
+            post: vec![instant(50., 0.), instant(200., 0.)],
+        };
+        assert_eq!(
+            bracket(&overlapping, &base).err(),
+            Some("calibration_does_not_bracket_run")
+        );
+        assert_eq!(mutator_clock(None).err(), Some("calibration_missing"));
+        let mut invalid = policy(Reference::Mutator, 1);
+        invalid.mutator = Some(exact_bracket(0., 1.));
+        assert_eq!(
+            mutator_clock(Some(&invalid)).err(),
+            Some("calibration_policy_invalid")
+        );
+        assert_eq!(
+            mutator_clock(Some(&policy(Reference::Mutator, 0))).err(),
+            Some("calibration_policy_invalid")
+        );
+        assert_eq!(
+            mutator_clock(Some(&policy(Reference::Common, 1))).err(),
+            Some("calibration_missing")
+        );
+    }
+
+    #[test]
+    fn common_reference_combines_observer_and_mutator_errors() {
+        let mut common = policy(Reference::Common, 1);
+        let wide = |offset: f64| Bracket {
+            pre: vec![Exchange {
+                t0_ms: 0.,
+                t1_ms: 2. + offset,
+                t2_ms: 2. + offset,
+                t3_ms: 4.,
+            }],
+            post: vec![Exchange {
+                t0_ms: 100_000.,
+                t1_ms: 100_002. + offset,
+                t2_ms: 100_002. + offset,
+                t3_ms: 100_004.,
+            }],
+        };
+        common.mutator = Some(wide(-300.));
+        let mut mutator = mutator_clock(Some(&common)).unwrap().unwrap();
+        mutator.envelope = Some(0.);
+        let mut observer = bracket(&wide(200.), &common).unwrap();
+        observer.envelope = Some(0.);
+        let pair = Pair {
+            observer,
+            mutator: Some(&mutator),
+        };
+        let (offset, error, reference) = pair.observer_at(202.);
+        assert!((offset - 500.).abs() < 1e-9);
+        assert!(error >= 4. && error < 4.1);
+        assert!((reference - 2.).abs() < 1e-9);
+        let (reference, error) = pair.mutator_reference(-298.);
+        assert!((reference - 2.).abs() < 1e-9 && (2.0..2.1).contains(&error));
+        assert!(pair.brackets(4., 100_000.) && !pair.brackets(3., 100_000.));
+    }
+
+    fn reasons(report: &Value, replica: usize) -> Vec<String> {
+        serde_json::from_value(report["replicas"][replica]["clock_calibration"]["reasons"].clone())
+            .unwrap()
+    }
+
+    #[test]
+    fn analysis_fails_closed_on_missing_unbracketed_or_drifting_calibration() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = analysis_fixture(root.path(), 1, true);
+        config.calibration = None;
+        let report = verified(config, 0.);
+        assert_eq!(report["complete"], false);
+        assert_eq!(report["mutator_clock_calibration"]["status"], "rejected");
+        assert_eq!(reasons(&report, 0), ["calibration_missing"]);
+        assert_eq!(
+            report["replicas"][0]["samples"][0]["censoring"],
+            "clock_unknown"
+        );
+
+        let mut config = analysis_fixture(root.path(), 1, true);
+        config.replicas[0].calibration = Some(exact_bracket(0., 1200.));
+        let report = verified(config, 0.);
+        assert_eq!(report["complete"], false);
+        assert_eq!(reasons(&report, 0), ["calibration_does_not_bracket_run"]);
+        assert!(report["replicas"][0]["samples"][2]["latency_ms"].is_null());
+        assert_eq!(reasons(&report, 1), Vec::<String>::new());
+
+        let mut config = analysis_fixture(root.path(), 1, true);
+        config.replicas[0].calibration = Some(Bracket {
+            pre: vec![instant(0., 0.)],
+            post: vec![instant(100_000., 2000.)],
+        });
+        let report = verified(config, 0.);
+        assert_eq!(report["complete"], false);
+        assert_eq!(
+            reasons(&report, 0),
+            ["calibration_endpoints_exceed_continuity_envelope"]
+        );
+        assert_eq!(report["replicas"][1]["clock_calibrated"], true);
+
+        let mut config = analysis_fixture(root.path(), 1, true);
+        config.calibration.as_mut().unwrap().slo_margin_ms = 50.;
+        let wide = |at: f64| Exchange {
+            t0_ms: at,
+            t1_ms: at + 50.,
+            t2_ms: at + 50.,
+            t3_ms: at + 100.,
+        };
+        config.replicas[0].calibration = Some(Bracket {
+            pre: vec![wide(0.)],
+            post: vec![wide(100_000.)],
+        });
+        let report = verified(config, 0.);
+        assert_eq!(report["complete"], false);
+        assert_eq!(
+            reasons(&report, 0),
+            ["calibration_uncertainty_exceeds_slo_margin"]
+        );
+        assert!(report["replicas"][0]["successful_upper_ms"]["p99"].is_null());
+        assert_eq!(report["replicas"][1]["clock_calibrated"], true);
+
+        let config = analysis_fixture(root.path(), 1, true);
+        let mut observer: Value = read(&config.replicas[0].report_file).unwrap();
+        observer["max_clock_jump_ms"] = json!(11.);
+        std::fs::write(&config.replicas[0].report_file, observer.to_string()).unwrap();
+        let report = verified(config, 0.);
+        assert_eq!(
+            reasons(&report, 0),
+            ["observer_clock_jump_exceeds_allowance"]
+        );
+    }
+
+    #[test]
+    fn identical_endpoints_cannot_bound_an_interior_excursion() {
+        // Both brackets read exactly zero offset, so the endpoint mean rate is
+        // zero. The observer clock may still have stepped (e.g. +2 s) between
+        // them and returned to baseline: nothing in the endpoints excludes it.
+        let root = tempfile::tempdir().unwrap();
+        let config = analysis_fixture(root.path(), 1, true);
+        assert!(
+            config
+                .replicas
+                .iter()
+                .all(|r| r.calibration.as_ref().is_some_and(|b| {
+                    b.pre[0].t1_ms == b.pre[0].t0_ms && b.post[0].t1_ms == b.post[0].t0_ms
+                }))
+        );
+        let report = analyze(config).unwrap();
+        assert_eq!(report["complete"], false);
+        assert_eq!(
+            report["uncertainty"]["calibration_qualification"],
+            "advisory_unqualified_until_live_run"
+        );
+        assert_eq!(report["mutator_clock_calibration"]["reference"], "mutator");
+        for replica in 0..2 {
+            let calibration = &report["replicas"][replica]["clock_calibration"];
+            assert_eq!(calibration["status"], "rejected");
+            assert_eq!(
+                reasons(&report, replica),
+                ["calibration_continuity_unbounded"]
+            );
+            assert_eq!(calibration["observer"]["post"]["error_ms"], 0.);
+            assert_eq!(calibration["observer"]["endpoint_mean_rate_ms_per_s"], 0.);
+            assert_eq!(
+                calibration["observer"]["endpoint_rate_bounds_interior"],
+                false
+            );
+            assert!(calibration["observer"]["continuity_envelope_ms"].is_null());
+            assert_eq!(report["replicas"][replica]["clock_calibrated"], false);
+            assert!(report["replicas"][replica]["successful_upper_ms"]["p99"].is_null());
+            for sample in report["replicas"][replica]["samples"].as_array().unwrap() {
+                assert_eq!(sample["censoring"], "clock_unknown");
+                assert!(sample["latency_ms"].is_null());
+            }
+        }
+    }
+
+    #[test]
+    fn analysis_reports_advisory_calibration_evidence_with_verified_envelope() {
+        let root = tempfile::tempdir().unwrap();
+        let report = verified(analysis_fixture(root.path(), 1, true), 0.);
+        assert_eq!(
+            report["uncertainty"]["calibration_qualification"],
+            "advisory_unqualified_until_live_run"
+        );
+        let calibration = &report["replicas"][0]["clock_calibration"];
+        assert_eq!(calibration["status"], "accepted");
+        assert_eq!(calibration["max_applied_error_ms"], 10.);
+        assert_eq!(calibration["observer"]["post"]["samples"], 1);
+        assert_eq!(calibration["observer"]["continuity_envelope_ms"], 0.);
+        // The envelope widens every corrected bound.
+        let widened = verified(analysis_fixture(root.path(), 1, true), 5.);
+        assert_eq!(
+            widened["replicas"][0]["clock_calibration"]["max_applied_error_ms"],
+            15.
+        );
     }
 
     #[test]
     fn analysis_requires_actual_floor_and_clocks_and_keeps_unknowns_null() {
         let root = tempfile::tempdir().unwrap();
-        let measured = analyze(analysis_fixture(root.path(), 1, true)).unwrap();
+        let measured = verified(analysis_fixture(root.path(), 1, true), 0.);
         assert_eq!(measured["complete"], true);
         assert_eq!(measured["replicas"][0]["successful_lower_ms"]["p99"], 60.);
         assert_eq!(measured["replicas"][0]["successful_upper_ms"]["p99"], 120.);
-        let missing_floor = analyze(analysis_fixture(root.path(), 0, true)).unwrap();
+        let missing_floor = verified(analysis_fixture(root.path(), 0, true), 0.);
         assert_eq!(missing_floor["complete"], false);
         assert_eq!(
             missing_floor["replicas"][1]["successful_upper_ms"]["count"],
             0
         );
         assert!(missing_floor["replicas"][1]["successful_upper_ms"]["p99"].is_null());
-        let no_clocks = analyze(analysis_fixture(root.path(), 1, false)).unwrap();
+        let no_clocks = verified(analysis_fixture(root.path(), 1, false), 0.);
         assert_eq!(no_clocks["complete"], false);
         assert_eq!(
             no_clocks["replicas"][0]["samples"][0]["generation_and_floor_observed"],
@@ -861,7 +1503,7 @@ mod tests {
             let mut observer: Value = read(&config.replicas[0].report_file).unwrap();
             observer["end_unix_ms"] = json!(end);
             std::fs::write(&config.replicas[0].report_file, observer.to_string()).unwrap();
-            let report = analyze(config).unwrap();
+            let report = verified(config, 0.);
             assert_eq!(report["complete"], complete);
             assert_eq!(report["replicas"][0]["successful_upper_ms"]["count"], count);
             if !complete {
@@ -878,7 +1520,7 @@ mod tests {
         evidence["mutations"][0]["commit"]["end_unix_ms"] = json!(1150);
         evidence["mutations"][0]["commit"]["elapsed_ms"] = json!(150.);
         std::fs::write(&config.mutation_evidence_file, evidence.to_string()).unwrap();
-        let report = analyze(config).unwrap();
+        let report = verified(config, 0.);
         assert_eq!(report["complete"], true);
         assert_eq!(
             report["replicas"][0]["samples"][0]["latency_ms"]["lower"],
@@ -890,11 +1532,11 @@ mod tests {
         );
         let mut config = analysis_fixture(root.path(), 1, true);
         config.fixed_inventory_confirmed = Some(false);
-        assert_eq!(analyze(config).unwrap()["complete"], false);
+        assert_eq!(verified(config, 0.)["complete"], false);
         let config = analysis_fixture(root.path(), 1, true);
         let mut observer: Value = read(&config.replicas[0].report_file).unwrap();
         observer["start_unix_ms"] = json!(1200);
         std::fs::write(&config.replicas[0].report_file, observer.to_string()).unwrap();
-        assert_eq!(analyze(config).unwrap()["complete"], false);
+        assert_eq!(verified(config, 0.)["complete"], false);
     }
 }

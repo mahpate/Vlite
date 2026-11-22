@@ -530,7 +530,8 @@ def validate_evidence(data, schema, config, code):
         "vlite-meas004/1": {"order", "request_class", "generation",
                             "authenticated_policy", "windows", "deltas"},
         "vlite-meas005/1": {"stage", "complete", "mutation_and_ingress_checks_complete",
-                            "mutations", "replicas", "fixed_inventory_confirmed"},
+                            "mutations", "replicas", "fixed_inventory_confirmed",
+                            "mutator_clock_calibration"},
         "vlite-meas005-observer/1": {"replica", "role", "app", "revision",
             "identity_source", "boot_id", "owns_serving_child", "terminated_early",
             "interrupted", "start_unix_ms", "end_unix_ms", "elapsed_ms", "polls",
@@ -1236,7 +1237,7 @@ class Runtime:
             program, schema = self.control, "vlite-meas005/1"
         else:
             object_keys(native, {"mode", "mutation_evidence_file", "replicas",
-                                "fixed_inventory_confirmed"},
+                                "fixed_inventory_confirmed", "calibration"},
                         {"mode", "mutation_evidence_file", "replicas"})
             require(native["mode"] == "analyze")
             evidence = read_bytes(native["mutation_evidence_file"], REPORT_LIMIT)
@@ -1247,8 +1248,7 @@ class Runtime:
             require(isinstance(replicas, list) and 1 <= len(replicas) <= 64)
             identities = set()
             for replica in replicas:
-                object_keys(replica, {"replica", "role", "report_file",
-                                     "clock_offset_ms", "clock_uncertainty_ms"},
+                object_keys(replica, {"replica", "role", "report_file", "calibration"},
                             {"replica", "role", "report_file"})
                 require(replica["replica"] not in identities, "duplicate_replica")
                 identities.add(replica["replica"])

@@ -201,13 +201,39 @@ workspace, subscription or resource identifier:
 | Field | Values |
 |---|---|
 | `category` | `JobFailed` (the job printed `VLITE-MEAS FAILED <code>`), `EvidenceUnavailable` (logs could not be read or were incomplete), `EvidenceIntegrity` (the framing, length, SHA-256, base64 or gzip/JSON check failed), `EvidenceRejected` (the document failed MEAS-006 validation), `JobNotSucceeded` (valid evidence, but the execution was not `Succeeded`), `Unclassified` |
-| `reason` | A fixed code. `FailedMarker`; `RetrievalFailed`, `ResponseShape`, `MissingBegin`, `MissingEnd` or `ChunkGap`; `DuplicateMarker`, `ChunkLength`, `Base64`, `LengthMismatch`, `ChecksumMismatch` or `PayloadDecode`; `Schema`, `PrivateIdentifier`, `Provenance`, `RequestedSettings`, `Metrics`, `Limits` or `Unclassified`; `ExecutionNotSucceeded` |
+| `reason` | A fixed code. `FailedMarker`; `RetrievalFailed`, `ResponseShape`, `MissingBegin`, `NeverStarted`, `StartedNoResult`, `MissingEnd` or `ChunkGap`; `DuplicateMarker`, `ChunkLength`, `Base64`, `LengthMismatch`, `ChecksumMismatch` or `PayloadDecode`; `Schema`, `PrivateIdentifier`, `Provenance`, `RequestedSettings`, `Metrics`, `Limits` or `Unclassified`; `ExecutionNotSucceeded` |
 | `jobExitCode` | The numeric exit code from the `FAILED` marker (0..255), otherwise null |
 | `consoleEvidence`, `logAnalyticsEvidence` | `NotQueried`, `Unavailable`, `Incomplete`, `IntegrityFailure`, `JobFailed` or `Verified`, for each source |
 | `logAnalyticsAttempts` | The number of Log Analytics queries made (0..72) |
+| `executionStatus` | The validated terminal execution status (as in the result), or null |
+| `jobStarted` | `true` if any source showed a wrapper liveness marker, `false` if lines were read but none was a marker, null if no line was read |
+| `lastStage` | The furthest `VLITE-MEAS STAGE` seen: `6-COLLECT` (collector started) or `6-ENCODE` (collector exited 0), otherwise null |
+| `lastAliveSecs` | The largest `VLITE-MEAS ALIVE <seconds>` heartbeat seen, otherwise null |
+| `signal` | The number from `VLITE-MEAS SIGNAL <n>` (the wrapper caught HUP, INT or TERM), otherwise null |
+| `lateQueryAttempts`, `lateLogAnalyticsEvidence`, `lateJobExitCode` | The diagnostic-only late re-query described below: attempts (0..3), outcome (`NotQueried`, then the `logAnalyticsEvidence` codes) and any `FAILED` exit code |
 
 These codes help an operator with diagnosis only. They are not measurement
 results and do not qualify the run.
+
+For `EvidenceUnavailable` / `MissingBegin`, `reason` is split once any line
+was read: `NeverStarted` means no wrapper marker was seen (the container did
+not start the wrapper, or the logs were not ingested, or the image predates
+the markers); `StartedNoResult` means the wrapper started but no complete
+payload was recovered. `MissingBegin` remains when no line at all was read.
+The wrapper prints `VLITE-MEAS START <kind>` at once, and for MEAS-006 prints
+`VLITE-MEAS STAGE 6-COLLECT` before the collector, `VLITE-MEAS ALIVE
+<seconds>` every 60 s while it runs and `VLITE-MEAS STAGE 6-ENCODE` after it
+exits 0. It prints `VLITE-MEAS SIGNAL <n>` if terminated by a catchable
+signal; an OOM kill or SIGKILL prints nothing further, so the last heartbeat
+bounds when the container died. Markers carry only fixed codes and numbers.
+They are ignored by payload framing; the collector stderr stays suppressed.
+
+When MEAS-006 fails at `ReadLogs` with `EvidenceUnavailable`, the harness
+re-queries Log Analytics up to three times, 120 s apart (about 6 minutes),
+before deleting the group, to tell ingestion lag from missing output. This
+re-query only updates the diagnostic fields above. Its payload is discarded
+and never qualifies the run, even if `Verified`. `-KeepOnFailure` remains
+refused for MEAS-006.
 
 **This is proposal evidence for fencing overhead, not an SLO, a stale-ack
 window, or HA qualification.**
@@ -366,6 +392,16 @@ exit-2 failure, this does not establish whether the collector ran or why the
 job produced no retrievable evidence. The old result `status` can be changed
 to `Failed` by evidence collection itself; the harness now preserves the
 validated `executionStatus` independently for future runs.
+
+Root cause is unproven. The old wrapper printed nothing until the collector
+exited and suppressed MEAS-006 stderr, so a killed container (2Gi OOM, the
+3600 s replica timeout, eviction or a start failure), a hung collector and
+late Log Analytics ingestion all looked the same. The twelve 10 s attempts
+(about 2 minutes) were also shorter than typical ACA ingestion delay; the
+harness now makes 72. The wrapper liveness markers, `jobStarted`,
+`lastStage`, `lastAliveSecs`, `signal`, `executionStatus` in the diagnostic
+and the late re-query are meant to separate these causes. MEAS-006 remains
+unqualified pending one approved throwaway rerun with a freshly built image.
 
 The deletion wait also expired. A separate read-only check confirmed the
 group absent at 2026-11-21T05:48:14Z; `cleanup-followup.json` binds that

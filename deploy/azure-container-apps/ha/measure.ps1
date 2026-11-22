@@ -36,6 +36,10 @@ $script:VLiteMeasRepository = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '.
 # of sleeps, plus query time, before it declares evidence unavailable. Unverified against a live run.
 $script:VLiteMeasLogAttempts = 72
 $script:VLiteMeasLogIntervalSecs = 10
+# MEAS-006 only: when evidence is unavailable, re-query Log Analytics for ~6 more minutes before the group is
+# deleted (deletion destroys the only logs). Diagnostic-only: a late payload never qualifies the run.
+$script:VLiteMeas006LateLogAttempts = 3
+$script:VLiteMeas006LateLogIntervalSecs = 120
 . (Join-Path $PSScriptRoot 'measure-gateway.ps1')
 
 function Assert-VLiteMeasName([string]$Name) {
@@ -428,6 +432,40 @@ function Get-VLiteMeasEvidenceOutcome($Failure) {
     return @($outcome, $reason)
 }
 
+function ConvertFrom-VLiteMeasQueryResult($Result) {
+    if ($Result -is [System.Collections.IDictionary] -and $Result.Contains('tables')) {
+        foreach ($table in $Result.tables) {
+            $column = @($table.columns.name).IndexOf('Log_s')
+            if ($column -lt 0) { throw (New-VLiteMeasFailure 'ResponseShape' 'Log Analytics response lacks Log_s.') }
+            foreach ($row in $table.rows) { [string]$row[$column] }
+        }
+    } else {
+        foreach ($row in $Result) {
+            if ($null -ne $row.Log_s) { [string]$row.Log_s }
+        }
+    }
+}
+
+function Update-VLiteMeasLiveness([string[]]$Lines, [Collections.IDictionary]$Diagnostic) {
+    # Only callers that opt in (by pre-seeding jobStarted) get liveness fields; only static codes and numbers are kept.
+    if (-not $Diagnostic.Contains('jobStarted') -or $Lines.Count -eq 0) { return }
+    if ($Diagnostic.jobStarted -ne $true) { $Diagnostic.jobStarted = $false }
+    $stageRank = @{ '6-COLLECT' = 1; '6-ENCODE' = 2 }
+    foreach ($line in $Lines) {
+        if ($line -cmatch 'VLITE-MEAS START (MEAS-00[0-9]|UNKNOWN)\s*$') { $Diagnostic.jobStarted = $true }
+        elseif ($line -cmatch 'VLITE-MEAS ALIVE ([0-9]{1,6})\s*$') {
+            $Diagnostic.jobStarted = $true
+            if ($null -eq $Diagnostic.lastAliveSecs -or [int]$Matches[1] -gt $Diagnostic.lastAliveSecs) { $Diagnostic.lastAliveSecs = [int]$Matches[1] }
+        } elseif ($line -cmatch 'VLITE-MEAS STAGE (6-COLLECT|6-ENCODE)\s*$') {
+            $Diagnostic.jobStarted = $true
+            if ($null -eq $Diagnostic.lastStage -or $stageRank[$Matches[1]] -gt $stageRank[$Diagnostic.lastStage]) { $Diagnostic.lastStage = $Matches[1] }
+        } elseif ($line -cmatch 'VLITE-MEAS SIGNAL ([0-9]{1,2})\s*$') {
+            $Diagnostic.jobStarted = $true
+            $Diagnostic.signal = [int]$Matches[1]
+        }
+    }
+}
+
 function Get-VLiteMeasEvidence([string[]]$ConsoleArguments, [string[]]$QueryArguments,
     [Collections.IDictionary]$Diagnostic = [ordered]@{}) {
     $lastFailure = 'Console evidence unavailable.'
@@ -444,6 +482,7 @@ function Get-VLiteMeasEvidence([string[]]$ConsoleArguments, [string[]]$QueryArgu
     $consoleReason = $null
     try {
         $lines = @(Invoke-VLiteMeasAz $ConsoleArguments -Raw)
+        Update-VLiteMeasLiveness $lines $Diagnostic
         $bytes = ConvertFrom-VLiteMeasLog $lines
         $Diagnostic.consoleEvidence = 'Verified'
         return @{ Bytes = $bytes; Lines = $lines }
@@ -459,20 +498,8 @@ function Get-VLiteMeasEvidence([string[]]$ConsoleArguments, [string[]]$QueryArgu
     for ($attempt = 0; $attempt -lt $attempts; $attempt++) {
         $Diagnostic.logAnalyticsAttempts = $attempt + 1
         try {
-            $result = Invoke-VLiteMeasAz $QueryArguments
-            $lines = @(
-                if ($result -is [System.Collections.IDictionary] -and $result.Contains('tables')) {
-                    foreach ($table in $result.tables) {
-                        $column = @($table.columns.name).IndexOf('Log_s')
-                        if ($column -lt 0) { throw (New-VLiteMeasFailure 'ResponseShape' 'Log Analytics response lacks Log_s.') }
-                        foreach ($row in $table.rows) { [string]$row[$column] }
-                    }
-                } else {
-                    foreach ($row in $result) {
-                        if ($null -ne $row.Log_s) { [string]$row.Log_s }
-                    }
-                }
-            )
+            $lines = @(ConvertFrom-VLiteMeasQueryResult (Invoke-VLiteMeasAz $QueryArguments))
+            Update-VLiteMeasLiveness $lines $Diagnostic
             $bytes = ConvertFrom-VLiteMeasLog $lines
             $Diagnostic.logAnalyticsEvidence = 'Verified'
             return @{ Bytes = $bytes; Lines = $lines }
@@ -493,6 +520,24 @@ function Get-VLiteMeasEvidence([string[]]$ConsoleArguments, [string[]]$QueryArgu
         $Diagnostic.category = 'EvidenceUnavailable'; $Diagnostic.reason = $queryReason
     }
     throw "Unable to collect verified measurement evidence: $lastFailure"
+}
+
+function Invoke-VLiteMeas006LateQuery([string[]]$QueryArguments, [Collections.IDictionary]$Diagnostic) {
+    # Diagnostic-only re-query before deletion; records static outcome codes and liveness, never a payload.
+    for ($attempt = 0; $attempt -lt $script:VLiteMeas006LateLogAttempts; $attempt++) {
+        Start-Sleep -Seconds $script:VLiteMeas006LateLogIntervalSecs
+        $Diagnostic.lateQueryAttempts = $attempt + 1
+        try {
+            $lines = @(ConvertFrom-VLiteMeasQueryResult (Invoke-VLiteMeasAz $QueryArguments))
+            Update-VLiteMeasLiveness $lines $Diagnostic
+            $null = ConvertFrom-VLiteMeasLog $lines
+            $Diagnostic.lateLogAnalyticsEvidence = 'Verified'
+        } catch {
+            $Diagnostic.lateLogAnalyticsEvidence = (Get-VLiteMeasEvidenceOutcome $_.Exception)[0]
+            if ($_.Exception.Data['VLiteMeasReason'] -ceq 'FailedMarker') { $Diagnostic.lateJobExitCode = $_.Exception.Data['VLiteMeasExitCode'] }
+        }
+        if ($Diagnostic.lateLogAnalyticsEvidence -cin 'Verified', 'JobFailed', 'IntegrityFailure') { return }
+    }
 }
 
 function Assert-VLiteMeas006Evidence([byte[]]$Bytes, [hashtable]$Config, [string[]]$PrivateValues) {
@@ -707,6 +752,12 @@ function Invoke-VLiteMeas([hashtable]$Options) {
                     # Static codes only; raw logs, native errors and exception text are never recorded.
                     $readDiagnostic = [ordered]@{ category = $null; reason = $null; jobExitCode = $null
                         consoleEvidence = 'NotQueried'; logAnalyticsEvidence = 'NotQueried'; logAnalyticsAttempts = 0 }
+                    if ($meas006) {
+                        foreach ($key in 'executionStatus', 'jobStarted', 'lastStage', 'lastAliveSecs', 'signal',
+                            'lateQueryAttempts', 'lateLogAnalyticsEvidence', 'lateJobExitCode') { $readDiagnostic[$key] = $null }
+                        $readDiagnostic.executionStatus = $current.executionStatus
+                        $readDiagnostic.lateQueryAttempts = 0; $readDiagnostic.lateLogAnalyticsEvidence = 'NotQueried'
+                    }
                     $evidence = Get-VLiteMeasEvidence (Arguments $step $execution) (Arguments $query $execution $workspace) $readDiagnostic
                     $begin = $evidence.Lines | Where-Object {
                         $_ -match 'VLITE-MEAS BEGIN ([a-f0-9]{64}) ([0-9]+)\s*$'
@@ -742,6 +793,13 @@ function Invoke-VLiteMeas([hashtable]$Options) {
         if ($null -ne $current -and $current.status -notin @('Failed', 'Stopped', 'Canceled', 'Cancelled')) { $current.status = 'Failed' }
         if ($meas006 -and $step.Step -eq 'ReadLogs' -and $null -ne $readDiagnostic) {
             if (-not $readDiagnostic.category) { $readDiagnostic.category = 'Unclassified' }
+            if ($readDiagnostic.category -ceq 'EvidenceUnavailable') {
+                try { Invoke-VLiteMeas006LateQuery (Arguments $query $execution $workspace) $readDiagnostic }
+                catch { $readDiagnostic.lateLogAnalyticsEvidence = 'Unavailable' }
+                if ($readDiagnostic.reason -ceq 'MissingBegin' -and $null -ne $readDiagnostic.jobStarted) {
+                    $readDiagnostic.reason = if ($readDiagnostic.jobStarted) { 'StartedNoResult' } else { 'NeverStarted' }
+                }
+            }
             $summary.failureDiagnostic = $readDiagnostic
         }
         if ($meas006) { throw "MEAS-006 failed at $($step.Step); diagnostics withheld." }
