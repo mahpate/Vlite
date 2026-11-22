@@ -1844,7 +1844,7 @@ def exercise_serve_status_mocked(browser):
           "archive": {"baseline_set": "set-1", "baseline_checkpoints": 2, "checkpoints": 3, "failures": 1, "last_checkpoint_sequence": 90,
                       "last_checkpoint_unix_ms": 1700000000000, "last_checkpoint_age_ms": 65000,
                       "last_error": {"code": "archive_upload_failed", "message": "blob store answered 503"}}})
-    expect_rows({"Role": "Writer (accepts every write)", "Draining": "Yes — shutting down, not ready for new traffic", "Uptime": "1 d 1 h",
+    expect_rows({"Role": "Writer (configured role)", "Write behavior": "Writer role; admission may be fenced", "Draining": "Yes — shutting down, not ready for new traffic", "Uptime": "1 d 1 h",
                  "Cloud archive": "3 verified checkpoints · 1 failed attempt · baseline set-1 (2 checkpoints)",
                  "Last archive checkpoint": "1 min 5 s ago · position 90",
                  "Last archive error": "archive_upload_failed: blob store answered 503"}, {"Draining": "warn", "Last archive error": "error"})
