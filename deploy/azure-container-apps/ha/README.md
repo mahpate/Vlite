@@ -241,3 +241,21 @@ pwsh -NoProfile -File deploy/azure-container-apps/test.ps1
 HA orchestration tests bypass the blocked verifier only inside the test process
 to exercise ordering/cleanup. They do not qualify an image, Azure storage,
 effective grants, platform manifests or live routing.
+
+## Managed tenant provisioning (offline contract only)
+
+The managed tenant-provisioning code (`src/server/tenant_provisioning/aca.rs`)
+does not use or replace this scaffold, and it has no production ARM adapter.
+Its fixtures describe the intended contract:
+
+- **Verified prerequisites** (for example the managed environment) are only
+  read. A missing one, one with another configuration or one owned by another
+  tenant is refused.
+- **Provisioned resources** carry the owner tag `vlite-tenant:{tenant}`. A
+  resource that exists before the first dispatch is refused, even with that
+  tag. There is no singleton adoption.
+- Cancellation deletes only the apps the operation created. Retirement removes
+  the route and stops the apps, keeping databases, archives and storage.
+- Both refusals here are unchanged pending protocol acceptance: the blocked HA
+  verifier, and the managed paths (`profile_unsupported`,
+  `projection_freshness_unproven`, `credential_view_unpublished`).

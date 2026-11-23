@@ -291,6 +291,11 @@ pub(super) struct Step {
     pub(super) attempt: String,
     pub(super) action: Action,
     pub(super) outcome: StepOutcome,
+    /// EPIC-004 ITEM-009: the cloud's asynchronous operation ID, persisted
+    /// as soon as a dispatch returns it, so a resumed actuator polls it
+    /// instead of dispatching again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) arm_operation: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -339,8 +344,13 @@ impl ActuatorStopped {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum TerminalOutcome {
-    Succeeded { receipt: Receipt },
+    Succeeded {
+        receipt: Receipt,
+    },
     Cancelled,
+    /// EPIC-004 ITEM-011: a `retire` operation removed the route and
+    /// stopped the tenant's apps. Data is always retained.
+    Retired,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -781,8 +791,45 @@ impl Operations {
                 attempt: attempt.to_owned(),
                 action: action.clone(),
                 outcome: StepOutcome::Uncertain {},
+                arm_operation: None,
             });
             Ok((Some(next), Decision::Dispatch(sequence)))
+        })
+    }
+
+    /// ITEM-009: persists the cloud operation ID a dispatch of step
+    /// `sequence` returned. Idempotent; a different ID is refused.
+    pub(super) fn observe(
+        &self,
+        operation_id: &str,
+        attempt: &str,
+        sequence: u64,
+        arm_operation: &str,
+    ) -> Result<(), ApiError> {
+        if !text(arm_operation) {
+            return Err(invalid("cloud operation ID is invalid"));
+        }
+        self.update_journal(operation_id, |journal| {
+            if journal.attempt.as_deref() != Some(attempt) {
+                return Err(not_owner());
+            }
+            let index = journal
+                .steps
+                .iter()
+                .position(|step| step.sequence == sequence)
+                .ok_or_else(step_conflict)?;
+            match journal.steps[index].arm_operation.as_deref() {
+                Some(same) if same == arm_operation => Ok((None, ())),
+                Some(_) => Err(step_conflict()),
+                None if journal.steps[index].outcome != StepOutcome::Uncertain {} => {
+                    Err(step_conflict())
+                }
+                None => {
+                    let mut next = journal.clone();
+                    next.steps[index].arm_operation = Some(arm_operation.to_owned());
+                    Ok((Some(next), ()))
+                }
+            }
         })
     }
 
@@ -867,6 +914,7 @@ impl Operations {
         let outcome = match snapshot.lifecycle(&intent.tenant_id).map(|e| &e.slot) {
             Some(Slot::Reserved {
                 operation_id,
+                kind,
                 receipt,
                 cancellation_requested,
                 ..
@@ -875,6 +923,13 @@ impl Operations {
                     receipt: receipt.clone(),
                 },
                 None if *cancellation_requested => TerminalOutcome::Cancelled,
+                // ITEM-011: a retirement ends once its route is removed;
+                // `aca::terminal_ready` below also requires the stop proof.
+                None if *kind == Kind::Retire
+                    && snapshot.record_for(&intent.tenant_id).is_none() =>
+                {
+                    TerminalOutcome::Retired
+                }
                 None => return Err(not_terminal()),
             },
             _ => return Err(not_terminal()),
@@ -892,6 +947,7 @@ impl Operations {
                     "a recorded side effect is unresolved; reconcile it before ending the operation",
                 ));
             }
+            aca::terminal_ready(journal, &outcome)?;
             if journal.closed {
                 return Ok((None, ()));
             }
@@ -1071,8 +1127,501 @@ pub(super) fn activate(
     receipt(&snapshot).ok_or_else(indeterminate)
 }
 
+// ---------------------------------------------------- ITEM-010 create
+
+use super::authority::{self, AuthorityError, AuthorityStore};
+use guard::Guards;
+
+/// The new tenant's database seed: its nonzero lineage and the digest of
+/// the seeded content. Recorded once; never overwritten or re-keyed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Seed {
+    pub(super) lineage: u64,
+    pub(super) digest: String,
+}
+
+const SEED: &str = "seed";
+
+fn seed_action(digest: &str) -> Action {
+    Action {
+        resource: SEED.to_owned(),
+        operation: SEED.to_owned(),
+        request_digest: digest.to_owned(),
+        destructive: false,
+    }
+}
+
+fn seed_observed(seed: &Seed) -> String {
+    format!("lineage:{:016x} sha256:{}", seed.lineage, seed.digest)
+}
+
+/// The settled seed of a journal, if any.
+pub(super) fn recorded_seed(journal: &Journal) -> Option<Seed> {
+    journal.steps.iter().find_map(|step| match &step.outcome {
+        StepOutcome::Settled { observed } if step.action.resource == SEED => {
+            let (lineage, digest) = observed.strip_prefix("lineage:")?.split_once(" sha256:")?;
+            Some(Seed {
+                lineage: u64::from_str_radix(lineage, 16).ok()?,
+                digest: digest.to_owned(),
+            })
+        }
+        _ => None,
+    })
+}
+
+fn seed_unrecorded() -> ApiError {
+    conflict(
+        "seed_unrecorded",
+        "the tenant's database seed is not recorded yet",
+    )
+}
+
+fn proof_refused() -> ApiError {
+    conflict(
+        "readiness_unproven",
+        "the writer, archive, authority or policy state does not prove readiness",
+    )
+}
+
+impl Operations {
+    /// ITEM-010: records the seed the operation produced. A different seed
+    /// for the same operation is refused: lineage is never re-keyed.
+    pub(super) fn record_seed(
+        &self,
+        operation_id: &str,
+        attempt: &str,
+        seed: &Seed,
+    ) -> Result<(), ApiError> {
+        if seed.lineage == 0 || !is_hex(&seed.digest, 64) {
+            return Err(invalid("seed is invalid"));
+        }
+        let journal = self.journal(operation_id)?;
+        if journal
+            .steps
+            .iter()
+            .any(|step| step.action.resource == SEED && step.action != seed_action(&seed.digest))
+            || recorded_seed(&journal).is_some_and(|recorded| recorded != *seed)
+        {
+            return Err(conflict(
+                "seed_mismatch",
+                "a different seed is already recorded for this operation",
+            ));
+        }
+        match self.record(operation_id, attempt, &seed_action(&seed.digest))? {
+            Decision::Dispatch(n) | Decision::Reconcile(n) => self
+                .settle(operation_id, attempt, n, &seed_observed(seed))
+                .map_err(|error| match error.code {
+                    "step_conflict" => conflict(
+                        "seed_mismatch",
+                        "a different seed is already recorded for this operation",
+                    ),
+                    _ => error,
+                }),
+            Decision::Settled(_) => Ok(()),
+        }
+    }
+}
+
+/// ITEM-010: holds the target's lifecycle guard, creates (or finds) its
+/// authority record bound to the recorded seed lineage, verifies it and
+/// enables the writer's claim. An existing record with any other
+/// identity is refused, never reset. The route stays absent, so no
+/// client write is admitted until [`activate_create`].
+pub(super) fn establish_authority(
+    ops: &Operations,
+    objects: &Objects,
+    authority: &AuthorityStore,
+    guards: &Guards,
+    intent: &Intent,
+    installation: &str,
+    scope: &str,
+) -> Result<authority::Observed, ApiError> {
+    if intent.kind() != Kind::Create {
+        return Err(invalid("only a create operation establishes authority"));
+    }
+    let (snapshot, _) = objects.read()?;
+    if !matches!(
+        holds(&snapshot, intent),
+        Some(Slot::Reserved {
+            cancellation_requested: false,
+            ..
+        })
+    ) || snapshot.record_for(&intent.tenant_id).is_some()
+    {
+        return Err(conflict(
+            "operation_not_provisionable",
+            "the operation does not hold an uncancelled reservation of an unrouted tenant",
+        ));
+    }
+    let seed = recorded_seed(&ops.journal(&intent.operation_id)?).ok_or_else(seed_unrecorded)?;
+    // A rerun after writes were enabled must not move the guard backwards.
+    let enabled = guards.current()?.is_some_and(|guard| {
+        guard.tenant == intent.tenant_id
+            && guard.operation_id == intent.operation_id
+            && guard.state == guard::State::WriteEnabled
+    });
+    if !enabled {
+        guards.hold(&intent.tenant_id, &intent.operation_id)?;
+    }
+    let lineage = format!("{:016x}", seed.lineage);
+    let observed = match authority.read() {
+        Ok(observed) => observed,
+        Err(AuthorityError::Missing) => match authority.create(installation, scope, &lineage) {
+            Err(AuthorityError::Exists) => authority.read()?,
+            created => created?,
+        },
+        Err(error) => return Err(error.into()),
+    };
+    let record = &observed.record;
+    if record.installation_id != installation
+        || record.scope_id != scope
+        || record.lineage != lineage
+    {
+        return Err(conflict(
+            "authority_identity_mismatch",
+            "the target's authority belongs to another installation, scope or lineage",
+        ));
+    }
+    guards.enable_writes(&intent.tenant_id, &intent.operation_id)?;
+    Ok(observed)
+}
+
+/// What the operation observed of the new writer and its policy.
+struct Readiness {
+    /// The archive manifest the writer's first checkpoint published.
+    archive_manifest_sha256: String,
+    /// The writer app, read back through the ARM port.
+    writer: aca::Observed,
+    policy_generation_required: u64,
+    policy_generation_observed: u64,
+}
+
+/// ITEM-010 readiness proof. Only [`prove`] creates one.
+#[derive(Debug)]
+pub(super) struct Proof {
+    digest: String,
+    epoch: u64,
+    lineage: u64,
+}
+
+/// ITEM-010: proves the writer serves the seeded lineage at the current
+/// epoch, its first archive checkpoint is the authority head, exactly one
+/// revision of the operation's writer is active and the required policy
+/// generation is applied. Without a qualified clock proof (OD-005) the
+/// freshness of the published state cannot be proven, so it refuses first.
+fn prove(
+    ops: &Operations,
+    authority: &AuthorityStore,
+    intent: &Intent,
+    readiness: &Readiness,
+    clock: Option<&projection::ClockProof>,
+) -> Result<Proof, ApiError> {
+    if clock.is_none() {
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "projection_freshness_unproven",
+            "no qualified clock proof covers the readiness observation",
+        ));
+    }
+    let seed = recorded_seed(&ops.journal(&intent.operation_id)?).ok_or_else(seed_unrecorded)?;
+    let record = authority.read()?.record;
+    let Some(head) = record.head.as_ref() else {
+        return Err(proof_refused());
+    };
+    let writer = &readiness.writer;
+    let active: Vec<_> = match &writer.revisions {
+        aca::Revisions::Complete(revisions) => revisions.iter().filter(|r| r.active).collect(),
+        _ => Vec::new(),
+    };
+    let owner = format!("{}:{}", aca::OWNER_TAG, intent.tenant_id);
+    if record.phase != authority::Phase::Serving
+        || record.writer_id.is_none()
+        || head.epoch != record.epoch
+        || record.lineage != format!("{:016x}", seed.lineage)
+        || head.manifest_sha256 != readiness.archive_manifest_sha256
+        || writer.owner.as_deref() != Some(owner.as_str())
+        || !writer.succeeded
+        || active.len() != 1
+        || readiness.policy_generation_required == 0
+        || readiness.policy_generation_observed < readiness.policy_generation_required
+    {
+        return Err(proof_refused());
+    }
+    let digest = sha256_hex(
+        format!(
+            "vlite.readiness/1\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
+            intent.operation_id,
+            record.lineage,
+            record.epoch,
+            record.revision,
+            head.manifest_sha256,
+            head.chain_sha256,
+            active[0].name,
+            readiness.policy_generation_observed,
+        )
+        .as_bytes(),
+    );
+    Ok(Proof {
+        digest,
+        epoch: record.epoch,
+        lineage: seed.lineage,
+    })
+}
+
+/// ITEM-010 credential delivery: one candidate at a time, replaced only
+/// before acknowledgement (the old one is recorded as revoked).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Delivery {
+    schema: String,
+    operation_id: String,
+    pub(super) generation: u64,
+    pub(super) credential_id: String,
+    pub(super) acknowledged: bool,
+    pub(super) revoked: Vec<String>,
+}
+
+/// An acknowledged delivery. Only [`Operations::delivered`] creates one.
+#[derive(Debug)]
+pub(super) struct Delivered {
+    operation_id: String,
+    credential_id: String,
+    revoked: Vec<String>,
+}
+
+const DELIVERY_SCHEMA: &str = "vlite.credential-delivery/1";
+
+fn credential_id_valid(id: &str) -> bool {
+    (1..=128).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+}
+
+impl Operations {
+    fn update_delivery<R>(
+        &self,
+        operation_id: &str,
+        mut change: impl FnMut(Option<&Delivery>) -> Result<(Option<Delivery>, R), ApiError>,
+    ) -> Result<R, ApiError> {
+        let name = self.name(operation_id, "delivery.json");
+        for _ in 0..CAS_ATTEMPTS {
+            let current = self.get(&name)?;
+            let delivery = match &current {
+                Some((bytes, _)) => {
+                    let delivery: Delivery = Self::parse(bytes)?;
+                    if delivery.schema != DELIVERY_SCHEMA || delivery.operation_id != operation_id {
+                        return Err(state_invalid());
+                    }
+                    Some(delivery)
+                }
+                None => None,
+            };
+            let (next, result) = change(delivery.as_ref())?;
+            let Some(next) = next else {
+                return Ok(result);
+            };
+            let bytes = serde_json::to_vec(&next).map_err(|_| state_invalid())?;
+            let cond = match &current {
+                Some((_, etag)) => Cond::Match(etag),
+                None => Cond::Create,
+            };
+            match self.store.put(&name, &bytes, cond) {
+                Ok(_) => return Ok(result),
+                Err(StoreError::Conflict) => continue,
+                Err(StoreError::Unknown(_)) => return Err(indeterminate()),
+                Err(_) => return Err(unavailable()),
+            }
+        }
+        Err(conflict(
+            "delivery_conflict",
+            "the credential delivery record is changing too often; retry later",
+        ))
+    }
+
+    pub(super) fn delivery(&self, operation_id: &str) -> Result<Option<Delivery>, ApiError> {
+        self.update_delivery(operation_id, |current| Ok((None, current.cloned())))
+    }
+
+    /// Records the first candidate credential (idempotent for the same ID).
+    pub(super) fn issue_candidate(
+        &self,
+        operation_id: &str,
+        credential_id: &str,
+    ) -> Result<Delivery, ApiError> {
+        if !credential_id_valid(credential_id) {
+            return Err(invalid("credential ID is invalid"));
+        }
+        self.update_delivery(operation_id, |current| match current {
+            Some(delivery) if delivery.credential_id == credential_id => {
+                Ok((None, delivery.clone()))
+            }
+            Some(_) => Err(conflict(
+                "delivery_candidate_exists",
+                "another candidate credential is already being delivered",
+            )),
+            None => {
+                let delivery = Delivery {
+                    schema: DELIVERY_SCHEMA.to_owned(),
+                    operation_id: operation_id.to_owned(),
+                    generation: 1,
+                    credential_id: credential_id.to_owned(),
+                    acknowledged: false,
+                    revoked: Vec::new(),
+                };
+                Ok((Some(delivery.clone()), delivery))
+            }
+        })
+    }
+
+    /// Replaces an unacknowledged candidate: the old ID is recorded as
+    /// revoked (activation verifies it is not live). Idempotent.
+    pub(super) fn replace_candidate(
+        &self,
+        operation_id: &str,
+        expected_generation: u64,
+        credential_id: &str,
+    ) -> Result<Delivery, ApiError> {
+        if !credential_id_valid(credential_id) {
+            return Err(invalid("credential ID is invalid"));
+        }
+        self.update_delivery(operation_id, |current| {
+            let Some(delivery) = current else {
+                return Err(conflict(
+                    "delivery_stale",
+                    "no candidate is being delivered",
+                ));
+            };
+            if delivery.generation == expected_generation + 1
+                && delivery.credential_id == credential_id
+            {
+                return Ok((None, delivery.clone()));
+            }
+            if delivery.generation != expected_generation
+                || delivery.acknowledged
+                || delivery.credential_id == credential_id
+                || delivery.revoked.iter().any(|id| id == credential_id)
+            {
+                return Err(conflict(
+                    "delivery_stale",
+                    "the candidate changed, was acknowledged or the ID was used before",
+                ));
+            }
+            let mut next = delivery.clone();
+            next.revoked.push(delivery.credential_id.clone());
+            next.credential_id = credential_id.to_owned();
+            next.generation += 1;
+            Ok((Some(next.clone()), next))
+        })
+    }
+
+    /// The administrator confirms receipt of exactly this candidate.
+    pub(super) fn acknowledge_delivery(
+        &self,
+        operation_id: &str,
+        generation: u64,
+        credential_id: &str,
+    ) -> Result<Delivery, ApiError> {
+        self.update_delivery(operation_id, |current| match current {
+            Some(delivery)
+                if delivery.generation == generation && delivery.credential_id == credential_id =>
+            {
+                if delivery.acknowledged {
+                    return Ok((None, delivery.clone()));
+                }
+                let mut next = delivery.clone();
+                next.acknowledged = true;
+                Ok((Some(next.clone()), next))
+            }
+            _ => Err(conflict(
+                "delivery_stale",
+                "the acknowledged candidate is not the current one",
+            )),
+        })
+    }
+
+    /// The acknowledged delivery, or 409 `credential_delivery_unacknowledged`.
+    pub(super) fn delivered(&self, operation_id: &str) -> Result<Delivered, ApiError> {
+        match self.delivery(operation_id)? {
+            Some(delivery) if delivery.acknowledged => Ok(Delivered {
+                operation_id: delivery.operation_id,
+                credential_id: delivery.credential_id,
+                revoked: delivery.revoked,
+            }),
+            _ => Err(conflict(
+                "credential_delivery_unacknowledged",
+                "the tenant credential's delivery is not acknowledged",
+            )),
+        }
+    }
+}
+
+/// ITEM-010: activates a create once readiness is proven and the credential
+/// delivery acknowledged: publishes the writer-only route (no reader is
+/// ever started here; EPIC-005), releases the guard and seals `succeeded`.
+/// The acknowledged credential must already be live in the published view,
+/// bound to the tenant and seeded lineage, and every replaced candidate
+/// revoked there; nothing here can publish it for a reserved tenant
+/// (OD-004), so production fails closed with `credential_view_unpublished`.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn activate_create(
+    ops: &Operations,
+    objects: &Objects,
+    guards: &Guards,
+    intent: &Intent,
+    route: &Route,
+    proof: &Proof,
+    delivered: &Delivered,
+    now: u64,
+) -> Result<Sealed, ApiError> {
+    if intent.kind() != Kind::Create || delivered.operation_id != intent.operation_id {
+        return Err(invalid("not this create operation's proof or delivery"));
+    }
+    if ops.terminal(&intent.operation_id)?.is_some() {
+        // A retry after the seal: report the same sealed outcome.
+        return ops.release(objects, intent, now);
+    }
+    let seed = recorded_seed(&ops.journal(&intent.operation_id)?).ok_or_else(seed_unrecorded)?;
+    if route.tenant != intent.tenant_id
+        || route.kind != control_state::Kind::Dedicated
+        || route.read_routing != control_state::ReadRouting::WriterOnly
+        || route.reader.is_some()
+        || route.authority_mode.is_some()
+        || route.lineage != seed.lineage
+        || route.lineage != proof.lineage
+        || route.epoch != Some(proof.epoch)
+    {
+        return Err(conflict(
+            "activation_route_invalid",
+            "the route is not the proven writer-only route of the seeded lineage and epoch",
+        ));
+    }
+    let (snapshot, _) = objects.read()?;
+    let tenant = Some(intent.tenant_id.clone());
+    if snapshot.live_credential(&delivered.credential_id, now) != Some((tenant, seed.lineage)) {
+        return Err(conflict(
+            "credential_view_unpublished",
+            "the acknowledged credential is not live in the published view for this tenant and lineage",
+        ));
+    }
+    if delivered
+        .revoked
+        .iter()
+        .any(|id| snapshot.live_credential(id, now).is_some())
+    {
+        return Err(conflict(
+            "candidate_revocation_unconfirmed",
+            "a replaced candidate credential is still live",
+        ));
+    }
+    activate(ops, objects, intent, route, &proof.digest, now)?;
+    guards.release(&intent.tenant_id, &intent.operation_id)?;
+    ops.release(objects, intent, now)
+}
+
 // ---------------------------------------------------------------- routes
 
+mod aca;
 mod admin;
 pub(super) mod guard;
 pub(super) mod projection;

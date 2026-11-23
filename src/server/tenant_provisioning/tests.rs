@@ -1249,3 +1249,1181 @@ fn reader_pins_share_authority_scope_so_reader_fleets_stay_denied() {
     assert_eq!(refusal.status, axum::http::StatusCode::CONFLICT);
     assert_eq!(refusal.code, "pin_scope_unproven");
 }
+
+// ------------------------------------------------------------- EPIC-004
+
+mod epic_004 {
+    //! design-tenant-provisioning EPIC-004 (ITEM-009..011) over a scripted
+    //! in-memory ARM port. Nothing is dispatched to any cloud.
+    use super::*;
+    use crate::server::authority::{AuthorityStore, HeadRef};
+    use aca::{
+        Arm, ArmError, BudgetApproval, Call, Demand, Desired, Driver, Observed, Ownership, Poll,
+        Preflighted, Profile, Qualification, QuotaProof, Revision, Revisions, Verb,
+    };
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    const ENV: &str =
+        "/subscriptions/s/resourceGroups/g/providers/Microsoft.App/managedEnvironments/e";
+    const STORE: &str =
+        "/subscriptions/s/resourceGroups/g/providers/Microsoft.Storage/storageAccounts/s";
+    const APP1: &str = "/subscriptions/s/resourceGroups/g/providers/Microsoft.App/containerApps/w1";
+    const TARGET: &str = "target/";
+    const LINEAGE: u64 = 0x77;
+
+    fn ours(tenant: &str) -> String {
+        format!("{}:{tenant}", aca::OWNER_TAG)
+    }
+
+    fn app(owner: &str, config: &str, active: &[bool]) -> Observed {
+        Observed {
+            owner: Some(owner.into()),
+            config_digest: config.into(),
+            succeeded: true,
+            revisions: Revisions::Complete(
+                active
+                    .iter()
+                    .enumerate()
+                    .map(|(i, active)| Revision {
+                        name: format!("r{i}"),
+                        active: *active,
+                        config_digest: config.into(),
+                    })
+                    .collect(),
+            ),
+        }
+    }
+
+    fn plain(owner: Option<&str>, config: &str) -> Observed {
+        Observed {
+            owner: owner.map(str::to_owned),
+            config_digest: config.into(),
+            succeeded: true,
+            revisions: Revisions::NotApplicable,
+        }
+    }
+
+    enum Begin {
+        /// Takes effect at once.
+        Apply,
+        /// Accepted; takes effect only when the test applies it.
+        Pending(&'static str),
+        /// Lost acknowledgement before any ID was returned.
+        Unknown,
+        Refused(&'static str),
+        /// Someone else's resource appears at the name.
+        Collide(Observed),
+    }
+
+    #[derive(Default)]
+    struct MockArm {
+        resources: Mutex<BTreeMap<String, Observed>>,
+        calls: Mutex<Vec<Call>>,
+        begins: Mutex<VecDeque<Begin>>,
+        polls: Mutex<VecDeque<Result<Poll, ArmError>>>,
+        polled: Mutex<Vec<String>>,
+        read_fails: Mutex<bool>,
+    }
+
+    impl MockArm {
+        fn effect(&self, call: &Call) {
+            let mut resources = self.resources.lock().unwrap();
+            match &call.verb {
+                Verb::Put { config_digest } => {
+                    let found = if call.resource.contains("/containerApps/") {
+                        app(&call.owner, config_digest, &[true])
+                    } else {
+                        plain(Some(&call.owner), config_digest)
+                    };
+                    resources.insert(call.resource.clone(), found);
+                }
+                Verb::Delete => {
+                    resources.remove(&call.resource);
+                }
+                Verb::Stop => {
+                    if let Some(Observed {
+                        revisions: Revisions::Complete(revisions),
+                        ..
+                    }) = resources.get_mut(&call.resource)
+                    {
+                        revisions.iter_mut().for_each(|r| r.active = false);
+                    }
+                }
+            }
+        }
+
+        fn put(&self, resource: &str, found: Observed) {
+            self.resources
+                .lock()
+                .unwrap()
+                .insert(resource.into(), found);
+        }
+
+        fn get(&self, resource: &str) -> Option<Observed> {
+            self.resources.lock().unwrap().get(resource).cloned()
+        }
+
+        fn script(&self, begin: Begin) {
+            self.begins.lock().unwrap().push_back(begin);
+        }
+
+        fn polls(&self, polls: impl IntoIterator<Item = Result<Poll, ArmError>>) {
+            self.polls.lock().unwrap().extend(polls);
+        }
+
+        fn calls(&self) -> Vec<Call> {
+            self.calls.lock().unwrap().clone()
+        }
+
+        fn count(&self, verb: &Verb) -> usize {
+            self.calls().iter().filter(|c| c.verb == *verb).count()
+        }
+    }
+
+    impl Arm for MockArm {
+        fn begin(&self, call: &Call) -> Result<String, ArmError> {
+            let mut calls = self.calls.lock().unwrap();
+            calls.push(call.clone());
+            let id = format!("arm-op-{}", calls.len());
+            drop(calls);
+            let next = self.begins.lock().unwrap().pop_front();
+            match next.unwrap_or(Begin::Apply) {
+                Begin::Apply => {
+                    self.effect(call);
+                    Ok(id)
+                }
+                Begin::Pending(id) => Ok(id.into()),
+                Begin::Unknown => Err(ArmError::Unknown),
+                Begin::Refused(code) => Err(ArmError::Refused(code.into())),
+                Begin::Collide(found) => {
+                    self.put(&call.resource, found);
+                    Ok(id)
+                }
+            }
+        }
+
+        fn poll(&self, operation: &str) -> Result<Poll, ArmError> {
+            self.polled.lock().unwrap().push(operation.into());
+            self.polls
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(Ok(Poll::Succeeded))
+        }
+
+        fn read(&self, resource: &str) -> Result<Option<Observed>, ArmError> {
+            if *self.read_fails.lock().unwrap() {
+                return Err(ArmError::Unknown);
+            }
+            Ok(self.get(resource))
+        }
+    }
+
+    fn desired(resource: &str, app: bool, ownership: Ownership) -> Desired {
+        Desired {
+            resource: resource.into(),
+            config_digest: sha(resource.as_bytes()),
+            app,
+            ownership,
+        }
+    }
+
+    const PEAK: Demand = Demand {
+        apps: 2,
+        cores_milli: 2000,
+        memory_mib: 4096,
+    };
+
+    fn ready(resources: Vec<Desired>) -> Preflighted {
+        aca::preflight(
+            Profile::for_test(resources, PEAK),
+            Some(&Qualification::for_test()),
+            Some(&QuotaProof::for_test(PEAK)),
+            Some(&BudgetApproval::for_test()),
+        )
+        .unwrap()
+    }
+
+    /// ENV pre-exists (verified); STORE and APP1 are created.
+    fn standard() -> Preflighted {
+        ready(vec![
+            desired(ENV, false, Ownership::Verified),
+            desired(STORE, false, Ownership::Owned),
+            desired(APP1, true, Ownership::Owned),
+        ])
+    }
+
+    fn app_only() -> Preflighted {
+        ready(vec![desired(APP1, true, Ownership::Owned)])
+    }
+
+    fn arm_with_env() -> MockArm {
+        let arm = MockArm::default();
+        arm.put(ENV, plain(None, &sha(ENV.as_bytes())));
+        arm
+    }
+
+    fn reserved(w: &World) -> Intent {
+        let intent = w.intent_for_t(KEY);
+        reserve(&w.ops, &w.objects, &intent, NOW).unwrap();
+        intent
+    }
+
+    fn driver<'a>(w: &'a World, arm: &'a MockArm, intent: &'a Intent) -> Driver<'a> {
+        Driver::new(&w.ops, arm, intent, "worker-a", None, 3).unwrap()
+    }
+
+    fn steps(w: &World, intent: &Intent) -> Vec<(String, String, StepOutcome)> {
+        w.ops
+            .journal(&intent.operation_id)
+            .unwrap()
+            .steps
+            .into_iter()
+            .map(|s| (s.action.resource, s.action.operation, s.outcome))
+            .collect()
+    }
+
+    fn settled(observed: &str) -> StepOutcome {
+        StepOutcome::Settled {
+            observed: observed.into(),
+        }
+    }
+
+    fn running(polls: usize) -> Vec<Result<Poll, ArmError>> {
+        vec![Ok(Poll::Running); polls]
+    }
+
+    // --------------------------------------------------------- ITEM-009
+
+    #[test]
+    fn effects_need_the_actuator_claim_before_any_arm_call() {
+        let w = world();
+        let arm = arm_with_env();
+        let intent = reserved(&w);
+        w.ops.claim(&intent.operation_id, "worker-a", None).unwrap();
+        let refused = Driver::new(&w.ops, &arm, &intent, "worker-b", None, 3);
+        assert_eq!(refused.err().unwrap().code, "actuator_fence_unproven");
+        assert!(arm.calls().is_empty());
+        assert!(steps(&w, &intent).is_empty());
+    }
+
+    #[test]
+    fn owned_resources_are_created_once_and_settled_from_exact_readback() {
+        let w = world();
+        let arm = arm_with_env();
+        let intent = reserved(&w);
+        let d = driver(&w, &arm, &intent);
+        d.provision(&w.objects, &standard()).unwrap();
+        assert_eq!(
+            steps(&w, &intent),
+            [
+                (ENV.into(), "verify".into(), settled("verified")),
+                (STORE.into(), "create".into(), settled("created")),
+                (APP1.into(), "create-app".into(), settled("created")),
+            ]
+        );
+        let journal = w.ops.journal(&intent.operation_id).unwrap();
+        assert_eq!(journal.steps[0].arm_operation, None);
+        assert_eq!(journal.steps[2].arm_operation.as_deref(), Some("arm-op-2"));
+        let calls = arm.calls();
+        assert_eq!(calls.len(), 2, "the verified prerequisite is only read");
+        assert!(
+            calls
+                .iter()
+                .all(|c| c.owner == ours(T) && matches!(c.verb, Verb::Put { .. }))
+        );
+        // An identical rerun dispatches nothing.
+        d.provision(&w.objects, &standard()).unwrap();
+        assert_eq!(arm.calls().len(), 2);
+        // No route, reader or client admission follows from provisioning.
+        assert!(w.snapshot().record_for(T).is_none());
+    }
+
+    #[test]
+    fn unknown_outcome_is_reconciled_through_the_persisted_operation_never_redispatched() {
+        let w = world();
+        let arm = arm_with_env();
+        let intent = reserved(&w);
+        let d = driver(&w, &arm, &intent);
+        arm.script(Begin::Pending("arm-op-slow"));
+        arm.polls([Ok(Poll::Running), Err(ArmError::Unknown), Ok(Poll::Running)]);
+        let error = d.provision(&w.objects, &app_only()).unwrap_err();
+        assert_eq!(
+            (error.status, error.code),
+            (StatusCode::SERVICE_UNAVAILABLE, "cloud_outcome_unknown")
+        );
+        let journal = w.ops.journal(&intent.operation_id).unwrap();
+        assert_eq!(journal.steps[0].outcome, StepOutcome::Uncertain {});
+        assert_eq!(
+            journal.steps[0].arm_operation.as_deref(),
+            Some("arm-op-slow")
+        );
+        // Even a proven takeover resumes by polling, not by a new PUT.
+        let stopped = ActuatorStopped::proven_for_test("worker-a");
+        let resumed = Driver::new(&w.ops, &arm, &intent, "worker-b", Some(&stopped), 3).unwrap();
+        arm.effect(&arm.calls()[0]);
+        resumed.provision(&w.objects, &app_only()).unwrap();
+        assert_eq!(arm.calls().len(), 1);
+        assert_eq!(arm.polled.lock().unwrap().last().unwrap(), "arm-op-slow");
+        assert_eq!(steps(&w, &intent)[0].2, settled("created"));
+    }
+
+    #[test]
+    fn lost_dispatch_without_an_operation_id_stays_unknown() {
+        let w = world();
+        let arm = arm_with_env();
+        let intent = reserved(&w);
+        let d = driver(&w, &arm, &intent);
+        arm.script(Begin::Unknown);
+        for _ in 0..2 {
+            assert_eq!(
+                d.provision(&w.objects, &app_only()).unwrap_err().code,
+                "cloud_outcome_unknown"
+            );
+        }
+        // Absence is no proof a lost PUT will never land: no redispatch.
+        assert_eq!(arm.calls().len(), 1);
+        assert_eq!(steps(&w, &intent)[0].2, StepOutcome::Uncertain {});
+    }
+
+    #[test]
+    fn pre_existing_resources_are_refused_never_adopted() {
+        for owner in ["unmanaged".to_owned(), ours(T), ours(OTHER)] {
+            let w = world();
+            let arm = arm_with_env();
+            arm.put(APP1, app(&owner, &sha(APP1.as_bytes()), &[true]));
+            let intent = reserved(&w);
+            let d = driver(&w, &arm, &intent);
+            assert_eq!(
+                d.provision(&w.objects, &app_only()).unwrap_err().code,
+                "resource_ownership_conflict"
+            );
+            assert!(arm.calls().is_empty());
+            assert!(steps(&w, &intent).is_empty());
+        }
+    }
+
+    #[test]
+    fn collision_with_a_foreign_resource_settles_conflict() {
+        let w = world();
+        let arm = arm_with_env();
+        let intent = reserved(&w);
+        let d = driver(&w, &arm, &intent);
+        arm.script(Begin::Collide(app(
+            &ours(OTHER),
+            &sha(APP1.as_bytes()),
+            &[true],
+        )));
+        assert_eq!(
+            d.provision(&w.objects, &app_only()).unwrap_err().code,
+            "resource_ownership_conflict"
+        );
+        assert_eq!(steps(&w, &intent)[0].2, settled("conflict"));
+        assert_eq!(
+            d.provision(&w.objects, &app_only()).unwrap_err().code,
+            "resource_ownership_conflict"
+        );
+        assert_eq!(arm.calls().len(), 1);
+    }
+
+    #[test]
+    fn revision_overlap_and_incomplete_inventory_are_never_proof() {
+        let w = world();
+        let arm = arm_with_env();
+        let intent = reserved(&w);
+        let d = driver(&w, &arm, &intent);
+        let config = sha(APP1.as_bytes());
+        arm.script(Begin::Collide(app(&ours(T), &config, &[true, true])));
+        assert_eq!(
+            d.provision(&w.objects, &app_only()).unwrap_err().code,
+            "revision_overlap"
+        );
+        let mut partial = app(&ours(T), &config, &[true]);
+        partial.revisions = Revisions::Incomplete;
+        arm.put(APP1, partial);
+        assert_eq!(
+            d.provision(&w.objects, &app_only()).unwrap_err().code,
+            "revision_inventory_incomplete"
+        );
+        // The active revision runs another configuration.
+        let mut drifted = app(&ours(T), &sha(b"other"), &[true]);
+        drifted.config_digest.clone_from(&config);
+        arm.put(APP1, drifted);
+        assert_eq!(
+            d.provision(&w.objects, &app_only()).unwrap_err().code,
+            "cloud_outcome_unknown"
+        );
+        assert_eq!(steps(&w, &intent)[0].2, StepOutcome::Uncertain {});
+        arm.put(APP1, app(&ours(T), &config, &[false, true]));
+        d.provision(&w.objects, &app_only()).unwrap();
+        assert_eq!(arm.calls().len(), 1);
+    }
+
+    #[test]
+    fn refused_create_with_absent_readback_settles_failed() {
+        let w = world();
+        let arm = arm_with_env();
+        let intent = reserved(&w);
+        let d = driver(&w, &arm, &intent);
+        let profile = ready(vec![desired(STORE, false, Ownership::Owned)]);
+        arm.script(Begin::Refused("Quota Exceeded!"));
+        assert_eq!(
+            d.provision(&w.objects, &profile).unwrap_err().code,
+            "cloud_action_failed"
+        );
+        assert_eq!(steps(&w, &intent)[0].2, settled("failed:QuotaExceeded"));
+        // A settled failure is final for this operation: no retry dispatch.
+        assert_eq!(
+            d.provision(&w.objects, &profile).unwrap_err().code,
+            "cloud_action_failed"
+        );
+        assert_eq!(arm.calls().len(), 1);
+    }
+
+    #[test]
+    fn polled_failure_with_absent_readback_settles_failed() {
+        let w = world();
+        let arm = arm_with_env();
+        let intent = reserved(&w);
+        let d = driver(&w, &arm, &intent);
+        arm.script(Begin::Pending("arm-op-bad"));
+        arm.polls([Ok(Poll::Failed("Bad Request".into()))]);
+        assert_eq!(
+            d.provision(&w.objects, &app_only()).unwrap_err().code,
+            "cloud_action_failed"
+        );
+        assert_eq!(steps(&w, &intent)[0].2, settled("failed:BadRequest"));
+    }
+
+    #[test]
+    fn verified_prerequisites_are_only_read() {
+        let config = sha(ENV.as_bytes());
+        let cases = [
+            (None, "prerequisite_missing"),
+            (Some(plain(None, &sha(b"drift"))), "prerequisite_mismatch"),
+            (
+                Some(plain(Some(&ours(OTHER)), &config)),
+                "resource_ownership_conflict",
+            ),
+        ];
+        for (found, code) in cases {
+            let w = world();
+            let arm = MockArm::default();
+            if let Some(found) = found {
+                arm.put(ENV, found);
+            }
+            let intent = reserved(&w);
+            let d = driver(&w, &arm, &intent);
+            assert_eq!(d.provision(&w.objects, &standard()).unwrap_err().code, code);
+            assert!(arm.calls().is_empty());
+            assert!(steps(&w, &intent).is_empty());
+        }
+        let w = world();
+        let arm = arm_with_env();
+        *arm.read_fails.lock().unwrap() = true;
+        let intent = reserved(&w);
+        let d = driver(&w, &arm, &intent);
+        assert_eq!(
+            d.provision(&w.objects, &standard()).unwrap_err().code,
+            "cloud_outcome_unknown"
+        );
+        assert!(arm.calls().is_empty());
+    }
+
+    #[test]
+    fn provisioning_needs_an_uncancelled_reservation() {
+        let w = world();
+        let arm = arm_with_env();
+        let intent = w.intent_for_t(KEY);
+        let d = driver(&w, &arm, &intent);
+        assert_eq!(
+            d.provision(&w.objects, &standard()).unwrap_err().code,
+            "operation_not_provisionable"
+        );
+        reserve(&w.ops, &w.objects, &intent, NOW).unwrap();
+        request_cancel(&w.objects, &intent, NOW).unwrap();
+        assert_eq!(
+            d.provision(&w.objects, &standard()).unwrap_err().code,
+            "operation_not_provisionable"
+        );
+        assert!(arm.calls().is_empty());
+    }
+
+    // --------------------------------------------------------- ITEM-011
+
+    #[test]
+    fn preflight_refuses_every_missing_proof_and_no_profile_schema_exists() {
+        let w = world();
+        let intent = w.intent_for_t(KEY);
+        let loaded = w.ops.load(&intent.operation_id).unwrap();
+        assert_eq!(
+            Profile::resolve(&loaded).unwrap_err().code,
+            "profile_unsupported"
+        );
+        let profile = || Profile::for_test(vec![desired(APP1, true, Ownership::Owned)], PEAK);
+        let (q, b) = (Qualification::for_test(), BudgetApproval::for_test());
+        let small = QuotaProof::for_test(Demand {
+            cores_milli: 1000,
+            ..PEAK
+        });
+        let room = QuotaProof::for_test(PEAK);
+        let code = |r: Result<Preflighted, ApiError>| r.err().unwrap().code;
+        let cases = [
+            (None, Some(&room), Some(&b), "qualification_missing"),
+            (Some(&q), None, Some(&b), "quota_unproven"),
+            (Some(&q), Some(&small), Some(&b), "quota_exceeded"),
+            (Some(&q), Some(&room), None, "budget_unapproved"),
+        ];
+        for (q, quota, b, expected) in cases {
+            assert_eq!(code(aca::preflight(profile(), q, quota, b)), expected);
+        }
+        let owned = |resource| desired(resource, true, Ownership::Owned);
+        for invalid in [
+            Profile::for_test(vec![owned(APP1), owned(APP1)], PEAK),
+            Profile::for_test(vec![owned(APP1), owned(ENV), owned(STORE)], PEAK),
+            Profile::for_test(Vec::new(), PEAK),
+        ] {
+            let error = aca::preflight(invalid, Some(&q), Some(&room), Some(&b))
+                .err()
+                .unwrap();
+            assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
+        }
+        assert!(aca::preflight(profile(), Some(&q), Some(&room), Some(&b)).is_ok());
+    }
+
+    #[test]
+    fn cancel_cleanup_deletes_only_created_apps_and_retains_everything_else() {
+        let w = world();
+        let arm = arm_with_env();
+        let intent = reserved(&w);
+        let d = driver(&w, &arm, &intent);
+        assert_eq!(
+            d.cleanup(&w.objects).unwrap_err().code,
+            "operation_not_cancelled"
+        );
+        d.provision(&w.objects, &standard()).unwrap();
+        request_cancel(&w.objects, &intent, NOW).unwrap();
+        assert_eq!(
+            w.ops.release(&w.objects, &intent, NOW).unwrap_err().code,
+            "cleanup_pending"
+        );
+        d.cleanup(&w.objects).unwrap();
+        d.cleanup(&w.objects).unwrap();
+        let deletes: Vec<_> = arm
+            .calls()
+            .into_iter()
+            .filter(|c| c.verb == Verb::Delete)
+            .map(|c| c.resource)
+            .collect();
+        assert_eq!(deletes, [APP1]);
+        assert!(arm.get(APP1).is_none());
+        assert!(arm.get(STORE).is_some() && arm.get(ENV).is_some());
+        let sealed = w.ops.release(&w.objects, &intent, NOW).unwrap();
+        assert_eq!(sealed.outcome(), &TerminalOutcome::Cancelled);
+    }
+
+    #[test]
+    fn cleanup_resolves_unknown_creates_by_owner_tag_before_deleting() {
+        let w = world();
+        let arm = arm_with_env();
+        let intent = reserved(&w);
+        let d = driver(&w, &arm, &intent);
+        arm.script(Begin::Pending("arm-op-slow"));
+        arm.polls(running(3));
+        d.provision(&w.objects, &app_only()).unwrap_err();
+        request_cancel(&w.objects, &intent, NOW).unwrap();
+        arm.polls(running(3));
+        assert_eq!(
+            d.cleanup(&w.objects).unwrap_err().code,
+            "cloud_outcome_unknown"
+        );
+        assert_eq!(
+            w.ops.release(&w.objects, &intent, NOW).unwrap_err().code,
+            "cleanup_pending"
+        );
+        // The late PUT lands; cleanup proves it ours, then deletes it.
+        arm.effect(&arm.calls()[0]);
+        d.cleanup(&w.objects).unwrap();
+        assert!(arm.get(APP1).is_none());
+        let outcomes: Vec<_> = steps(&w, &intent).into_iter().map(|s| (s.1, s.2)).collect();
+        assert_eq!(
+            outcomes,
+            [
+                ("create-app".to_owned(), settled("created")),
+                ("delete-app".to_owned(), settled("deleted")),
+            ]
+        );
+        w.ops.release(&w.objects, &intent, NOW).unwrap();
+    }
+
+    /// Creates APP1 for `T`, activates its route and seals the create.
+    fn activated(w: &World, arm: &MockArm) -> (Intent, String) {
+        let intent = reserved(w);
+        driver(w, arm, &intent)
+            .provision(&w.objects, &app_only())
+            .unwrap();
+        let receipt = activate(
+            &w.ops,
+            &w.objects,
+            &intent,
+            &writer_route(T),
+            &sha(b"p"),
+            NOW,
+        )
+        .unwrap();
+        w.ops.release(&w.objects, &intent, NOW).unwrap();
+        (intent, admin::receipt_digest(&receipt))
+    }
+
+    fn retirement(w: &World, expected_receipt: &str) -> Intent {
+        w.ops
+            .accept(
+                ADMIN,
+                "retire-t",
+                &Payload::Retire {
+                    tenant_id: T.into(),
+                    expected_receipt: expected_receipt.into(),
+                    reason: "offboarded".into(),
+                    data_disposition: DataDisposition::Retain,
+                },
+                &[],
+                NOW,
+            )
+            .unwrap()
+            .intent
+    }
+
+    #[test]
+    fn retirement_removes_the_route_stops_apps_and_retains_data() {
+        let w = world();
+        let arm = MockArm::default();
+        let (_, receipt) = activated(&w, &arm);
+        let credential = w.snapshot().live_credential("aaaaaaaaaaaa", NOW);
+        let intent = retirement(&w, &receipt);
+        let d = driver(&w, &arm, &intent);
+        let guards = Guards::new(w.memory.clone(), TARGET);
+        assert_eq!(
+            d.retire(&w.objects, &guards, NOW).unwrap_err().code,
+            "retirement_unverified"
+        );
+        d.reserve_retirement(&w.objects, NOW).unwrap();
+        d.reserve_retirement(&w.objects, NOW).unwrap();
+        let sealed = d.retire(&w.objects, &guards, NOW).unwrap();
+        assert_eq!(sealed.outcome(), &TerminalOutcome::Retired);
+        assert!(w.snapshot().record_for(T).is_none());
+        assert!(matches!(
+            w.snapshot().lifecycle(T).unwrap().slot,
+            Slot::Released { .. }
+        ));
+        // The app and its data remain; no revision is active.
+        assert_eq!(
+            arm.get(APP1).unwrap(),
+            app(&ours(T), &sha(APP1.as_bytes()), &[false])
+        );
+        assert_eq!(arm.count(&Verb::Delete), 0);
+        assert_eq!(
+            w.snapshot().live_credential("aaaaaaaaaaaa", NOW),
+            credential
+        );
+        // No writer claim or failover after retirement.
+        assert_eq!(guards.current().unwrap().unwrap().state, guard::State::Held);
+        // Idempotent afterwards.
+        assert_eq!(
+            d.retire(&w.objects, &guards, NOW).unwrap().digest(),
+            sealed.digest()
+        );
+        assert_eq!(arm.count(&Verb::Stop), 1);
+    }
+
+    #[test]
+    fn retirement_refuses_unverified_receipts() {
+        let w = world();
+        let arm = MockArm::default();
+        // Before any activation there is nothing to verify against.
+        let early = retirement(&w, &sha(b"receipt"));
+        assert_eq!(
+            driver(&w, &arm, &early)
+                .reserve_retirement(&w.objects, NOW)
+                .unwrap_err()
+                .code,
+            "retirement_receipt_mismatch"
+        );
+        let w = world();
+        activated(&w, &arm);
+        let wrong = retirement(&w, &sha(b"receipt"));
+        assert_eq!(
+            driver(&w, &arm, &wrong)
+                .reserve_retirement(&w.objects, NOW)
+                .unwrap_err()
+                .code,
+            "retirement_receipt_mismatch"
+        );
+        assert!(w.snapshot().record_for(T).is_some());
+        assert!(matches!(
+            w.snapshot().lifecycle(T).unwrap().slot,
+            Slot::Released { .. }
+        ));
+    }
+
+    #[test]
+    fn retirement_resumes_after_an_unknown_stop_and_cannot_be_cancelled_back() {
+        let w = world();
+        let arm = MockArm::default();
+        let (_, receipt) = activated(&w, &arm);
+        let intent = retirement(&w, &receipt);
+        let d = driver(&w, &arm, &intent);
+        let guards = Guards::new(w.memory.clone(), TARGET);
+        d.reserve_retirement(&w.objects, NOW).unwrap();
+        let journal = w.ops.journal(&intent.operation_id).unwrap();
+        assert_eq!(
+            aca::terminal_ready(&journal, &TerminalOutcome::Retired)
+                .unwrap_err()
+                .code,
+            "retirement_incomplete"
+        );
+        arm.script(Begin::Pending("arm-op-stop"));
+        arm.polls(running(3));
+        assert_eq!(
+            d.retire(&w.objects, &guards, NOW).unwrap_err().code,
+            "cloud_outcome_unknown"
+        );
+        assert!(w.snapshot().record_for(T).is_none());
+        assert_eq!(
+            request_cancel(&w.objects, &intent, NOW).unwrap_err().code,
+            "retirement_in_progress"
+        );
+        assert_eq!(
+            w.ops.release(&w.objects, &intent, NOW).unwrap_err().code,
+            "cleanup_pending"
+        );
+        let stop = arm
+            .calls()
+            .into_iter()
+            .find(|c| c.verb == Verb::Stop)
+            .unwrap();
+        arm.effect(&stop);
+        let sealed = d.retire(&w.objects, &guards, NOW).unwrap();
+        assert_eq!(sealed.outcome(), &TerminalOutcome::Retired);
+        assert_eq!(arm.count(&Verb::Stop), 1);
+    }
+
+    #[test]
+    fn lost_route_removal_acknowledgement_is_resolved_by_readback() {
+        let w = world();
+        let arm = MockArm::default();
+        let (_, receipt) = activated(&w, &arm);
+        let intent = retirement(&w, &receipt);
+        let d = driver(&w, &arm, &intent);
+        let guards = Guards::new(w.memory.clone(), TARGET);
+        d.reserve_retirement(&w.objects, NOW).unwrap();
+        w.memory.fault(Op::Put, CONTROL, Fault::After, 0, 1);
+        let sealed = d.retire(&w.objects, &guards, NOW).unwrap();
+        assert_eq!(sealed.outcome(), &TerminalOutcome::Retired);
+    }
+
+    #[test]
+    fn cancelled_retirement_keeps_the_route() {
+        let w = world();
+        let arm = MockArm::default();
+        let (_, receipt) = activated(&w, &arm);
+        let intent = retirement(&w, &receipt);
+        let d = driver(&w, &arm, &intent);
+        let guards = Guards::new(w.memory.clone(), TARGET);
+        d.reserve_retirement(&w.objects, NOW).unwrap();
+        request_cancel(&w.objects, &intent, NOW).unwrap();
+        assert_eq!(
+            d.retire(&w.objects, &guards, NOW).unwrap_err().code,
+            "operation_cancelled"
+        );
+        assert!(w.snapshot().record_for(T).is_some());
+        assert_eq!(arm.count(&Verb::Stop), 0);
+        assert_eq!(
+            w.ops.release(&w.objects, &intent, NOW).unwrap().outcome(),
+            &TerminalOutcome::Cancelled
+        );
+    }
+
+    // --------------------------------------------------------- ITEM-010
+
+    fn seed() -> Seed {
+        Seed {
+            lineage: LINEAGE,
+            digest: sha(b"seed"),
+        }
+    }
+
+    #[test]
+    fn seed_is_recorded_once_and_never_rekeyed() {
+        let w = world();
+        let intent = reserved(&w);
+        let id = &intent.operation_id;
+        w.ops.claim(id, "worker-a", None).unwrap();
+        assert!(recorded_seed(&w.ops.journal(id).unwrap()).is_none());
+        w.ops.record_seed(id, "worker-a", &seed()).unwrap();
+        w.ops.record_seed(id, "worker-a", &seed()).unwrap();
+        assert_eq!(recorded_seed(&w.ops.journal(id).unwrap()), Some(seed()));
+        for other in [
+            Seed {
+                lineage: 0x78,
+                ..seed()
+            },
+            Seed {
+                digest: sha(b"other"),
+                ..seed()
+            },
+        ] {
+            assert_eq!(
+                w.ops.record_seed(id, "worker-a", &other).unwrap_err().code,
+                "seed_mismatch"
+            );
+        }
+        let zero = Seed {
+            lineage: 0,
+            ..seed()
+        };
+        assert_eq!(
+            w.ops.record_seed(id, "worker-a", &zero).unwrap_err().status,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
+
+    fn authority(w: &World) -> AuthorityStore {
+        AuthorityStore::new(w.memory.clone(), TARGET.into())
+    }
+
+    fn establish(
+        w: &World,
+        store: &AuthorityStore,
+        intent: &Intent,
+    ) -> Result<crate::server::authority::Observed, ApiError> {
+        let guards = Guards::new(w.memory.clone(), TARGET);
+        establish_authority(
+            &w.ops,
+            &w.objects,
+            store,
+            &guards,
+            intent,
+            "install-1",
+            "scope-1",
+        )
+    }
+
+    fn seeded(w: &World) -> Intent {
+        let intent = reserved(w);
+        let id = &intent.operation_id;
+        w.ops.claim(id, "worker-a", None).unwrap();
+        w.ops.record_seed(id, "worker-a", &seed()).unwrap();
+        intent
+    }
+
+    #[test]
+    fn authority_is_created_for_the_seed_and_never_reset() {
+        let w = world();
+        let intent = reserved(&w);
+        let store = authority(&w);
+        let guards = Guards::new(w.memory.clone(), TARGET);
+        w.ops.claim(&intent.operation_id, "worker-a", None).unwrap();
+        assert_eq!(
+            establish(&w, &store, &intent).unwrap_err().code,
+            "seed_unrecorded"
+        );
+        assert!(guards.current().unwrap().is_none());
+        w.ops
+            .record_seed(&intent.operation_id, "worker-a", &seed())
+            .unwrap();
+        let observed = establish(&w, &store, &intent).unwrap();
+        assert_eq!(observed.record.lineage, format!("{LINEAGE:016x}"));
+        assert_eq!(
+            guards.current().unwrap().unwrap().state,
+            guard::State::WriteEnabled
+        );
+        assert_eq!(
+            establish(&w, &store, &intent).unwrap().record,
+            observed.record
+        );
+        // The route stays absent: no client write is admitted yet.
+        assert!(w.snapshot().record_for(T).is_none());
+
+        // An authority of any other identity is refused, never reset.
+        let w = world();
+        let intent = seeded(&w);
+        let store = authority(&w);
+        let guards = Guards::new(w.memory.clone(), TARGET);
+        store
+            .create("install-1", "scope-1", "0000000000000078")
+            .unwrap();
+        let before = store.read().unwrap();
+        assert_eq!(
+            establish(&w, &store, &intent).unwrap_err().code,
+            "authority_identity_mismatch"
+        );
+        assert_eq!(store.read().unwrap(), before);
+        assert_eq!(guards.current().unwrap().unwrap().state, guard::State::Held);
+    }
+
+    const MANIFEST: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+
+    /// A seeded, guarded, serving authority with a first checkpoint.
+    fn serving(w: &World) -> (Intent, AuthorityStore) {
+        let intent = seeded(w);
+        let store = authority(w);
+        let prepared = establish(w, &store, &intent).unwrap();
+        let (claim, observed) = store.claim(&prepared, NOW).unwrap();
+        let head = HeadRef {
+            epoch: claim.epoch,
+            set_id: "20240101T000000Z-0123456789abcdef".into(),
+            manifest_sha256: MANIFEST.into(),
+            index_sha256: None,
+            sequence: 1,
+            chain_sha256: "2".repeat(64),
+        };
+        store.advance_head(&claim, &observed, head).unwrap();
+        (intent, store)
+    }
+
+    fn readiness(tenant: &str) -> Readiness {
+        Readiness {
+            archive_manifest_sha256: MANIFEST.into(),
+            writer: app(&ours(tenant), &sha(APP1.as_bytes()), &[false, true]),
+            policy_generation_required: 3,
+            policy_generation_observed: 3,
+        }
+    }
+
+    #[test]
+    fn readiness_needs_clock_authority_archive_writer_and_policy_proof() {
+        let w = world();
+        let (intent, store) = serving(&w);
+        let clock = projection::ClockProof::for_test(50);
+        let error = prove(&w.ops, &store, &intent, &readiness(T), None).unwrap_err();
+        assert_eq!(
+            (error.status, error.code),
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "projection_freshness_unproven"
+            )
+        );
+        let config = sha(APP1.as_bytes());
+        let mut incomplete = readiness(T);
+        incomplete.writer.revisions = Revisions::Incomplete;
+        let cases = [
+            Readiness {
+                archive_manifest_sha256: "3".repeat(64),
+                ..readiness(T)
+            },
+            readiness(OTHER),
+            Readiness {
+                writer: app(&ours(T), &config, &[true, true]),
+                ..readiness(T)
+            },
+            Readiness {
+                policy_generation_observed: 2,
+                ..readiness(T)
+            },
+            Readiness {
+                policy_generation_required: 0,
+                policy_generation_observed: 0,
+                ..readiness(T)
+            },
+            incomplete,
+        ];
+        for case in &cases {
+            assert_eq!(
+                prove(&w.ops, &store, &intent, case, Some(&clock))
+                    .unwrap_err()
+                    .code,
+                "readiness_unproven"
+            );
+        }
+        let proof = prove(&w.ops, &store, &intent, &readiness(T), Some(&clock)).unwrap();
+        assert_eq!((proof.epoch, proof.lineage), (1, LINEAGE));
+        // A recovering authority (no first checkpoint) proves nothing.
+        let w = world();
+        let intent = seeded(&w);
+        let store = authority(&w);
+        establish(&w, &store, &intent).unwrap();
+        assert_eq!(
+            prove(&w.ops, &store, &intent, &readiness(T), Some(&clock))
+                .unwrap_err()
+                .code,
+            "readiness_unproven"
+        );
+    }
+
+    #[test]
+    fn credential_delivery_needs_acknowledgement_and_replacement_revokes() {
+        let w = world();
+        let id = &w.intent_for_t(KEY).operation_id;
+        let unacknowledged = |w: &World| w.ops.delivered(id).unwrap_err().code;
+        assert_eq!(unacknowledged(&w), "credential_delivery_unacknowledged");
+        w.ops.issue_candidate(id, "cand-a").unwrap();
+        assert_eq!(w.ops.issue_candidate(id, "cand-a").unwrap().generation, 1);
+        assert_eq!(
+            w.ops.issue_candidate(id, "cand-b").unwrap_err().code,
+            "delivery_candidate_exists"
+        );
+        assert_eq!(unacknowledged(&w), "credential_delivery_unacknowledged");
+        let replaced = w.ops.replace_candidate(id, 1, "cand-b").unwrap();
+        assert_eq!(replaced.generation, 2);
+        assert_eq!(replaced.revoked, ["cand-a"]);
+        assert_eq!(w.ops.replace_candidate(id, 1, "cand-b").unwrap(), replaced);
+        let stale = |r: Result<Delivery, ApiError>| r.unwrap_err().code;
+        assert_eq!(
+            stale(w.ops.replace_candidate(id, 2, "cand-a")),
+            "delivery_stale"
+        );
+        assert_eq!(
+            stale(w.ops.acknowledge_delivery(id, 1, "cand-a")),
+            "delivery_stale"
+        );
+        w.ops.acknowledge_delivery(id, 2, "cand-b").unwrap();
+        w.ops.acknowledge_delivery(id, 2, "cand-b").unwrap();
+        assert_eq!(
+            stale(w.ops.replace_candidate(id, 2, "cand-c")),
+            "delivery_stale"
+        );
+        w.ops.delivered(id).unwrap();
+        // A lost write acknowledgement is resolved by the same call.
+        let w = world();
+        let id = &w.intent_for_t(KEY).operation_id;
+        w.memory.fault(Op::Put, "delivery.json", Fault::After, 0, 1);
+        assert_eq!(
+            w.ops.issue_candidate(id, "cand-a").unwrap_err().code,
+            "operation_indeterminate"
+        );
+        assert_eq!(w.ops.issue_candidate(id, "cand-a").unwrap().generation, 1);
+    }
+
+    fn proven(w: &World) -> (Intent, Proof) {
+        let (intent, store) = serving(w);
+        let clock = projection::ClockProof::for_test(50);
+        let proof = prove(&w.ops, &store, &intent, &readiness(T), Some(&clock)).unwrap();
+        (intent, proof)
+    }
+
+    fn route() -> Route {
+        Route {
+            lineage: LINEAGE,
+            ..writer_route(T)
+        }
+    }
+
+    #[test]
+    fn activation_requires_the_proven_route_and_revoked_candidates() {
+        let w = world();
+        let (intent, proof) = proven(&w);
+        let guards = Guards::new(w.memory.clone(), TARGET);
+        let id = &intent.operation_id;
+        // `bbbbbbbbbbbb` stays live in the published view: replacing it is
+        // not enough until the view confirms its revocation.
+        w.ops.issue_candidate(id, "bbbbbbbbbbbb").unwrap();
+        w.ops.replace_candidate(id, 1, "aaaaaaaaaaaa").unwrap();
+        w.ops.acknowledge_delivery(id, 2, "aaaaaaaaaaaa").unwrap();
+        let delivered = w.ops.delivered(id).unwrap();
+        let activate = |route: &Route| {
+            activate_create(
+                &w.ops, &w.objects, &guards, &intent, route, &proof, &delivered, NOW,
+            )
+        };
+        for bad in [
+            Route {
+                lineage: 0x1234,
+                ..route()
+            },
+            Route {
+                epoch: Some(2),
+                ..route()
+            },
+            Route {
+                reader: Some("https://reader".into()),
+                ..route()
+            },
+            Route {
+                read_routing: control_state::ReadRouting::Readers,
+                ..route()
+            },
+            Route {
+                tenant: OTHER.into(),
+                ..route()
+            },
+        ] {
+            assert_eq!(activate(&bad).unwrap_err().code, "activation_route_invalid");
+        }
+        assert_eq!(
+            activate(&route()).unwrap_err().code,
+            "candidate_revocation_unconfirmed"
+        );
+        assert!(w.snapshot().record_for(T).is_none());
+        assert_eq!(
+            guards.current().unwrap().unwrap().state,
+            guard::State::WriteEnabled
+        );
+    }
+
+    #[test]
+    fn unpublished_credential_blocks_activation() {
+        let w = world();
+        let (intent, proof) = proven(&w);
+        let guards = Guards::new(w.memory.clone(), TARGET);
+        let id = &intent.operation_id;
+        // The production case for a new tenant (OD-004): acknowledged, but
+        // not in the published view.
+        w.ops.issue_candidate(id, "cccccccccccc").unwrap();
+        w.ops.acknowledge_delivery(id, 1, "cccccccccccc").unwrap();
+        let delivered = w.ops.delivered(id).unwrap();
+        assert_eq!(
+            activate_create(
+                &w.ops,
+                &w.objects,
+                &guards,
+                &intent,
+                &route(),
+                &proof,
+                &delivered,
+                NOW,
+            )
+            .unwrap_err()
+            .code,
+            "credential_view_unpublished"
+        );
+        assert!(w.snapshot().record_for(T).is_none());
+    }
+
+    #[test]
+    fn activation_publishes_the_writer_route_and_seals_succeeded() {
+        let w = world();
+        let (intent, proof) = proven(&w);
+        let guards = Guards::new(w.memory.clone(), TARGET);
+        let id = &intent.operation_id;
+        w.ops.issue_candidate(id, "aaaaaaaaaaaa").unwrap();
+        w.ops.acknowledge_delivery(id, 1, "aaaaaaaaaaaa").unwrap();
+        let delivered = w.ops.delivered(id).unwrap();
+        let run = || {
+            activate_create(
+                &w.ops,
+                &w.objects,
+                &guards,
+                &intent,
+                &route(),
+                &proof,
+                &delivered,
+                NOW,
+            )
+        };
+        let sealed = run().unwrap();
+        let TerminalOutcome::Succeeded { receipt } = sealed.outcome() else {
+            panic!("{:?}", sealed.outcome());
+        };
+        assert_eq!((receipt.lineage, receipt.epoch), (LINEAGE, 1));
+        assert_eq!(receipt.proof_digest, proof.digest);
+        let published = w.snapshot().record_for(T).unwrap().clone();
+        assert_eq!(published, route());
+        assert!(published.reader.is_none());
+        assert_eq!(
+            guards.current().unwrap().unwrap().state,
+            guard::State::Released
+        );
+        assert_eq!(run().unwrap().digest(), sealed.digest());
+    }
+}

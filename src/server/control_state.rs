@@ -449,6 +449,22 @@ impl Snapshot {
         self.directory.iter().find(|route| route.tenant == tenant)
     }
 
+    /// design-tenant-provisioning ITEM-010: credential `id` as this
+    /// snapshot publishes it, when it is unrevoked and unexpired at `now`:
+    /// `(tenant binding, lineage binding)`. Read through the stored
+    /// entry shape, so it needs no new credential API.
+    pub(super) fn live_credential(&self, id: &str, now: u64) -> Option<(Option<String>, u64)> {
+        let entries = serde_json::to_value(&self.credentials).ok()?;
+        let entry = entries
+            .as_array()?
+            .iter()
+            .find(|entry| entry["id"].as_str() == Some(id))?;
+        let live = entry["revoked_unix_ms"].is_null()
+            && entry["expires_unix_ms"].as_u64().is_some_and(|at| now < at);
+        let lineage = u64::from_str_radix(entry["lineage"].as_str()?, 16).ok()?;
+        live.then(|| (entry["tenant_id"].as_str().map(str::to_owned), lineage))
+    }
+
     /// Tenant admission (deleted: 503, suspended: 403) from this snapshot.
     pub(super) fn admit(&self, tenant: &str) -> Result<(), ApiError> {
         tenants::admit(&self.tenants, tenant).map(drop)
@@ -862,8 +878,11 @@ impl Snapshot {
         operation_id: &str,
     ) -> Result<Self, ApiError> {
         let index = self.slot_index(tenant, operation_id)?;
+        let route = self.record_for(tenant).map(route_digest);
         let mut next = self.clone();
         if let Slot::Reserved {
+            kind,
+            expected_route,
             cancellation_requested,
             receipt,
             ..
@@ -875,8 +894,59 @@ impl Snapshot {
                     "the operation already activated its route; retire the tenant instead",
                 ));
             }
+            // EPIC-004 ITEM-011: once a retirement removed the route, it
+            // cannot be cancelled back into service; it can only finish.
+            if *kind == OperationKind::Retire && route != *expected_route {
+                return Err(lifecycle_error(
+                    "retirement_in_progress",
+                    "the retirement already removed the route; resume it to finish",
+                ));
+            }
             *cancellation_requested = true;
         }
+        Ok(next)
+    }
+
+    /// EPIC-004 ITEM-011: a `retire` reservation removes the tenant's route
+    /// (and so its gateway admission) when it is exactly the route the
+    /// verified activation receipt published (`receipt_route`). Credentials
+    /// and the tenant record are unchanged; no data is touched.
+    pub(super) fn retire_route(
+        &self,
+        tenant: &str,
+        operation_id: &str,
+        receipt_route: &str,
+    ) -> Result<Self, ApiError> {
+        let index = self.slot_index(tenant, operation_id)?;
+        let Slot::Reserved {
+            kind,
+            expected_route,
+            cancellation_requested,
+            receipt,
+            ..
+        } = &self.lifecycle[index].slot
+        else {
+            unreachable!("slot_index returns reserved slots");
+        };
+        if *cancellation_requested {
+            return Err(lifecycle_error(
+                "operation_cancelled",
+                "cancellation was requested before the route was removed",
+            ));
+        }
+        let current = self.record_for(tenant).map(route_digest);
+        if *kind != OperationKind::Retire
+            || receipt.is_some()
+            || expected_route.as_deref() != Some(receipt_route)
+            || current.as_deref() != Some(receipt_route)
+        {
+            return Err(lifecycle_error(
+                "retirement_receipt_mismatch",
+                "the route is not the one the verified activation receipt published",
+            ));
+        }
+        let mut next = self.clone();
+        next.directory.retain(|route| route.tenant != tenant);
         Ok(next)
     }
 
@@ -952,6 +1022,7 @@ impl Snapshot {
     ) -> Result<Self, ApiError> {
         let index = self.slot_index(sealed.tenant_id(), sealed.operation_id())?;
         let Slot::Reserved {
+            kind,
             cancellation_requested,
             receipt,
             ..
@@ -965,6 +1036,12 @@ impl Snapshot {
             }
             tenant_provisioning::TerminalOutcome::Cancelled => {
                 *cancellation_requested && receipt.is_none()
+            }
+            tenant_provisioning::TerminalOutcome::Retired => {
+                *kind == OperationKind::Retire
+                    && !*cancellation_requested
+                    && receipt.is_none()
+                    && self.record_for(sealed.tenant_id()).is_none()
             }
         };
         if !matches {

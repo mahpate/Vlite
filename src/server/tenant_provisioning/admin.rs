@@ -318,7 +318,7 @@ struct Tokens {
     receipt: Option<String>,
 }
 
-fn receipt_digest(receipt: &Receipt) -> String {
+pub(super) fn receipt_digest(receipt: &Receipt) -> String {
     sha256_hex(&serde_json::to_vec(receipt).expect("a receipt always serializes"))
 }
 
@@ -380,6 +380,10 @@ fn render(
     let (phase, next_step) = match terminal.map(|t| &t.outcome) {
         Some(TerminalOutcome::Succeeded { .. }) => ("succeeded", "none: the operation ended"),
         Some(TerminalOutcome::Cancelled) => ("cancelled", "none: the operation ended"),
+        Some(TerminalOutcome::Retired) => (
+            "retired",
+            "none: the route is removed, the apps are stopped and all data is retained",
+        ),
         None if activated => (
             "activated",
             "retire the tenant to undo; delivery and release handlers are not available yet",

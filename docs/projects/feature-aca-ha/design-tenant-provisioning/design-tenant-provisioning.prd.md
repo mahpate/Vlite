@@ -466,7 +466,7 @@ An implementation that discovers additional mutation surfaces MUST add a reviewe
 
 ## 14. Implementation Plan
 
-EPIC-001 and EPIC-002 are owner-authorized and implemented offline. EPIC-003 is implemented offline as far as its prerequisites permit: ITEM-006/007 are partial and ITEM-008 is blocked (see their status columns and section 15). EPIC-004 and later work is **Not Started**. The owner's continuing direction (superseding note at the top) authorizes its non-migration offline implementation as prerequisites permit, without a per-epic approval wait; it does not authorize any cloud execution, deployment, gate acceptance, auto-failover enablement, push, merge or PR, and existing-tenant migration stays excluded. Completion is by listed tests/proofs, not estimated time or a historical checkpoint number. Each epic has at most seven unique code/test/doc files; later-discovered surfaces require a separately bounded item. Existing parent epics remain Done at their recorded primitive/scaffold scope.
+EPIC-001 and EPIC-002 are owner-authorized and implemented offline. EPIC-003 is implemented offline as far as its prerequisites permit: ITEM-006/007 are partial and ITEM-008 is blocked (see their status columns and section 15). EPIC-004 is implemented offline against a mockable ARM port only: ITEM-009/010/011 are partial, with no production ARM adapter, actuator stop-proof, clock proof, credential view, profile schema or quota/budget source, so every real path refuses (see section 15). EPIC-005 and later work is **Not Started**. The owner's continuing direction (superseding note at the top) authorizes its non-migration offline implementation as prerequisites permit, without a per-epic approval wait; it does not authorize any cloud execution, deployment, gate acceptance, auto-failover enablement, push, merge or PR, and existing-tenant migration stays excluded. Completion is by listed tests/proofs, not estimated time or a historical checkpoint number. Each epic has at most seven unique code/test/doc files; later-discovered surfaces require a separately bounded item. Existing parent epics remain Done at their recorded primitive/scaffold scope.
 
 **Dependency interpretation:** The graph orders offline implementation and local fixtures only. Qualification is a separate execution permission, not a prerequisite for writing its own fake/local tests. EPIC-004/005/006 can produce local code and evidence without passing ACA gates, but cannot execute real cloud operations or migrate a production source. EPIC-007 evaluates the evidence from those implementations under separate authorization; its outcome then controls rollout. No circular “qualify before implementing qualification fixtures” dependency is intended.
 
@@ -505,9 +505,9 @@ EPIC-001 and EPIC-002 are owner-authorized and implemented offline. EPIC-003 is 
 
 | Task | Description | Status | Relevant Files |
 |------|-------------|--------|----------------|
-| ITEM-009 | Implement deterministic ARM effects adapter with complete revision inventory, operation polling/readback, effective prerequisite/ownership checks and persisted action IDs. Prove previous-actuator exclusion; stop if platform condition cannot be enforced. Reuse HA projections/guards and add mocked timeout/collision/overlap cases; do not invoke current blocked script as a success shortcut. | Not Started | `src/server/tenant_provisioning/aca.rs`, `src/server/tenant_provisioning/tests.rs`, `deploy/azure-container-apps/ha/templates.ps1`, `deploy/azure-container-apps/ha/test.ps1` |
-| ITEM-010 | Compose private seed, authority claim, archive/revision/readiness/policy proof, candidate credential issuance/private delivery acknowledgement and CAS activation using existing primitives. Implement create-stage replacement/revocation after lost delivery. Preserve seed/archive on crash; refuse claimed-authority reset. Missing proof or delivery keeps route absent; activation creates no readers. | Not Started | `src/server/tenant_provisioning.rs`, `src/bin/vlite-server.rs`, `src/server/tenant_provisioning/tests.rs` |
-| ITEM-011 | Add profile/peak-quota/cost preflight, guarded pre-activation cancel and separate active retirement: CAS route/admission removal, drain/stop proof, owned-pin cleanup, immutable terminal seal and reservation release, always retain DB/archive. Test crashes at each retirement boundary; unknown calls prevent completion. Document provisioned vs verified prerequisites, no singleton adoption and both unchanged HA refusals pending protocol acceptance. | Not Started | `src/server/tenant_provisioning/aca.rs`, `deploy/azure-container-apps/ha/README.md`, `src/server/tenant_provisioning/tests.rs` |
+| ITEM-009 | Implement deterministic ARM effects adapter with complete revision inventory, operation polling/readback, effective prerequisite/ownership checks and persisted action IDs. Prove previous-actuator exclusion; stop if platform condition cannot be enforced. Reuse HA projections/guards and add mocked timeout/collision/overlap cases; do not invoke current blocked script as a success shortcut. | Partial (offline; `aca::Arm` port with mocked create/collision/overlap/incomplete-inventory/unknown/lost-dispatch/failure histories; no production ARM adapter; takeover still needs OD-002 `ActuatorStopped`; HA scripts untouched, see section 15) | `src/server/tenant_provisioning/aca.rs`, `src/server/tenant_provisioning/tests.rs`, `deploy/azure-container-apps/ha/templates.ps1`, `deploy/azure-container-apps/ha/test.ps1` |
+| ITEM-010 | Compose private seed, authority claim, archive/revision/readiness/policy proof, candidate credential issuance/private delivery acknowledgement and CAS activation using existing primitives. Implement create-stage replacement/revocation after lost delivery. Preserve seed/archive on crash; refuse claimed-authority reset. Missing proof or delivery keeps route absent; activation creates no readers. | Partial (offline; seed record, authority create/verify behind the guard, readiness proof, delivery/replacement/acknowledgement and CAS activation tested; production refuses `projection_freshness_unproven` (OD-005) and `credential_view_unpublished` (OD-004); no seed engine step, control worker or `vlite-server` wiring, see section 15) | `src/server/tenant_provisioning.rs`, `src/bin/vlite-server.rs`, `src/server/tenant_provisioning/tests.rs` |
+| ITEM-011 | Add profile/peak-quota/cost preflight, guarded pre-activation cancel and separate active retirement: CAS route/admission removal, drain/stop proof, owned-pin cleanup, immutable terminal seal and reservation release, always retain DB/archive. Test crashes at each retirement boundary; unknown calls prevent completion. Document provisioned vs verified prerequisites, no singleton adoption and both unchanged HA refusals pending protocol acceptance. | Partial (offline; preflight refusal ladder, cancel cleanup and receipt-verified retirement tested; production profiles refuse `profile_unsupported` (OD-006); no qualification/quota/budget source; no pin cleanup because ITEM-008 is blocked, see section 15) | `src/server/tenant_provisioning/aca.rs`, `deploy/azure-container-apps/ha/README.md`, `src/server/tenant_provisioning/tests.rs` |
 
 ### EPIC-005: Live reader lifecycle
 
@@ -833,3 +833,68 @@ None of the three items is Done. ITEM-006 and ITEM-007 are partial; ITEM-008 is 
     - Auto-failover stays disabled.
     - Existing-tenant migration, including existing-writer barriers, stays excluded.
     - Every Azure/ACA call, provisioning, deployment, gate acceptance, push, merge and PR.
+
+### EPIC-004 implementation notes (offline, owner-authorized)
+
+- **Scope delivered.** All work is local code and in-memory fixtures. No Azure, ACA or ARM call, emulator, deployment, gate acceptance, qualification claim or auto-failover change was made. EPIC-003 stays partial and its refusals are unchanged.
+- **ITEM-009: the ARM port** (`src/server/tenant_provisioning/aca.rs`, new).
+  - `aca::Arm` has `begin` (returns an operation ID), `poll` and `read` (owner tag, configuration digest, provisioning state and a `Complete`/`Incomplete` revision inventory). Tests use a scripted `MockArm`. There is **no production adapter**, and nothing can construct one outside tests.
+  - `Driver::new` claims the operation before any port call, so another worker refuses with `actuator_fence_unproven`. A takeover still needs the OD-002 `ActuatorStopped` proof (test-only `proven_for_test`).
+  - Each effect is an immutable journal step. Its request digest binds the owner, resource, operation and configuration, and the ARM operation ID is persisted (`Step.arm_operation`) before polling.
+  - Effects resume only by polling that ID and reading back. They never redispatch. A lost dispatch with no ID stays `cloud_outcome_unknown` forever.
+  - Success requires an exact readback: our owner tag `vlite-tenant:{tenant}`, the configuration digest, a succeeded state and, for apps, a complete inventory with exactly one active revision running that configuration.
+  - Overlap refuses `revision_overlap`, an incomplete inventory refuses `revision_inventory_incomplete`, and drift stays unknown.
+  - A foreign owner settles `conflict` (`resource_ownership_conflict`). A refused or failed operation with an absent readback settles `failed:{code}` (`cloud_action_failed`).
+  - A resource found before the first dispatch is refused, even with our own tag: there is no adoption.
+  - Verified prerequisites are only read: `prerequisite_missing`, `prerequisite_mismatch` or an ownership conflict.
+  - The HA PowerShell scaffold (`ha/templates.ps1`, `ha/test.ps1`) was not changed or invoked.
+- **ITEM-010: authority, readiness, delivery and activation** (`src/server/tenant_provisioning.rs`).
+  - `record_seed` records the seed lineage and archive digest once. A different seed refuses `seed_mismatch`.
+  - `establish_authority` holds the lifecycle guard and creates or reads `authority.json` bound to the seed lineage. A record of any other installation, scope or lineage refuses `authority_identity_mismatch` and is never reset, and the guard stays held. Otherwise it enables writes. The route stays absent throughout.
+  - `prove` refuses 503 `projection_freshness_unproven` without a `ClockProof`. With one, it refuses `readiness_unproven` unless all of these hold:
+    - the authority is Serving at its epoch with a first checkpoint;
+    - the lineage is the seed;
+    - the head manifest is the archive manifest;
+    - the writer app is ours, succeeded and has one active revision in a complete inventory;
+    - the required policy generation (> 0) is observed.
+  - Credential delivery is a CAS record per operation:
+    - `issue_candidate` creates a candidate;
+    - `replace_candidate` moves to a new generation and lists the old candidate as revoked;
+    - `acknowledge_delivery` is generation-bound;
+    - stale actions refuse `delivery_stale`;
+    - a lost write acknowledgement refuses `operation_indeterminate` and is resolved by the same call.
+  - `activate_create` requires an acknowledged delivery and a proof, and the route must be exactly a dedicated, writer-only, readerless route at the proven lineage and epoch (`activation_route_invalid`).
+    - The acknowledged credential must be live and bound to the tenant and lineage in the published view (`credential_view_unpublished`).
+    - Every revoked candidate must be absent there (`candidate_revocation_unconfirmed`).
+    - It then publishes the route and receipt with one CAS, releases the guard and seals `succeeded`. It is idempotent and creates no readers.
+- **ITEM-011: preflight, cancellation cleanup and retirement** (`aca.rs`).
+  - `preflight` validates the profile (422), then refuses in order: `qualification_missing`, `quota_unproven`, `quota_exceeded`, `budget_unapproved`. `Profile::resolve` always refuses `profile_unsupported` (OD-006 has no schema). The qualification, quota and budget proofs exist only in tests.
+  - Cancellation cleanup runs only on a cancelled, unsealed reservation:
+    - It first resolves uncertain creates by owner tag.
+    - It then deletes only the apps this operation created, with readback proof.
+    - Verified and non-app owned prerequisites and data are retained.
+    - Sealing `cancelled` refuses `cleanup_pending` until every created app is deleted or absent.
+  - Retirement verifies the expected receipt against the sealed create and the published route (`retirement_receipt_mismatch`), records a plan step and reserves.
+    - It then holds the guard permanently (no writer claim or failover), removes exactly that route with a CAS (`retire_route`) and stops each planned app with readback proof that no revision is active.
+    - Finally it seals the new `retired` outcome and releases the slot. The database, archive, credentials and apps are retained.
+    - An unknown stop blocks completion (`cleanup_pending` / `retirement_incomplete`).
+    - Once the route is removed, cancellation refuses `retirement_in_progress`.
+    - A lost route-removal acknowledgement resumes by readback.
+  - Owned-pin cleanup is not implemented because ITEM-008 is blocked.
+- **Behaviour change.** Sealing a cancelled create now requires cleanup of any app it created (`cleanup_pending`). This is intentional and stricter. Operations with no `create-app` steps behave as before.
+- **Deviations from listed files.** There is no `src/bin/vlite-server.rs` wiring and no `ha/templates.ps1` or `ha/test.ps1` change. `src/server/control_state.rs` gained `retire_route`, the retired release arm, a `retirement_in_progress` cancel refusal and the `live_credential` readback. `admin.rs` renders `retired` and shares `receipt_digest`.
+- **Verification.**
+  - `cargo test --features server --lib tenant_provisioning`: 94 passed.
+  - Full `cargo test --features server --lib`: 2228 passed, 10 ignored.
+  - `cargo clippy --features server --all-targets -- -D warnings` is clean, and rustfmt and `git diff --check` are clean.
+- **Remaining blockers** (each refuses today):
+  - **OD-002.** There is no production ARM adapter or actuator stop-proof, so takeover and real dispatch are unavailable.
+  - **OD-005.** There is no approved `ClockProof` source, so readiness refuses `projection_freshness_unproven`.
+  - **OD-004/credential schema.** The published credential view cannot hold a reserved tenant's candidate, so production activation refuses `credential_view_unpublished`.
+  - **OD-006.** There are no profile schema, quota or budget sources and no qualification, so preflight refuses.
+  - **Missing workers.**
+    - The seed-producing engine step is not implemented.
+    - The control worker (projection publisher, poll loop, guard holder and readiness transport) is not implemented.
+    - The REST/CLI handlers are not wired.
+  - **Liveness limits.** A settled failure cannot be retried within the same operation; a new operation is required. A crash before an ARM operation ID is persisted leaves the step unknown until operator resolution.
+  - **ITEM-008 follow-up.** This remains for reader pins and pin cleanup. EPIC-005 (readers) and EPIC-006 (migration) are excluded and untouched.
