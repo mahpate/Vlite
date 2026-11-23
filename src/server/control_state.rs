@@ -52,6 +52,92 @@ pub(super) struct Snapshot {
     directory: Vec<Route>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     migrations: Vec<Migration>,
+    /// design-tenant-provisioning ITEM-002: one lifecycle slot per tenant.
+    /// Absent (and so byte-identical) until the first reservation; an older
+    /// consumer refuses a snapshot that carries it (`deny_unknown_fields`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    lifecycle: Vec<Lifecycle>,
+}
+
+/// A provisioning operation's kind (design-tenant-provisioning §3.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) enum OperationKind {
+    Create,
+    SetReaders,
+    Migrate,
+    Retire,
+}
+
+/// The per-tenant operation slot. `generation` is the slot's own counter:
+/// 1 for the first reservation, +1 for each later one.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Lifecycle {
+    pub(super) tenant: String,
+    pub(super) generation: u64,
+    pub(super) slot: Slot,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub(super) enum Slot {
+    /// Held by one operation. Non-routable until `receipt` is published with
+    /// the route in the same generation.
+    Reserved {
+        operation_id: String,
+        kind: OperationKind,
+        request_digest: String,
+        /// `route_digest` of the route the operation expects (None: the
+        /// tenant must be unrouted, as for `create`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_route: Option<String>,
+        cancellation_requested: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        receipt: Option<Receipt>,
+    },
+    /// The holder's terminal record is sealed; the slot may be reserved
+    /// again.
+    Released {
+        operation_id: String,
+        terminal_digest: String,
+    },
+}
+
+/// Authoritative activation receipt: the route became routable at
+/// control-state generation `generation`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Receipt {
+    pub(super) operation_id: String,
+    pub(super) request_digest: String,
+    pub(super) generation: u64,
+    pub(super) route_digest: String,
+    pub(super) lineage: u64,
+    pub(super) epoch: u64,
+    pub(super) proof_digest: String,
+}
+
+/// At most one lifecycle slot per tenant; same bound as the tenant list.
+const MAX_LIFECYCLE: usize = 1024;
+
+fn hex_id(value: &str, len: usize) -> bool {
+    value.len() == len
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// SHA-256 (lowercase hex) of a route's canonical JSON.
+pub(super) fn route_digest(route: &Route) -> String {
+    hex(&Sha256::digest(
+        serde_json::to_vec(route).expect("a route always serializes"),
+    ))
+}
+
+fn lifecycle_error(code: &'static str, message: &'static str) -> ApiError {
+    ApiError::new(StatusCode::CONFLICT, code, message)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -280,6 +366,7 @@ impl Snapshot {
             credentials: credentials.snapshot()?,
             directory: Vec::new(),
             migrations: Vec::new(),
+            lifecycle: Vec::new(),
         })
     }
 
@@ -312,6 +399,7 @@ impl Snapshot {
     ) -> Result<Self, ApiError> {
         let mut next = Self::import(credentials, tenants)?.with_directory(self.directory.clone());
         next.migrations = self.migrations.clone();
+        next.lifecycle = self.lifecycle.clone();
         let imported_restrictions = next.credentials.clone();
         for migration in &self.migrations {
             if matches!(
@@ -388,6 +476,7 @@ impl Snapshot {
             || !snapshot.credentials.valid()
             || !valid_directory(&snapshot.directory, &snapshot.tenants)
             || !snapshot.valid_migrations()
+            || !snapshot.valid_lifecycle()
         {
             return Err(Self::invalid());
         }
@@ -429,6 +518,7 @@ impl Snapshot {
                 .iter()
                 .any(|existing| existing.tenant == migration.tenant && !existing.phase.terminal())
             || self.record_for(&migration.tenant) != Some(&migration.source)
+            || self.reserved(&migration.tenant)
         {
             return Err(tenant_migration::conflict());
         }
@@ -612,6 +702,274 @@ impl Snapshot {
             ));
         }
         Ok(self.with_phase(index, Phase::Released, now))
+    }
+}
+
+/// design-tenant-provisioning ITEM-002/003: the lifecycle slot. Every change
+/// is one control-state CAS (`Objects::update`); these build the next state.
+#[cfg_attr(not(test), allow(dead_code))]
+impl Snapshot {
+    fn valid_lifecycle(&self) -> bool {
+        let mut tenants = std::collections::HashSet::new();
+        self.lifecycle.len() <= MAX_LIFECYCLE
+            && self.lifecycle.iter().all(|entry| {
+                hex_id(&entry.tenant, 32)
+                    && entry.generation > 0
+                    && tenants.insert(entry.tenant.as_str())
+                    && self.valid_slot(entry)
+            })
+    }
+
+    fn valid_slot(&self, entry: &Lifecycle) -> bool {
+        match &entry.slot {
+            Slot::Released {
+                operation_id,
+                terminal_digest,
+            } => hex_id(operation_id, 32) && hex_id(terminal_digest, 64),
+            Slot::Reserved {
+                operation_id,
+                kind: _,
+                request_digest,
+                expected_route,
+                cancellation_requested,
+                receipt,
+            } => {
+                let shape = hex_id(operation_id, 32)
+                    && hex_id(request_digest, 64)
+                    && expected_route.as_deref().is_none_or(|d| hex_id(d, 64))
+                    // A reservation excludes a legacy migration of the tenant.
+                    && !self
+                        .migrations
+                        .iter()
+                        .any(|m| m.tenant == entry.tenant && !m.phase.terminal());
+                // A published receipt must still describe the routed tenant:
+                // replacing the directory cannot silently drop or change it.
+                shape
+                    && receipt.as_ref().is_none_or(|receipt| {
+                        !cancellation_requested
+                            && receipt.operation_id == *operation_id
+                            && receipt.request_digest == *request_digest
+                            && hex_id(&receipt.proof_digest, 64)
+                            && self.record_for(&entry.tenant).is_some_and(|route| {
+                                route_digest(route) == receipt.route_digest
+                                    && route.lineage == receipt.lineage
+                                    && route.epoch == Some(receipt.epoch)
+                            })
+                    })
+            }
+        }
+    }
+
+    fn reserved(&self, tenant: &str) -> bool {
+        self.lifecycle(tenant)
+            .is_some_and(|entry| matches!(entry.slot, Slot::Reserved { .. }))
+    }
+
+    /// The tenant's lifecycle slot, if it was ever reserved.
+    pub(super) fn lifecycle(&self, tenant: &str) -> Option<&Lifecycle> {
+        self.lifecycle.iter().find(|entry| entry.tenant == tenant)
+    }
+
+    fn slot_index(&self, tenant: &str, operation_id: &str) -> Result<usize, ApiError> {
+        self.lifecycle
+            .iter()
+            .position(|entry| {
+                entry.tenant == tenant
+                    && matches!(&entry.slot, Slot::Reserved { operation_id: held, .. } if held == operation_id)
+            })
+            .ok_or_else(|| {
+                lifecycle_error(
+                    "lifecycle_not_reserved",
+                    "the tenant's lifecycle slot is not held by this operation",
+                )
+            })
+    }
+
+    /// Reserves the tenant's slot for `operation_id`. Refused while another
+    /// operation holds it or a legacy migration of the tenant is active; a
+    /// `create` needs an unrouted tenant, every other kind a routed one.
+    pub(super) fn reserve(
+        &self,
+        tenant: &str,
+        operation_id: &str,
+        kind: OperationKind,
+        request_digest: &str,
+    ) -> Result<Self, ApiError> {
+        if self.reserved(tenant)
+            || self
+                .migrations
+                .iter()
+                .any(|m| m.tenant == tenant && !m.phase.terminal())
+        {
+            return Err(lifecycle_error(
+                "lifecycle_reserved",
+                "another operation or migration holds the tenant",
+            ));
+        }
+        if matches!(
+            self.lifecycle(tenant).map(|e| &e.slot),
+            Some(Slot::Released { operation_id: done, .. }) if done == operation_id
+        ) {
+            return Err(lifecycle_error(
+                "operation_terminal",
+                "the operation has already ended",
+            ));
+        }
+        let route = self.record_for(tenant);
+        if (kind == OperationKind::Create) != route.is_none() {
+            return Err(lifecycle_error(
+                "lifecycle_transition_unavailable",
+                "the tenant's routing state does not allow this operation",
+            ));
+        }
+        let mut next = self.clone();
+        let slot = Slot::Reserved {
+            operation_id: operation_id.to_owned(),
+            kind,
+            request_digest: request_digest.to_owned(),
+            expected_route: route.map(route_digest),
+            cancellation_requested: false,
+            receipt: None,
+        };
+        match next.lifecycle.iter_mut().find(|e| e.tenant == tenant) {
+            Some(entry) => {
+                entry.generation = entry.generation.checked_add(1).ok_or_else(Self::invalid)?;
+                entry.slot = slot;
+            }
+            None => next.lifecycle.push(Lifecycle {
+                tenant: tenant.to_owned(),
+                generation: 1,
+                slot,
+            }),
+        }
+        Ok(next)
+    }
+
+    /// Records a cancellation request. After activation a cancel cannot
+    /// unpublish the route: 409 `retirement_required`.
+    pub(super) fn request_cancel(
+        &self,
+        tenant: &str,
+        operation_id: &str,
+    ) -> Result<Self, ApiError> {
+        let index = self.slot_index(tenant, operation_id)?;
+        let mut next = self.clone();
+        if let Slot::Reserved {
+            cancellation_requested,
+            receipt,
+            ..
+        } = &mut next.lifecycle[index].slot
+        {
+            if receipt.is_some() {
+                return Err(lifecycle_error(
+                    "retirement_required",
+                    "the operation already activated its route; retire the tenant instead",
+                ));
+            }
+            *cancellation_requested = true;
+        }
+        Ok(next)
+    }
+
+    /// Publishes a `create`'s writer-only dedicated route together with its
+    /// receipt in one generation. Credential and tenant restrictions are the
+    /// published ones, unchanged. Refused after a cancellation request.
+    pub(super) fn activate(
+        &self,
+        tenant: &str,
+        operation_id: &str,
+        route: &Route,
+        proof_digest: &str,
+    ) -> Result<Self, ApiError> {
+        let index = self.slot_index(tenant, operation_id)?;
+        let Slot::Reserved {
+            kind,
+            request_digest,
+            expected_route,
+            cancellation_requested,
+            receipt,
+            ..
+        } = &self.lifecycle[index].slot
+        else {
+            unreachable!("slot_index returns reserved slots");
+        };
+        if *cancellation_requested {
+            return Err(lifecycle_error(
+                "operation_cancelled",
+                "cancellation was requested before activation",
+            ));
+        }
+        let safe = route.tenant == tenant
+            && route.kind == Kind::Dedicated
+            && route.authority_mode.is_none()
+            && route.epoch.is_some_and(|epoch| epoch > 0)
+            && route.reader.is_none()
+            && route.read_routing == ReadRouting::WriterOnly
+            && hex_id(proof_digest, 64);
+        if *kind != OperationKind::Create
+            || receipt.is_some()
+            || expected_route.is_some()
+            || self.record_for(tenant).is_some()
+            || !safe
+        {
+            return Err(lifecycle_error(
+                "lifecycle_transition_unavailable",
+                "the route or slot does not allow this activation",
+            ));
+        }
+        let receipt = Receipt {
+            operation_id: operation_id.to_owned(),
+            request_digest: request_digest.clone(),
+            generation: self.generation.checked_add(1).ok_or_else(Self::invalid)?,
+            route_digest: route_digest(route),
+            lineage: route.lineage,
+            epoch: route.epoch.unwrap_or_default(),
+            proof_digest: proof_digest.to_owned(),
+        };
+        let mut next = self.clone();
+        next.directory.push(route.clone());
+        if let Slot::Reserved { receipt: slot, .. } = &mut next.lifecycle[index].slot {
+            *slot = Some(receipt);
+        }
+        Ok(next)
+    }
+
+    /// Releases the slot. Only a sealed terminal record (`Sealed`, which
+    /// only `tenant_provisioning` seals) can do this, and its outcome must
+    /// match the slot.
+    pub(super) fn release_lifecycle(
+        &self,
+        sealed: &tenant_provisioning::Sealed,
+    ) -> Result<Self, ApiError> {
+        let index = self.slot_index(sealed.tenant_id(), sealed.operation_id())?;
+        let Slot::Reserved {
+            cancellation_requested,
+            receipt,
+            ..
+        } = &self.lifecycle[index].slot
+        else {
+            unreachable!("slot_index returns reserved slots");
+        };
+        let matches = match sealed.outcome() {
+            tenant_provisioning::TerminalOutcome::Succeeded { receipt: sealed } => {
+                receipt.as_ref() == Some(sealed)
+            }
+            tenant_provisioning::TerminalOutcome::Cancelled => {
+                *cancellation_requested && receipt.is_none()
+            }
+        };
+        if !matches {
+            return Err(lifecycle_error(
+                "operation_terminal_conflict",
+                "the sealed outcome does not match the lifecycle slot",
+            ));
+        }
+        let mut next = self.clone();
+        next.lifecycle[index].slot = Slot::Released {
+            operation_id: sealed.operation_id().to_owned(),
+            terminal_digest: sealed.digest().to_owned(),
+        };
+        Ok(next)
     }
 }
 
