@@ -1236,6 +1236,15 @@ The example values are local test inputs, not recommendations. `audience` has
 `poll_interval_ms` must be positive and below `s_ctl_ms`; `max_lifetime_ms`
 must be positive.
 
+Experimental and not usable yet: instead of `control_state`, a trust file can
+name one tenant's control projection,
+`"control_projection": {"store": {"target_file": "target.json", "object": "gateway/projection-<tenant>.json"}, "tenant": "<32 lowercase hex>"}`.
+Exactly one of the two is required. Such a backend decides only from that
+tenant's projection and never falls back to the shared control state. It has
+no qualified clock evidence for the projection's freshness, and no field of
+the trust file can supply one, so its start is refused with
+`projection_freshness_unproven` before the database is opened.
+
 ### Gateway configuration
 
 `vlite-server gateway --config <json>` validates the whole file and both key

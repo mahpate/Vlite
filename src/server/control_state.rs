@@ -1396,6 +1396,52 @@ pub(super) fn read_directory_file(path: &std::path::Path) -> Result<Vec<Route>, 
     serde_json::from_slice(&bytes).map_err(|_| invalid())
 }
 
+/// A named background thread running `tick` every interval until stopped:
+/// the poll loop of a `Feed` and of a tenant projection `Reader`.
+#[derive(Default)]
+pub(in crate::server) struct PollThread(
+    Mutex<Option<(mpsc::Sender<()>, std::thread::JoinHandle<()>)>>,
+);
+
+impl PollThread {
+    pub(in crate::server) fn start(
+        &self,
+        name: &str,
+        interval: Duration,
+        tick: impl Fn() + Send + 'static,
+    ) -> std::io::Result<()> {
+        let (stop, stopped) = mpsc::channel::<()>();
+        let thread = std::thread::Builder::new()
+            .name(name.to_owned())
+            .spawn(move || {
+                while let Err(mpsc::RecvTimeoutError::Timeout) = stopped.recv_timeout(interval) {
+                    tick();
+                }
+            })?;
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = Some((stop, thread));
+        Ok(())
+    }
+
+    /// Stops and joins the thread (at most one in-flight tick).
+    pub(in crate::server) fn stop(&self) {
+        if let Some(thread) = self.begin_stop() {
+            let _ = thread.join();
+        }
+    }
+
+    /// Tells the thread to stop without waiting for it: it ends after any
+    /// tick in progress. Returns the thread to join, once.
+    pub(in crate::server) fn begin_stop(&self) -> Option<std::thread::JoinHandle<()>> {
+        let (stop, thread) = self
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()?;
+        drop(stop);
+        Some(thread)
+    }
+}
+
 /// A serving process's live control state: one confirmed read before it
 /// serves, then a background thread re-reading every poll interval until
 /// stopped. Every failed poll is logged (`control_state_poll_failed`, with
@@ -1405,7 +1451,7 @@ pub(super) struct Feed {
     poller: Poller,
     base: Instant,
     interval: Duration,
-    worker: Mutex<Option<(mpsc::Sender<()>, std::thread::JoinHandle<()>)>>,
+    worker: PollThread,
 }
 
 impl Feed {
@@ -1421,7 +1467,7 @@ impl Feed {
             poller: Poller::new(objects, s_ctl_ms)?,
             base: Instant::now(),
             interval: Duration::from_millis(poll_interval_ms),
-            worker: Mutex::new(None),
+            worker: PollThread::default(),
         })
     }
 
@@ -1452,39 +1498,24 @@ impl Feed {
         self: &Arc<Self>,
         on_poll: impl Fn(u64) + Send + 'static,
     ) -> std::io::Result<()> {
-        let (stop, stopped) = mpsc::channel::<()>();
         let feed = self.clone();
-        let thread = std::thread::Builder::new()
-            .name("control-state-poll".to_owned())
-            .spawn(move || {
-                while let Err(mpsc::RecvTimeoutError::Timeout) = stopped.recv_timeout(feed.interval)
-                {
-                    if let Ok(generation) = feed.poll_once() {
-                        on_poll(generation);
-                    }
+        self.worker
+            .start("control-state-poll", self.interval, move || {
+                if let Ok(generation) = feed.poll_once() {
+                    on_poll(generation);
                 }
-            })?;
-        *self.worker.lock().unwrap_or_else(PoisonError::into_inner) = Some((stop, thread));
-        Ok(())
+            })
     }
 
     /// Stops and joins the poll thread (at most one in-flight read).
     pub(super) fn stop(&self) {
-        if let Some(thread) = self.begin_stop() {
-            let _ = thread.join();
-        }
+        self.worker.stop();
     }
 
     /// Tells the poll thread to stop without waiting for it: it ends after
     /// any read in progress. Returns the thread to join, once.
     pub(super) fn begin_stop(&self) -> Option<std::thread::JoinHandle<()>> {
-        let (stop, thread) = self
-            .worker
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take()?;
-        drop(stop);
-        Some(thread)
+        self.worker.begin_stop()
     }
 }
 

@@ -11,7 +11,7 @@ tags: [design, architecture, aca, tenant-isolation, provisioning, migration]
 
 **DESIGN ONLY — implementation and deployment are not authorized by this document.** This is the next focused design requested by the owner: “also, as discussed previously per tenant writers and auto wirter/reader provisioning design needs to pickup next.”
 
-> **Superseding note (EPIC-001..003 only):** the owner later authorized offline implementation of EPIC-001 (ITEM-001..003) — “go ahead with above fixes” and “Start above together in parallel” — then EPIC-002 (“please go ahead”) and EPIC-003 (“what are you waiting for why you are not pickingup next work items?”). That authorization covers offline code and local fixtures only. EPIC-004..007, existing-tenant migration, cloud/Azure execution, deployment, qualification runs, gate/policy changes, push, merge and PR creation remain unauthorized. See section 15 for the implementation notes.
+> **Superseding note (offline implementation):** the owner later authorized offline implementation of EPIC-001 (ITEM-001..003) — “go ahead with above fixes” and “Start above together in parallel” — then EPIC-002 (“please go ahead”). The owner's next direction, “what are you waiting for why you are not pickingup next work items?”, is the continuing authorization for the remaining non-migration **offline** implementation (code and local fixtures) as prerequisites permit. It is not a per-epic approval wait. It does not authorize Azure/ACA calls, live provisioning, deployment, qualification runs, gate acceptance, gate/policy changes, enabling auto-failover, push, merge or a new PR. Existing-tenant migration (EPIC-006 orchestration and existing-writer migration barriers) stays excluded by the owner's standing direction. See section 15 for the implementation notes.
 This companion extends [feature-aca-ha.prd.md](../feature-aca-ha.prd.md), specifically section 3.11 and EPIC-007/008. It does not reopen delivered primitives or rewrite their history. Its identifiers are local to this companion; `HA:ITEM-028`, for example, names an item in the parent. The parent’s introductory implementation snapshot is historical; the source inventory below distinguishes current code from missing orchestration.
 
 The intended result is an administrator-managed onboarding operation that creates a tenant’s own database, one active writer, and independently scalable readers, then publishes gateway routing only after proof. Today ordinary tenants remain namespaces in a shared database; creating one does **not** provision infrastructure. Neither the current singleton nor its storage is adopted or changed implicitly.
@@ -276,7 +276,7 @@ Status/logs MUST exclude tokens, hashes, passwords, raw cloud stderr, envelope k
 | NFR-002 | Capacity/cost admission MUST include quota headroom, overlap, private-reader staging, retained source/archive and cleanup debt; no new numerical defaults. | Operational constraint. |
 | SEC-001 | Existing permission classification and backend enforcement MUST remain; lifecycle is administrator-only, with no new tenant-data privilege or trust bypass. | Parent SEC-001/002. |
 | SEC-002 | Storage/identities/credentials/control views MUST be scoped, secret-safe and ownership-verifiable; no cross-tenant archive/mount access or automatic resource adoption. | Dedicated isolation. |
-| CON-001 | This task MUST edit only local design docs; no runtime/cloud/main checkout/protected-file/pool/PR actions. Superseded only for EPIC-001's listed offline code/test files by later owner authorization; every cloud/main/pool/PR exclusion still applies. | Explicit task boundary. |
+| CON-001 | This task MUST edit only local design docs; no runtime/cloud/main checkout/protected-file/pool/PR actions. Superseded for offline code/test/doc files by later owner authorization (the superseding note at the top: continuing, non-migration, offline only); every cloud/main/pool/PR exclusion still applies. | Explicit task boundary. |
 | PAT-001 | Reuse current engine, migration, Blob CAS, archive, authority, reader and scaffold primitives; implement only missing composition and safety contracts in future epics. | Avoid duplicate runtime. |
 
 | ID | Assumption / open interpretation | Consequence until resolved |
@@ -388,7 +388,7 @@ Official sources were verified by the bounded research agent. Platform claims be
 | Stage | Allowed future scope | Go/no-go and rollback |
 |-------|----------------------|-----------------------|
 | Design (this task) | Local PRD and index link only. | No commands that provision, deploy, release, or change runtime. All gates unchanged. |
-| Offline implementation proposal | EPIC-001 first (now authorized and implemented offline), then dependent items after explicit authorization. Fake cloud/store tests and schema fixtures. | No Azure credentials required. Preserve legacy formats/API defaults; no automatic cloud enablement. |
+| Offline implementation proposal | EPIC-001 first, then dependent items as their prerequisites permit, under the owner's continuing offline authorization (superseding note at the top; existing-tenant migration excluded). Fake cloud/store tests and schema fixtures. | No Azure credentials required. Preserve legacy formats/API defaults; no automatic cloud enablement. |
 | Local integration proposal | Synthetic multi-tenant fixtures, local processes/emulator, fault injection and permission/profile negative tests. | Evidence is local only. Schema rollback retains reservations/receipts and blocks incompatible binary downgrade. |
 | Isolated cloud qualification | Only after separate authorization, prerequisite proof, actuator fencing, source/reader guards, and applicable existing HA gates. | Existing HA scaffold’s unconditional and writer-update gates are not removed via a Boolean flag; replace refusal only with the separately reviewed/proven protocol. Production remains excluded. |
 | Production consideration | Not authorized; requires owner decisions plus all applicable gate/storage/timing/cost/rollback evidence. | Azure Files power-loss risk and MEAS-005/006 cannot be waived by declaring provisioning complete. GATE-005 stays open/off for auto-failover. |
@@ -404,7 +404,7 @@ Official sources were verified by the bounded research agent. Platform claims be
 | ID | Decision | Rationale |
 |----|----------|-----------|
 | RD-001 | Owner direction: dedicated deployments/files, one writer per tenant, many possible readers, automatic gateway write routing. | Verbatim confirmations captured in FR-001. This resolves topology intent, not rollout approval. |
-| RD-002 | Current-task boundary: design documentation only; no runtime implementation, production deployment or PR. Retain the owner's existing constraint against new external service dependencies. Later narrowed: the owner authorized offline EPIC-001 code only; deployment, cloud execution and PRs stay excluded. | Narrow scope and protect the singleton. Worker-pool nonuse was a planning-execution choice, not a new owner policy. |
+| RD-002 | Current-task boundary: design documentation only; no runtime implementation, production deployment or PR. Retain the owner's existing constraint against new external service dependencies. Later narrowed: the owner authorized offline implementation (EPIC-001, then EPIC-002, then continuing non-migration offline work as prerequisites permit); deployment, cloud execution, migration and PRs stay excluded. | Narrow scope and protect the singleton. Worker-pool nonuse was a planning-execution choice, not a new owner policy. |
 | RD-003 | Retain current gates, policy/measurement thresholds and default-off unqualified auto-failover. | Local primitives are not ACA/storage qualification. |
 | RD-004 | Extend parent HA EPIC-007/008 with missing composition; do not reimplement completed primitives. | Existing source, not historical task wording, controls the gap list. |
 
@@ -466,7 +466,7 @@ An implementation that discovers additional mutation surfaces MUST add a reviewe
 
 ## 14. Implementation Plan
 
-EPIC-001 and EPIC-002 are owner-authorized and implemented offline. EPIC-003 is owner-authorized and partly implemented offline: ITEM-006/007 are partial and ITEM-008 is blocked (see their status columns and section 15). EPIC-004 and later work is **Not Started** and requires separate implementation authorization. Completion is by listed tests/proofs, not estimated time or a historical checkpoint number. Each epic has at most seven unique code/test/doc files; later-discovered surfaces require a separately bounded item. Existing parent epics remain Done at their recorded primitive/scaffold scope.
+EPIC-001 and EPIC-002 are owner-authorized and implemented offline. EPIC-003 is implemented offline as far as its prerequisites permit: ITEM-006/007 are partial and ITEM-008 is blocked (see their status columns and section 15). EPIC-004 and later work is **Not Started**. The owner's continuing direction (superseding note at the top) authorizes its non-migration offline implementation as prerequisites permit, without a per-epic approval wait; it does not authorize any cloud execution, deployment, gate acceptance, auto-failover enablement, push, merge or PR, and existing-tenant migration stays excluded. Completion is by listed tests/proofs, not estimated time or a historical checkpoint number. Each epic has at most seven unique code/test/doc files; later-discovered surfaces require a separately bounded item. Existing parent epics remain Done at their recorded primitive/scaffold scope.
 
 **Dependency interpretation:** The graph orders offline implementation and local fixtures only. Qualification is a separate execution permission, not a prerequisite for writing its own fake/local tests. EPIC-004/005/006 can produce local code and evidence without passing ACA gates, but cannot execute real cloud operations or migrate a production source. EPIC-007 evaluates the evidence from those implementations under separate authorization; its outcome then controls rollout. No circular “qualify before implementing qualification fixtures” dependency is intended.
 
@@ -495,7 +495,7 @@ EPIC-001 and EPIC-002 are owner-authorized and implemented offline. EPIC-003 is 
 
 | Task | Description | Status | Relevant Files |
 |------|-------------|--------|----------------|
-| ITEM-006 | Produce tenant-only backend projection without credentials/other tenant inventory; implement source-read-start freshness witness, monotonic publication and expiry within the existing `S_ctl`, not transport-read age. Add operation-bound pending read-only validation/proof; keep public gateway unaware of pending routes. Test stalled publisher with healthy projection reads, slow reads, replay/restart/clock regression and blocked clock proof, revocation and inability to mutate. | Partial (offline; contract, backend reader and request-path view tested; no production publisher or opt-in; OD-005 clock proof open, see section 15) | `src/server/tenant_provisioning/projection.rs` (new), `src/server/gateway_trust.rs`, `src/server/gateway_trust_tests.rs`, `src/server/credentials.rs` |
+| ITEM-006 | Produce tenant-only backend projection without credentials/other tenant inventory; implement source-read-start freshness witness, monotonic publication and expiry within the existing `S_ctl`, not transport-read age. Add operation-bound pending read-only validation/proof; keep public gateway unaware of pending routes. Test stalled publisher with healthy projection reads, slow reads, replay/restart/clock regression and blocked clock proof, revocation and inability to mutate. | Partial (offline; contract, backend reader, strict default-off `control_projection` trust-file opt-in, startup and request path tested; production start refused `projection_freshness_unproven` because no approved OD-005 clock-proof source exists; no production publisher, see section 15) | `src/server/tenant_provisioning/projection.rs` (new), `src/server/gateway_trust.rs`, `src/server/gateway_trust_tests.rs`, `src/server/credentials.rs`, `src/server/control_state.rs`, `tests/server_cli.rs`, `docs/API.md` |
 | ITEM-007 | Enforce managed reservation at manual/automatic failover and authority-entry paths, and existing control-state edits. Leave auto-failover disabled. Inventory all selected-tenant mutation/background paths; implement central barriers only where coverage is proven, refuse unsupported surfaces, and persist target validation/write-enable guard. Do not claim a route-layer check covers queued work. | Partial (offline; authority claim, manual/automatic failover and control edits guarded; no production holder; an already-serving writer's data/background/queued work is not barriered, see section 15) | `src/server/tenant_provisioning/guard.rs` (new), `src/server/auto_failover.rs`, `src/server/failover.rs`, `src/server/writer_authority.rs`, `src/server/control_state.rs`, `src/server/tenant_provisioning/tests.rs` |
 | ITEM-008 | Prove effective tenant-scoped Blob/mount access, including necessary reader pin writes without authority/global-control writes. If existing object placement cannot enforce it, return a concrete blocker and a bounded follow-up for isolated metadata/pin brokering before ACA execution; never broaden grants as a passing test. | Blocked (existing placement cannot scope pin writes; reader fleets denied with 409 `pin_scope_unproven`; bounded follow-up in section 15) | `src/server/tenant_provisioning.rs`, `src/server/tenant_provisioning/admin.rs`, `src/server/tenant_provisioning/tests.rs`, `src/openapi.json`, `site/api.html` |
 
@@ -568,7 +568,7 @@ No version bump or historical changelog update was requested. This is a new desi
 
 ### EPIC-001 implementation notes (offline, owner-authorized)
 
-The owner's "go ahead with above fixes" / "Start above together in parallel" instruction authorized EPIC-001 code only. The earlier "design only" boundary still applies to every other epic. Cloud execution, deployment, qualification, gate/policy changes, merge and PR creation remain unauthorized.
+The owner's "go ahead with above fixes" / "Start above together in parallel" instruction authorized EPIC-001 code only. At the time, the earlier "design only" boundary still applied to every other epic (since superseded for offline work; see the note at the top). Cloud execution, deployment, qualification, gate/policy changes, merge and PR creation remain unauthorized.
 
 - **ITEM-001** (`src/server/tenant_provisioning.rs`):
   - Strict tagged `Payload`/`Fleet` types (deny unknown fields; unit-like variants are empty structs, so extra fields are refused).
@@ -603,7 +603,7 @@ The owner's "go ahead with above fixes" / "Start above together in parallel" ins
 
 ### EPIC-002 implementation notes (offline, owner-authorized)
 
-The owner's instruction to pick up per-tenant writer and reader provisioning next ("please go ahead") authorized EPIC-002 code only. EPIC-003 and later epics, cloud execution, deployment, qualification, gate/policy changes, existing-tenant migration, push, merge and PR creation remain unauthorized.
+The owner's instruction to pick up per-tenant writer and reader provisioning next ("please go ahead") authorized EPIC-002 code. At the time, EPIC-003 and later epics were not yet authorized (since superseded for non-migration offline work; see the note at the top). Cloud execution, deployment, qualification, gate/policy changes, existing-tenant migration, push, merge and PR creation remain unauthorized.
 
 - **Owner-decision assumptions (defaults, not gates):**
   - OD-001: onboarding is a new explicit managed workflow. Legacy `POST /v1/tenants` and the public gateway are unchanged and never provision.
@@ -667,7 +667,7 @@ The owner's instruction to pick up per-tenant writer and reader provisioning nex
 
 ### EPIC-003 implementation notes (offline, owner-authorized)
 
-The owner's question after EPIC-002, "what are you waiting for why you are not pickingup next work items?", authorized EPIC-003 offline code and local fixtures only. The following remain unauthorized: EPIC-004 and later epics, existing-tenant migration orchestration (the owner's standing exclusion), Azure/ACA calls, deployment, qualification, gate acceptance, policy relaxation, enabling auto-failover, push, merge and PR creation.
+The owner's question after EPIC-002, "what are you waiting for why you are not pickingup next work items?", is the continuing authorization for non-migration offline implementation as prerequisites permit (superseding note at the top). It covers EPIC-003 offline code and local fixtures. It does not authorize existing-tenant migration orchestration or existing-writer migration barriers (the owner's standing exclusion), Azure/ACA calls, live provisioning, deployment, qualification, gate acceptance, policy relaxation, enabling auto-failover, push, merge or PR creation.
 
 None of the three items is Done. ITEM-006 and ITEM-007 are partial; ITEM-008 is blocked. The EPIC-003 exit ("no managed lifecycle bypass remains") is therefore **not met**. Local fixtures here are not evidence of Azure RBAC, mount enforcement or clock qualification.
 
@@ -684,7 +684,7 @@ None of the three items is Done. ITEM-006 and ITEM-007 are partial; ITEM-008 is 
     - The publisher keeps no cache, so a restarted or resumed worker can publish only from a new source read.
     - Nothing is written on any refusal.
   - **Freshness at the backend** (`Reader`).
-    - A witness is accepted only with a `ClockProof`. Without one, every decision returns 503 `projection_freshness_unproven` (OD-005), and the reader has no production constructor.
+    - A witness is accepted only with a `ClockProof`. Without one, every decision returns 503 `projection_freshness_unproven` (OD-005), a poll refuses before reading the projection at all, and `ClockProof` has no production constructor. No configured number, flag, file, fixture or caller assertion is accepted as clock evidence.
     - The remaining validity, `deadline - wall - uncertainty`, is anchored to the monotonic clock when a revision is first accepted. Rereading the same witness never extends it, so a stalled publisher expires at its original deadline (`projection_stale`) however healthy the projection reads are.
     - If the wall clock falls behind the monotonic clock by more than the uncertainty, the reader returns a sticky `projection_clock_regressed` until it restarts.
     - A missing, foreign, oversized or invalid projection fails closed (`projection_missing`, `projection_invalid` or `projection_unavailable`).
@@ -694,18 +694,27 @@ None of the three items is Done. ITEM-006 and ITEM-007 are partial; ITEM-008 is 
     - Pending admission allows only the bound validator credential for the operation's audience and lineage, and only with a read-only grant (`Grant::allows_only` with Read, Search and GraphRead, in `src/server/credentials.rs`). Anything else returns `pending_validation_read_only`, `forbidden_scope` or `envelope_invalid`.
     - A suspended tenant is refused (`tenant_suspended`).
     - `/ready` reports the source generation but never the admission.
-  - **Tests.** Ten unit tests cover: tenant-only content, operation binding, publication regression and races, publisher restart, a required clock proof, a stalled publisher despite healthy reads, a slow source read, replayed or altered witnesses, wall-clock regression, and foreign or unreadable projections.
-
-    The router test `a_projection_backend_serves_only_the_pending_validator_read_only` checks that, with a clock proof:
-    - the validator's GET returns 200, and its POST and any write or management grant are refused;
-    - other credentials and other tenants are refused;
-    - the tenant is never routed.
-
-    Without a clock proof, `/ready` and the data routes return 503 `projection_freshness_unproven`.
+  - **Configuration and startup opt-in (follow-up).**
+    - `--gateway-trust-file` accepts `control_projection: {store: {target_file, object, shared_key_file?}, tenant}` *instead of* `control_state`. Exactly one is required (both or neither: `gateway_trust_invalid`), so a projection backend has no shared full-feed fallback. Both members refuse unknown fields; the tenant must be 32 lowercase hex and the object a valid relative name. A legacy trust file is unchanged, and the default is off.
+    - `GatewayTrust::start` connects the configured coordination store (an offline client build) and constructs the real `Reader` without a clock proof, because no approved proof source exists (OD-005). The first poll therefore refuses `projection_freshness_unproven` before any projection read, and the binary exits before it opens the database. No production configuration can reach a serving projection backend.
+    - With a proof (test-only, through `GatewayTrust::start_projection_on`), the same `start_projection` path performs one accepted read, raises the verifier minimum to its source generation, and starts a `control-projection-poll` thread. The thread raises the minimum on every new witness and logs `control_projection_poll_failed` with its code on refusal. `stop` joins it.
+    - `control_state::PollThread` is the poll loop shared by `Feed` and `Reader`; `Feed`'s behaviour is unchanged.
+    - Public gateway exposure is unchanged.
+  - **Tests.** Ten unit tests cover: tenant-only content, operation binding, publication regression and races, publisher restart, a required clock proof (no store read without one), a stalled publisher despite healthy reads, a slow source read, replayed or altered witnesses, wall-clock regression, and foreign or unreadable projections.
+    - `a_trust_file_selects_exactly_one_strictly_validated_control_view` uses the real parser. It accepts a legacy file and a projection file, and refuses: both views, neither, a short or uppercase tenant, a bad object, unknown `clock_uncertainty_ms` / `clock_proof` fields and a missing `store`.
+    - `a_projection_backend_does_not_start_without_a_clock_proof` uses the production `start` with a loopback emulator target that nothing listens on; it returns `projection_freshness_unproven`.
+    - `a_projection_backend_serves_only_the_pending_validator_read_only` uses the real trust file, `start_projection` and router. Without a proof, start is refused even though a valid projection is published. With a test proof:
+      - the validator's GET returns 200, and its POST and any write or management grant are refused;
+      - other credentials, other tenants and a generation-1 envelope (below the started minimum of 2) are refused;
+      - the tenant is never routed;
+      - `/ready` reports generation 2 without admission;
+      - after a new source generation is republished, the poll thread raises `/ready` and the minimum to 3, so a generation-2 envelope is `envelope_stale`;
+      - with an uncertainty leaving about 0.5 s, the polling backend expires to 503 `projection_stale` and is not extended by rereads.
+    - `tests/server_cli.rs` `gateway_commands_validate_configuration_and_keep_keys_out_of_output` starts the real binary with a projection-only trust file. The binary exits without `LISTENING`, reports `projection_freshness_unproven` and creates no database. Both views, a bad tenant and an injected `clock_uncertainty_ms` are each refused with `gateway_trust_invalid`.
   - **Not done:**
-    - There is no production publisher; it is the control worker in ITEM-010/016.
-    - There is no `--gateway-trust-file` opt-in; the strict schema still refuses one. `View::Projection` is therefore constructed only by tests, and public gateway exposure is unchanged.
-    - The private readiness-proof channel is EPIC-004.
+    - There is no approved clock-proof source (OD-005). This blocks local implementation on a contract decision: what qualified evidence exists, who attests it, and how a backend receives and revalidates it. It also blocks live qualification, because the evidence must be real. Until both are resolved, projection startup, readiness and admission stay refused.
+    - There is no production publisher. It is the control worker in ITEM-010/016, so the publisher and guard-holder composition is EPIC-004 ITEM-010.
+    - The private readiness-proof channel is EPIC-004 ITEM-010.
     - Only a `create` reservation can carry a pending admission.
 - **ITEM-007: lifecycle interlocks.** Status: Partial.
   - **Durable target guard** (`src/server/tenant_provisioning/guard.rs`, new).
@@ -753,7 +762,7 @@ None of the three items is Done. ITEM-006 and ITEM-007 are partial; ITEM-008 is 
     - `resume` of a `set_readers` operation for a present fleet returns 409 `pin_scope_unproven` through the shared `act` path, so REST and CLI behave the same.
     - The status `next_step` names the blocker, and `cancel` still releases the reservation.
     - An absent (scale-to-zero) fleet is unaffected.
-    - Projection mode has no production opt-in. The managed workflow has no reader actuator (EPIC-005 is not started), and no deploy script or role template was changed.
+    - Projection mode is configurable but refuses to start without a clock proof. The managed workflow has no reader actuator (EPIC-005 is not started), and no deploy script or role template was changed.
     - No grant was broadened. The documentation is in `src/openapi.json` and `site/api.html`.
   - **Bounded follow-up, required before any ACA reader execution:**
     - Either (a) broker pin and release through the VLite control role as an operation-bound request, or (b) move pins into per-replica pin objects or a separate container, with layout and janitor changes in `cloud_backup` (EPIC-005 ITEM-012/013).
@@ -767,21 +776,60 @@ None of the three items is Done. ITEM-006 and ITEM-007 are partial; ITEM-008 is 
   - It raised two low-severity notes, both currently unreachable in production, and both kept fail-closed:
     1. **Clock drift.** `check_clock` anchors at max(wall, expected), so monotonic-vs-wall drift beyond the uncertainty yields a false but sticky `projection_clock_regressed`. The doc comment now states that a qualified clock proof must bound that drift (OD-005).
     2. **Concurrent polls.** Two concurrent `poll` calls read outside the lock, so the slower one can return a non-sticky `projection_regressed`. This is harmless; the next poll succeeds.
-- **Verification:**
+- **Verification (first pass, commits `68ef855c` / `e31fd522`):**
   - `cargo test --features server --lib`: 2200 passed, 0 failed, 10 ignored.
   - The focused set `projection lifecycle tenant_provisioning:: failover writer_authority control_state gateway_trust reader_apply`: 210 passed.
   - `cargo clippy --features server --all-targets -- -D warnings`, `rustfmt --edition 2024 --check` on the 12 `.rs` files and `git diff --check` are all clean.
   - These guard scripts pass: `api_route_inventory`, `admin_route_coverage`, `api_reference` (950 items), `api_reference_ui`, `openapi_contract` and `content_budget`.
   - No Azure, ARM, ACA, emulator, deployment or live-target actions were run.
+- **Follow-up: ITEM-006 configuration, startup and request-path wiring.**
+  - **Scope.** The `control_projection` opt-in described under ITEM-006 above, plus this PRD's authorization wording.
+    - Files: `src/server/gateway_trust.rs`, `src/server/gateway_trust_tests.rs`, `src/server/tenant_provisioning/projection.rs`, `src/server/control_state.rs` (`PollThread` extraction), `src/server/tenant_provisioning.rs` (`is_hex` visibility), `tests/server_cli.rs`, `docs/API.md` and this PRD.
+    - The binary needed no change: it already starts the trust before opening the database.
+  - **Test order.** The new tests were written before the implementation, but they were not run until it was in place, so they were not observed failing first. A mutation that removed the early no-proof refusal made `every_decision_needs_a_clock_proof` fail; the mutation was then reverted.
+  - **Verification:**
+    - `cargo test --features server --lib`: 2202 passed, 0 failed, 10 ignored.
+    - The same focused set: 212 passed.
+    - `cargo test --features server --test server_cli gateway_commands`: 1 passed.
+    - `cargo clippy --features server --all-targets -- -D warnings`, `rustfmt --edition 2024 --check` on the six changed `.rs` files and `git diff --check` are all clean.
+    - The six guard scripts above pass again (`api_reference` 950 items).
+    - No Azure, ARM, ACA, emulator, deployment or live-target actions were run. The loopback emulator targets in the tests point at port 9, and the stores are never read.
+  - **Review.** A targeted self-review of the follow-up diff checked four things:
+    - there is no full-feed fallback;
+    - no production path constructs a `ClockProof`;
+    - `Feed` behaviour is unchanged;
+    - poll threads are joined by `stop`.
+
+    The parent's instruction to reuse the earlier review context meant no new broad review was run.
 - **Residual blockers to local implementation:**
-  - The ITEM-010/016 control worker, which is the production projection publisher and the guard holder.
-  - A projection opt-in in the gateway-trust configuration.
-  - The EPIC-004 readiness-proof channel.
-  - A central data, background and queued-work barrier for an already-serving writer, which EPIC-006 migration requires.
-  - ITEM-008 follow-up (a) or (b).
+  - **OD-005 clock-proof source contract.** This is a decision, not code: which approved evidence exists, who attests it, and how a backend receives and revalidates it, including the bound on monotonic-vs-wall drift. Until it exists, projection startup, readiness and admission stay refused, and no stand-in is accepted.
+  - **The ITEM-010/016 control worker** (EPIC-004 ITEM-010). It is the production projection publisher and the guard holder, and it owns the private readiness-proof transport.
+  - **ITEM-008 follow-up (a) or (b)**, a separately bounded reader-pin isolation item. Until it lands, present-reader execution keeps refusing `pin_scope_unproven`.
+  - **Not to be implemented (owner exclusion):** a central data, background and queued-work barrier for an already-serving writer. Only existing-tenant migration needs it, so migration stays refused.
 - **Residual blockers to live qualification:**
   - OD-005: a qualified `ClockProof` that also bounds monotonic-vs-wall drift.
   - Read scope of the projection storage.
   - Effective Azure RBAC and mount enforcement for reader pins after the ITEM-008 follow-up.
   - Qualification of the auto-failover interlock before any enablement.
   - MEAS-, GATE- and cloud gates are unchanged and open.
+- **EPIC-004 offline handoff** (local code and fixtures only; nothing here enables cloud execution).
+  - **Contracts it can use:**
+    - **Operation and reservation contract.** The EPIC-001/002 operation/reservation contract and its managed CAS path (`Objects::update`). Unmanaged edits through `Objects::apply` refuse reserved tenants.
+    - **Publishing the projection.** `projection::Publisher::new` / `publish(tenant, Option<&Pending>, now)` and `Pending`.
+      - Publish from a new source read every time; there is no cache.
+      - A pending admission only for an unrouted `create` reservation.
+      - Treat `projection_conflict` / `projection_indeterminate` as read-before-retry.
+    - **The guard.** `guard::Guards::{new, of, current, hold, enable_writes, release}`.
+      - Hold before the target writer starts, then re-read `authority.json` to close the check-then-transfer window.
+      - Enable writes only after validation.
+      - Release on completion or cancel. Every write is a CAS, and only the holder moves forward.
+    - **Backend side.** The `control_projection` trust-file view with its `start_projection` path. Local fixtures use the `#[cfg(test)]` `GatewayTrust::start_projection_on` and `ClockProof::for_test`.
+    - **Poll loops.** `control_state::PollThread` for worker poll loops.
+  - **What must keep refusing:**
+    - Projection startup, readiness and admission without an approved OD-005 proof source (`projection_freshness_unproven`). Do not add a configured or caller-asserted `ClockProof`, and do not add a full-feed fallback.
+    - Present reader fleets (`pin_scope_unproven`) until the ITEM-008 follow-up.
+    - Authority claim while held (`lifecycle_write_disabled`).
+    - Failover of a held target (`lifecycle_reserved`).
+    - Auto-failover stays disabled.
+    - Existing-tenant migration, including existing-writer barriers, stays excluded.
+    - Every Azure/ACA call, provisioning, deployment, gate acceptance, push, merge and PR.

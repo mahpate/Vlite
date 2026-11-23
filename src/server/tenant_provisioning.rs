@@ -104,7 +104,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
     hex(&Sha256::digest(bytes))
 }
 
-fn is_hex(value: &str, len: usize) -> bool {
+pub(super) fn is_hex(value: &str, len: usize) -> bool {
     value.len() == len
         && value
             .bytes()

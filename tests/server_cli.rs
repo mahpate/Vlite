@@ -1928,6 +1928,43 @@ fn gateway_commands_validate_configuration_and_keep_keys_out_of_output() {
         let (ok, _, stderr) = backend(&[], false);
         assert!(!ok && stderr.contains("gateway_trust_invalid"), "{stderr}");
     }
+    // design-tenant-provisioning ITEM-006: deciding from the tenant's control
+    // projection is opt-in by `control_projection`, exclusive with
+    // `control_state`. No approved clock-proof source exists (OD-005), so
+    // such a backend is refused at startup; its loopback store, on a port
+    // nothing listens on, is never read.
+    let projection_target = root.join("projection-target.json");
+    std::fs::write(
+        &projection_target,
+        json!({"account":"devstoreaccount1","container":"data","coordination_container":"coord",
+            "prefix":"p/","endpoint":"http://127.0.0.1:9/devstoreaccount1",
+            "auth":"emulator_shared_key"})
+        .to_string(),
+    )
+    .unwrap();
+    let shared_key = root.join("shared.key");
+    std::fs::write(&shared_key, "a2V5").unwrap();
+    let mut projection = trust_base.clone();
+    projection.as_object_mut().unwrap().remove("control_state");
+    projection["control_projection"] = json!({"store":{"target_file":projection_target,
+        "object":"gateway/projection-t.json","shared_key_file":shared_key},
+        "tenant":"0123456789abcdef0123456789abcdef"});
+    std::fs::write(&trust, projection.to_string()).unwrap();
+    let (ok, stdout, stderr) = backend(&[], false);
+    assert!(!ok && !stdout.contains("LISTENING"), "{stderr}");
+    assert!(stderr.contains("projection_freshness_unproven"), "{stderr}");
+    for change in [
+        &(|v: &mut Value| v["control_state"] = trust_base["control_state"].clone())
+            as &dyn Fn(&mut Value),
+        &|v| v["control_projection"]["tenant"] = json!("0123"),
+        &|v| v["control_projection"]["clock_uncertainty_ms"] = json!(500),
+    ] {
+        let mut value = projection.clone();
+        change(&mut value);
+        std::fs::write(&trust, value.to_string()).unwrap();
+        let (ok, _, stderr) = backend(&[], false);
+        assert!(!ok && stderr.contains("gateway_trust_invalid"), "{stderr}");
+    }
     assert!(!database.exists(), "nothing is created on a refused start");
 
     std::fs::write(&trust, trust_base.to_string()).unwrap();

@@ -382,45 +382,175 @@ async fn backend_holds_the_highest_generation_and_accepts_rotation_overlap() {
     );
 }
 
-/// design-tenant-provisioning ITEM-006 through the router: a backend that
-/// decides from its tenant's control projection serves a pending `create`
-/// only to the operation's validator and only read-only, while the control
-/// state still routes nothing to the tenant (so the public gateway cannot
-/// reach it); without a clock proof (OD-005) it refuses every decision.
+/// A `--gateway-trust-file` in `dir` with `view` (its `control_state` or
+/// `control_projection` members), through the real parser. The bundle
+/// holds `env::signer("k1", 1)`.
+fn trust_config(dir: &std::path::Path, view: Value) -> Result<GatewayTrustConfig, String> {
+    let bundle = dir.join("bundle.json");
+    std::fs::write(&bundle, env::public_bundle(&[&env::signer("k1", 1)], 1)).unwrap();
+    let mut file = json!({"audience": AUDIENCE, "public_key_bundle_file": bundle,
+        "s_ctl_ms": HOUR, "poll_interval_ms": 10, "skew_ms": 1_000,
+        "max_lifetime_ms": LIFETIME, "readiness_propagation_ms": 0});
+    for (name, value) in view.as_object().unwrap() {
+        file[name] = value.clone();
+    }
+    let path = dir.join("trust.json");
+    std::fs::write(&path, file.to_string()).unwrap();
+    GatewayTrustConfig::read(&path)
+}
+
+/// The `control_projection` member: `tenant`'s projection `object`.
+fn projection_view(dir: &std::path::Path, object: &str, tenant: &str) -> Value {
+    json!({"control_projection": {"store": {"target_file": dir.join("target.json"),
+        "object": object}, "tenant": tenant}})
+}
+
+/// design-tenant-provisioning ITEM-006: the projection view is selected only
+/// by the trust file's `control_projection`, exclusive with `control_state`
+/// (a legacy file is unchanged), and validated before any store is
+/// contacted. No field (a number, a flag) stands in for clock evidence.
+#[test]
+fn a_trust_file_selects_exactly_one_strictly_validated_control_view() {
+    let directory = tempfile::tempdir().unwrap();
+    let dir = directory.path();
+    let object = "control/projection-t.json";
+    let state = json!({"target_file": dir.join("target.json"), "object": NAME});
+    assert!(trust_config(dir, json!({ "control_state": state })).is_ok());
+    assert!(trust_config(dir, projection_view(dir, object, T1)).is_ok());
+    let with = |change: &dyn Fn(&mut Value)| {
+        let mut view = projection_view(dir, object, T1);
+        change(&mut view);
+        view
+    };
+    for (view, expected) in [
+        (
+            with(&|v| v["control_state"] = state.clone()),
+            "exactly one of control_state or control_projection",
+        ),
+        (
+            json!({}),
+            "exactly one of control_state or control_projection",
+        ),
+        (
+            projection_view(dir, object, "0123"),
+            "control_projection.tenant",
+        ),
+        (
+            projection_view(dir, object, &T1.to_uppercase()),
+            "control_projection.tenant",
+        ),
+        (
+            projection_view(dir, "Control/Projection.json", T1),
+            "control_projection.store.object",
+        ),
+        (
+            with(&|v| v["control_projection"]["clock_uncertainty_ms"] = json!(500)),
+            "unknown field",
+        ),
+        (with(&|v| v["clock_proof"] = json!(true)), "unknown field"),
+        (
+            json!({"control_projection": {"tenant": T1}}),
+            "missing field",
+        ),
+    ] {
+        let error = trust_config(dir, view).err().unwrap();
+        assert!(
+            error.starts_with("gateway_trust_invalid: ") && error.contains(expected),
+            "{error}"
+        );
+    }
+}
+
+/// The production start of a projection backend: no approved clock-proof
+/// source exists (OD-005), so it refuses before reading its projection and
+/// never opens a database or serves. Its loopback store is never contacted.
+#[test]
+fn a_projection_backend_does_not_start_without_a_clock_proof() {
+    let directory = tempfile::tempdir().unwrap();
+    let dir = directory.path();
+    let target = json!({"account":"devstoreaccount1","container":"data",
+        "coordination_container":"coord","prefix":"p/",
+        "endpoint":"http://127.0.0.1:9/devstoreaccount1","auth":"emulator_shared_key"});
+    std::fs::write(dir.join("target.json"), target.to_string()).unwrap();
+    std::fs::write(dir.join("shared.key"), "a2V5").unwrap();
+    let mut view = projection_view(dir, "control/projection-t.json", T1);
+    view["control_projection"]["store"]["shared_key_file"] = json!(dir.join("shared.key"));
+    let config = trust_config(dir, view).ok().unwrap();
+    match GatewayTrust::start(config) {
+        Ok(_) => panic!("a projection backend started without a clock proof"),
+        Err(error) => assert!(
+            error.starts_with("projection_freshness_unproven: "),
+            "{error}"
+        ),
+    }
+}
+
+/// Polls `router`'s `/ready` until `done` holds (at most 5 s).
+async fn ready_until(router: &Router, done: impl Fn(StatusCode, &Value) -> bool) -> Value {
+    for _ in 0..500 {
+        let (status, body) = call(router, "GET", "/ready", &[]).await;
+        if done(status, &body) {
+            return body;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("/ready never reached the expected state");
+}
+
+/// design-tenant-provisioning ITEM-006 through the real trust file, start
+/// and router: a backend that decides from its tenant's control projection
+/// serves a pending `create` only to the operation's validator and only
+/// read-only, while the control state still routes nothing to the tenant
+/// (so the public gateway cannot reach it). Its poll thread follows new
+/// witnesses and raises the minimum `A`, and never extends a witness by
+/// rereading it. It starts only with a test-only clock proof: without one
+/// (production, OD-005) even a valid published projection is refused.
 #[tokio::test]
 async fn a_projection_backend_serves_only_the_pending_validator_read_only() {
     use credentials::Op;
-    use tenant_provisioning::projection::{ClockProof, Reader, tests as fixture};
+    use tenant_provisioning::projection::{ClockProof, tests as fixture};
     let key = env::signer("k1", 1);
-    let backend = |clock: Option<ClockProof>| {
-        let mut service = service();
-        let lineage = service.lineage.unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let dir = directory.path();
+    let start = |clock: Option<ClockProof>| {
+        let backend = service();
+        let lineage = backend.lineage.unwrap();
         let memory = fixture::world(false, lineage);
+        let pending = fixture::pending(AUDIENCE, lineage);
         fixture::publisher(&memory)
-            .publish(fixture::T, Some(&fixture::pending(AUDIENCE, lineage)), now)
+            .publish(fixture::T, Some(&pending), now)
             .unwrap();
-        let reader = Reader::new(memory.clone(), fixture::NAME, fixture::T, HOUR, clock).unwrap();
-        let polled = reader.poll().map_err(|e| e.code);
-        service.trust = Some(Arc::new(Trust::for_projection_test(
-            verifier(&[&key], 1),
-            Arc::new(reader),
-            AUDIENCE,
-        )));
-        (router(service), lineage, memory, polled)
+        let config = trust_config(dir, projection_view(dir, fixture::NAME, fixture::T))
+            .ok()
+            .unwrap();
+        GatewayTrust::start_projection_on(config, memory.clone(), clock).map(|trust| {
+            let router = router(backend.with_gateway_trust(&trust));
+            (router, trust, lineage, memory, pending)
+        })
     };
     let header = principal_envelope::HEADER;
     let code = |body: &Value| body["error"]["code"].as_str().map(str::to_owned);
 
-    let (router, lineage, memory, polled) = backend(Some(ClockProof::for_test(1_000)));
-    // Generation 2: the fixture's reservation of the tenant for `create`.
-    assert_eq!(polled, Ok(2));
-    let (snapshot, _) = Objects::new(memory, fixture::SOURCE).read().unwrap();
-    assert!(snapshot.record_for(fixture::T).is_none(), "never routed");
-    let token = |id: &str, tenant: &str, ops: &[Op]| {
-        key.sign(&claims_for(id, Some(tenant), lineage, ops, 1))
+    match start(None) {
+        Ok(_) => panic!("started without a clock proof"),
+        Err(error) => assert!(
+            error.starts_with("projection_freshness_unproven: "),
+            "{error}"
+        ),
+    }
+
+    let Ok((router, trust, lineage, memory, pending)) = start(Some(ClockProof::for_test(1_000)))
+    else {
+        panic!("a proven projection backend starts");
+    };
+    let source = Objects::new(memory.clone(), fixture::SOURCE);
+    assert!(source.read().unwrap().0.record_for(fixture::T).is_none());
+    let token = |id: &str, tenant: &str, ops: &[Op], a: u64| {
+        key.sign(&claims_for(id, Some(tenant), lineage, ops, a))
             .unwrap()
     };
-    let validator = token(fixture::VALIDATOR, fixture::T, &[Op::Read]);
+    // Generation 2 (the fixture's `create` reservation) is now the minimum.
+    let validator = token(fixture::VALIDATOR, fixture::T, &[Op::Read], 2);
     let (status, _) = call(&router, "GET", "/v1/collections", &[(header, &validator)]).await;
     assert_eq!(status, StatusCode::OK);
     let (status, body) = call(&router, "POST", "/v1/collections", &[(header, &validator)]).await;
@@ -430,20 +560,29 @@ async fn a_projection_backend_serves_only_the_pending_validator_read_only() {
     );
     for (token, expected) in [
         (
-            token(fixture::VALIDATOR, fixture::T, &[Op::Read, Op::Collections]),
+            token(
+                fixture::VALIDATOR,
+                fixture::T,
+                &[Op::Read, Op::Collections],
+                2,
+            ),
             (StatusCode::FORBIDDEN, "pending_validation_read_only"),
         ),
         (
-            token(fixture::VALIDATOR, fixture::T, &[Op::Read, Op::Write]),
+            token(fixture::VALIDATOR, fixture::T, &[Op::Read, Op::Write], 2),
             (StatusCode::FORBIDDEN, "pending_validation_read_only"),
         ),
         (
-            token("abcdefghijkl", fixture::T, &[Op::Read]),
+            token("abcdefghijkl", fixture::T, &[Op::Read], 2),
             (StatusCode::UNAUTHORIZED, "envelope_invalid"),
         ),
         (
-            token(fixture::VALIDATOR, T1, &[Op::Read]),
+            token(fixture::VALIDATOR, T1, &[Op::Read], 2),
             (StatusCode::UNAUTHORIZED, "envelope_invalid"),
+        ),
+        (
+            token(fixture::VALIDATOR, fixture::T, &[Op::Read], 1),
+            (StatusCode::UNAUTHORIZED, "envelope_stale"),
         ),
     ] {
         let (status, body) = call(&router, "GET", "/v1/collections", &[(header, &token)]).await;
@@ -454,32 +593,52 @@ async fn a_projection_backend_serves_only_the_pending_validator_read_only() {
     }
     let (status, body) = call(&router, "GET", "/ready", &[]).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["generation"], 2);
+    assert_eq!(
+        (&body["generation"], &body["minimum_generation"]),
+        (&json!(2), &json!(2))
+    );
     assert!(body.get("admission").is_none() && body.get("pending").is_none());
 
-    let (router, lineage, _, polled) = backend(None);
-    assert_eq!(polled, Err("projection_freshness_unproven"));
+    // A new source generation in a new witness: the poll thread accepts it
+    // and raises the minimum, so an envelope from generation 2 is stale.
+    source.update(now(), |c| Ok(c.clone())).unwrap();
+    fixture::publisher(&memory)
+        .publish(fixture::T, Some(&pending), now)
+        .unwrap();
+    let body = ready_until(&router, |_, body| body["generation"] == 3).await;
+    assert_eq!(body["minimum_generation"], 3);
+    let (status, body) = call(&router, "GET", "/v1/collections", &[(header, &validator)]).await;
+    assert_eq!(
+        (status, code(&body).as_deref()),
+        (StatusCode::UNAUTHORIZED, Some("envelope_stale"))
+    );
+    trust.stop();
+
+    // An uncertainty leaving about 0.5 s of S_ctl: the polling backend
+    // rereads the same witness, which never extends it, and fails closed.
+    let Ok((router, trust, lineage, _, _)) =
+        start(Some(ClockProof::for_test(fixture::S_CTL - 500)))
+    else {
+        panic!("a proven projection backend starts");
+    };
+    ready_until(&router, |status, body| {
+        status == StatusCode::SERVICE_UNAVAILABLE
+            && code(body).as_deref() == Some("projection_stale")
+    })
+    .await;
     let validator = key
         .sign(&claims_for(
             fixture::VALIDATOR,
             Some(fixture::T),
             lineage,
             &[Op::Read],
-            1,
+            2,
         ))
         .unwrap();
-    for (path, headers) in [
-        ("/ready", vec![]),
-        ("/v1/collections", vec![(header, validator.as_str())]),
-    ] {
-        let (status, body) = call(&router, "GET", path, &headers).await;
-        assert_eq!(
-            (status, code(&body).as_deref()),
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Some("projection_freshness_unproven")
-            ),
-            "{path}"
-        );
-    }
+    let (status, body) = call(&router, "GET", "/v1/collections", &[(header, &validator)]).await;
+    assert_eq!(
+        (status, code(&body).as_deref()),
+        (StatusCode::SERVICE_UNAVAILABLE, Some("projection_stale"))
+    );
+    trust.stop();
 }

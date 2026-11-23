@@ -25,17 +25,20 @@
 //! more than the uncertainty is a sticky `projection_clock_regressed`.
 //!
 //! Not covered (see the PRD, section 15): there is no production publisher
-//! (the control worker, ITEM-010/016) and no `--gateway-trust-file` opt-in
-//! (its strict schema refuses one); both wait on OD-005 clock evidence.
-//! Only a `create` reservation can carry a pending admission, and the
-//! private readiness proof channel is EPIC-004.
+//! (the control worker, ITEM-010/016). A backend opts in only by its
+//! `--gateway-trust-file`'s `control_projection` (exclusive with
+//! `control_state`, so there is no full-feed fallback), and without a clock
+//! proof its start is refused before any projection read. Only a `create`
+//! reservation can carry a pending admission, and the private readiness
+//! proof channel is EPIC-004.
 #![cfg_attr(not(test), allow(dead_code))]
 
 use super::*;
+use crate::server::control_state::PollThread;
 use crate::server::credentials::{Grant, Op};
 use crate::server::principal_envelope::Refusal;
 use std::sync::{Mutex, PoisonError};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 pub(in crate::server) const SCHEMA: &str = "vlite.control-projection/1";
 const MAX_PROJECTION_BYTES: u64 = 64 * 1024;
@@ -354,7 +357,8 @@ impl Publisher {
 }
 
 /// The approved pairwise clock uncertainty, backed by qualified clock
-/// evidence (OD-005). Nothing can produce one outside tests yet.
+/// evidence (OD-005). Nothing can produce one outside tests yet: no
+/// configured number, flag, file or caller assertion is clock evidence.
 pub(in crate::server) struct ClockProof {
     uncertainty_ms: u64,
 }
@@ -364,6 +368,13 @@ impl ClockProof {
     pub(in crate::server) fn for_test(uncertainty_ms: u64) -> Self {
         Self { uncertainty_ms }
     }
+}
+
+fn unproven() -> ApiError {
+    unavailable(
+        "projection_freshness_unproven",
+        "no qualified clock proof covers the projection's freshness",
+    )
 }
 
 struct Accepted {
@@ -390,6 +401,7 @@ pub(in crate::server) struct Reader {
     clock: Option<ClockProof>,
     base: Instant,
     state: Mutex<State>,
+    worker: PollThread,
 }
 
 impl Reader {
@@ -411,7 +423,27 @@ impl Reader {
             clock,
             base: Instant::now(),
             state: Mutex::new(State::default()),
+            worker: PollThread::default(),
         })
+    }
+
+    /// Starts the poll thread; `on_poll` sees each poll's outcome (the
+    /// source generation or the refusal).
+    pub(in crate::server) fn start(
+        self: &Arc<Self>,
+        interval: Duration,
+        on_poll: impl Fn(Result<u64, ApiError>) + Send + 'static,
+    ) -> std::io::Result<()> {
+        let reader = self.clone();
+        self.worker
+            .start("control-projection-poll", interval, move || {
+                on_poll(reader.poll())
+            })
+    }
+
+    /// Stops and joins the poll thread (at most one in-flight read).
+    pub(in crate::server) fn stop(&self) {
+        self.worker.stop();
     }
 
     /// (wall, monotonic) now, in ms.
@@ -437,10 +469,7 @@ impl Reader {
     /// proof must bound that drift over the backend's lifetime (OD-005).
     fn check_clock(&self, state: &mut State, wall: u64, mono: u64) -> Result<u64, ApiError> {
         let Some(proof) = &self.clock else {
-            return Err(unavailable(
-                "projection_freshness_unproven",
-                "no qualified clock proof covers the projection's freshness",
-            ));
+            return Err(unproven());
         };
         if !state.regressed {
             match state
@@ -472,8 +501,12 @@ impl Reader {
     }
 
     /// The clocks are sampled under the lock, after the read, so that
-    /// concurrent callers present nondecreasing monotonic times.
+    /// concurrent callers present nondecreasing monotonic times. Without a
+    /// clock proof nothing is read.
     fn poll_with(&self, now: impl FnOnce() -> (u64, u64)) -> Result<u64, ApiError> {
+        if self.clock.is_none() {
+            return Err(unproven());
+        }
         let read = read(&*self.store, &self.name, &self.tenant, self.s_ctl_ms);
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let (wall, mono) = now();
@@ -558,7 +591,7 @@ pub(in crate::server) mod tests {
     pub(in crate::server) const SOURCE: &str = "control/state.json";
     pub(in crate::server) const NAME: &str = "control/projection-t.json";
     pub(in crate::server) const VALIDATOR: &str = "vvvvvvvvvvvv";
-    const S_CTL: u64 = 10_000;
+    pub(in crate::server) const S_CTL: u64 = 10_000;
     const U: u64 = 500;
 
     /// The source control state: T and OTHER with tenant-bound credentials,
@@ -817,6 +850,11 @@ pub(in crate::server) mod tests {
     fn every_decision_needs_a_clock_proof() {
         let memory = world(true, 0x1234);
         publisher(&memory).publish(T, None, || 1_000).unwrap();
+        let read = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = read.clone();
+        memory.hook(StoreOp::Get, NAME, move || {
+            flag.store(true, Ordering::SeqCst)
+        });
         let unproven = Reader::new(memory.clone(), NAME, T, S_CTL, None).unwrap();
         assert_eq!(
             code(unproven.poll_at(1_000, 0)),
@@ -827,6 +865,8 @@ pub(in crate::server) mod tests {
             "projection_freshness_unproven"
         );
         assert_eq!(code(unproven.poll()), "projection_freshness_unproven");
+        // Without a proof the reader does not even read the projection.
+        assert!(!read.load(Ordering::SeqCst));
     }
 
     #[test]

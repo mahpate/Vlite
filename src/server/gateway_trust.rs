@@ -18,10 +18,17 @@
 //! It fails closed when its copy is older than S_ctl, and refuses a
 //! generation regression. `/ready` (unauthenticated in this mode) reports
 //! the generation, or 503 when stale or draining.
+//!
+//! design-tenant-provisioning ITEM-006: a trust file with
+//! `control_projection` instead of `control_state` decides from its one
+//! tenant's control projection (`tenant_provisioning::projection`), never
+//! the shared control state. Its start is refused without a qualified clock
+//! proof, which nothing outside tests can supply yet (OD-005).
 
+use super::cloud_backup::ObjectStore;
 use super::control_state::{Feed, Source};
 use super::principal_envelope::{Policy, Refusal, Verifier};
-use super::tenant_provisioning::projection::Reader;
+use super::tenant_provisioning::projection::{ClockProof, Reader};
 use super::*;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
@@ -52,7 +59,11 @@ struct TrustFile {
     /// the tenants it serves name it.
     audience: String,
     public_key_bundle_file: PathBuf,
-    control_state: Source,
+    /// Exactly one of `control_state` and `control_projection`.
+    #[serde(default)]
+    control_state: Option<Source>,
+    #[serde(default)]
+    control_projection: Option<ProjectionSource>,
     s_ctl_ms: u64,
     poll_interval_ms: u64,
     skew_ms: u64,
@@ -61,10 +72,27 @@ struct TrustFile {
     readiness_propagation_ms: u64,
 }
 
+/// design-tenant-provisioning ITEM-006: decide from `tenant`'s control
+/// projection, the object `store.object` under the coordination prefix,
+/// instead of the shared control state. It carries no clock evidence.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProjectionSource {
+    store: Source,
+    tenant: String,
+}
+
+/// The validated control view of a trust file.
+enum ViewSource {
+    Full(Source),
+    Projection(ProjectionSource),
+}
+
 /// A validated `--gateway-trust-file`: every field and the public key bundle
 /// are checked; the store is not contacted yet.
 pub struct GatewayTrustConfig {
     file: TrustFile,
+    view: ViewSource,
     verifier: Verifier,
 }
 
@@ -75,14 +103,38 @@ fn invalid(detail: impl std::fmt::Display) -> String {
 impl GatewayTrustConfig {
     pub fn read(path: &Path) -> Result<Self, String> {
         let bytes = read_bounded(path, MAX_CONFIG_BYTES, "trust file").map_err(invalid)?;
-        let file: TrustFile = serde_json::from_slice(&bytes).map_err(invalid)?;
+        let mut file: TrustFile = serde_json::from_slice(&bytes).map_err(invalid)?;
         let text = |value: &str| {
             !value.is_empty() && value.len() <= 2048 && !value.chars().any(char::is_control)
         };
         if !text(&file.audience) {
             return Err(invalid("audience must be 1..=2048 printable characters"));
         }
-        file.control_state.validate().map_err(invalid)?;
+        let view = match (file.control_state.take(), file.control_projection.take()) {
+            (Some(state), None) => {
+                state.validate().map_err(invalid)?;
+                ViewSource::Full(state)
+            }
+            (None, Some(projection)) => {
+                if !tenant_provisioning::is_hex(&projection.tenant, 32) {
+                    return Err(invalid(
+                        "control_projection.tenant must be 32 lowercase hex",
+                    ));
+                }
+                projection.store.validate().map_err(|_| {
+                    invalid(
+                        "control_projection.store.object must be a relative [a-z0-9._/-] \
+                         name outside the set protocol",
+                    )
+                })?;
+                ViewSource::Projection(projection)
+            }
+            _ => {
+                return Err(invalid(
+                    "exactly one of control_state or control_projection is required",
+                ));
+            }
+        };
         for (name, value) in [
             ("s_ctl_ms", file.s_ctl_ms),
             ("poll_interval_ms", file.poll_interval_ms),
@@ -120,7 +172,11 @@ impl GatewayTrustConfig {
             },
         )
         .map_err(invalid)?;
-        Ok(Self { file, verifier })
+        Ok(Self {
+            file,
+            view,
+            verifier,
+        })
     }
 }
 
@@ -137,23 +193,38 @@ pub(super) struct Trust {
 }
 
 /// What a trusted backend decides from: the shared control state, or
-/// (design-tenant-provisioning ITEM-006) its tenant's control projection.
-/// The projection view has no `--gateway-trust-file` opt-in yet: it
-/// refuses every request without a qualified clock proof (OD-005).
+/// (design-tenant-provisioning ITEM-006, by the trust file's
+/// `control_projection`) its tenant's control projection. The projection
+/// view refuses every decision without a qualified clock proof (OD-005).
 enum View {
     Full(Arc<Feed>),
-    #[cfg_attr(not(test), allow(dead_code))]
     Projection(Arc<Reader>),
 }
 
 impl GatewayTrust {
     /// Blocking (run off the async runtime): connects to the control-state
-    /// store, requires one confirmed read, then starts the poll thread that
-    /// also raises the minimum accepted `A`.
+    /// (or projection) store, requires one confirmed read, then starts the
+    /// poll thread that also raises the minimum accepted `A`.
     pub fn start(config: GatewayTrustConfig) -> Result<Self, String> {
-        let GatewayTrustConfig { file, verifier } = config;
-        let objects = file
-            .control_state
+        let GatewayTrustConfig {
+            file,
+            view,
+            verifier,
+        } = config;
+        let source = match view {
+            ViewSource::Full(source) => source,
+            ViewSource::Projection(projection) => {
+                let (store, prefix) = projection
+                    .store
+                    .coordination()
+                    .map_err(|error| format!("control projection store: {error}"))?;
+                // No approved clock-proof source exists (OD-005) and nothing
+                // in the trust file is clock evidence: the reader refuses
+                // its first poll, so this backend never serves.
+                return Self::start_projection(file, verifier, projection, store, &prefix, None);
+            }
+        };
+        let objects = source
             .connect()
             .map_err(|error| format!("control state store: {error}"))?;
         let feed =
@@ -187,6 +258,81 @@ impl GatewayTrust {
         Ok(Self(trust))
     }
 
+    /// The projection view's start: one accepted projection read (refused
+    /// without `clock`), then the poll thread raising the minimum `A`.
+    fn start_projection(
+        file: TrustFile,
+        verifier: Verifier,
+        projection: ProjectionSource,
+        store: Arc<dyn ObjectStore>,
+        prefix: &str,
+        clock: Option<ClockProof>,
+    ) -> Result<Self, String> {
+        let name = format!("{prefix}{}", projection.store.object);
+        let reader = Arc::new(
+            Reader::new(store, name, &projection.tenant, file.s_ctl_ms, clock).map_err(invalid)?,
+        );
+        let generation = reader
+            .poll()
+            .map_err(|error| format!("{}: {}", error.code, error.message))?;
+        let trust = Arc::new(Trust {
+            verifier,
+            view: View::Projection(reader.clone()),
+            audience: file.audience,
+            propagation: Duration::from_millis(file.readiness_propagation_ms),
+            draining: AtomicBool::new(false),
+        });
+        trust.verifier.raise_minimum(generation);
+        let weak = Arc::downgrade(&trust);
+        reader
+            .start(
+                Duration::from_millis(file.poll_interval_ms),
+                move |polled| match polled {
+                    Ok(generation) => {
+                        if let Some(trust) = weak.upgrade() {
+                            trust.verifier.raise_minimum(generation);
+                        }
+                    }
+                    Err(error) => log_stderr(
+                        "warn",
+                        "gateway_trust",
+                        json!({"event":"control_projection_poll_failed","code":error.code})
+                            .to_string(),
+                    ),
+                },
+            )
+            .map_err(|error| format!("cannot start the control projection poller: {error}"))?;
+        let keys = trust.verifier.metadata();
+        log_stderr(
+            "info",
+            "gateway_trust",
+            json!({"event":"gateway_trust_started","view":"projection",
+                "audience":trust.audience,"key_generation":keys.generation,"kids":keys.kids,
+                "generation":generation})
+            .to_string(),
+        );
+        Ok(Self(trust))
+    }
+
+    /// `start` of a `control_projection` config on `store` (prefix "")
+    /// with a test-only `clock`.
+    #[cfg(test)]
+    pub(super) fn start_projection_on(
+        config: GatewayTrustConfig,
+        store: Arc<dyn ObjectStore>,
+        clock: Option<ClockProof>,
+    ) -> Result<Self, String> {
+        let GatewayTrustConfig {
+            file,
+            view,
+            verifier,
+        } = config;
+        let ViewSource::Projection(projection) = view else {
+            return Err("not a control_projection trust file".to_owned());
+        };
+        Self::start_projection(file, verifier, projection, store, "", clock)
+    }
+
     /// From now on `/ready` answers 503 `draining`; the caller then waits
     /// `readiness_propagation` before closing the listener.
     pub fn begin_drain(&self) {
@@ -205,8 +351,9 @@ impl GatewayTrust {
 
     /// Stops and joins the poll thread (blocking; at most one read).
     pub fn stop(&self) {
-        if let View::Full(feed) = &self.0.view {
-            feed.stop();
+        match &self.0.view {
+            View::Full(feed) => feed.stop(),
+            View::Projection(reader) => reader.stop(),
         }
     }
 }
@@ -223,23 +370,9 @@ impl Service {
 impl Trust {
     #[cfg(test)]
     pub(super) fn for_test(verifier: Verifier, feed: Arc<Feed>, audience: &str) -> Self {
-        Self::with_view(verifier, View::Full(feed), audience)
-    }
-
-    #[cfg(test)]
-    pub(super) fn for_projection_test(
-        verifier: Verifier,
-        reader: Arc<Reader>,
-        audience: &str,
-    ) -> Self {
-        Self::with_view(verifier, View::Projection(reader), audience)
-    }
-
-    #[cfg(test)]
-    fn with_view(verifier: Verifier, view: View, audience: &str) -> Self {
         Self {
             verifier,
-            view,
+            view: View::Full(feed),
             audience: audience.to_owned(),
             propagation: Duration::ZERO,
             draining: AtomicBool::new(false),
