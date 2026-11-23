@@ -111,6 +111,72 @@ class OpenApiTests(unittest.TestCase):
                 "paths": {"/items/{id}": {"get": {"responses": {"200": {}}}}},
             })
 
+    def test_tenant_deployment_routes_are_registered_with_their_contracts(self):
+        document = json.loads((ROOT / "src" / "openapi.json").read_text(encoding="utf-8"))
+        paths, schemas = document["paths"], document["components"]["schemas"]
+        source = (ROOT / "src" / "server" / "tenant_provisioning.rs").read_text(encoding="utf-8")
+        routes = re.search(r"fn routes\(\).*?\n}", source, re.S).group(0)
+        served = set(re.findall(r'"(/v1/admin/tenant-deployment[^"]*)",?\s*(get|post)\(', routes))
+        self.assertEqual(len(served), 6, served)
+        # Every served route is documented, with no extra method.
+        for path, method in served:
+            self.assertTrue(path in paths, f"{path} is not in src/openapi.json")
+            self.assertIn(method, paths[path], path)
+            self.assertEqual(set(paths[path]) - {"parameters"}, {method}, path)
+        submission = {"$ref": "#/components/schemas/TenantDeploymentSubmission"}
+        action = {"$ref": "#/components/schemas/TenantDeploymentAction"}
+
+        def body(path):
+            return paths[path]["post"]["requestBody"]["content"]["application/json"]["schema"]
+
+        submits = [path for path, method in served
+                   if method == "post" and not path.endswith("{action}")]
+        self.assertEqual(len(submits), 4)
+        for path in submits:
+            self.assertEqual(body(path), submission, path)
+            responses = paths[path]["post"]["responses"]
+            self.assertTrue({"200", "202", "401", "403", "409", "422", "503"} <= set(responses),
+                            path)
+            for status in ("200", "202"):
+                answer = responses[status]["content"]["application/json"]["schema"]
+                self.assertEqual(answer, {"$ref": "#/components/schemas/TenantDeploymentAccepted"})
+        operation = "/v1/admin/tenant-deployment-operations/{operation}"
+        self.assertTrue({"200", "401", "403", "404", "409", "503"}
+                        <= set(paths[operation]["get"]["responses"]))
+        acting = operation + "/{action}"
+        self.assertEqual(body(acting), action)
+        self.assertTrue({"200", "401", "403", "404", "409", "422", "503"}
+                        <= set(paths[acting]["post"]["responses"]))
+        # The action enum is exactly the verbs the handler parses.
+        verbs = set(re.findall(r'Self::\w+ => "([a-z-]+)"',
+                               (ROOT / "src" / "server" / "tenant_provisioning" / "admin.rs")
+                               .read_text(encoding="utf-8")))
+        self.assertEqual(verbs, {"resume", "cancel", "acknowledge-delivery",
+                                 "replace-credentials", "rollback", "release"})
+        parameters = paths[acting].get("parameters", []) + paths[acting]["post"].get(
+            "parameters", [])
+        (declared,) = [p for p in parameters if p["name"] == "action"]
+        self.assertEqual(set(declared["schema"]["enum"]), verbs)
+        # Request schemas are strict and require what the handler requires.
+        self.assertFalse(schemas["TenantDeploymentSubmission"]["additionalProperties"])
+        self.assertEqual(set(schemas["TenantDeploymentSubmission"]["required"]),
+                         {"idempotency_key", "request"})
+        kinds = {variant["properties"]["kind"]["const"]
+                 for variant in schemas["TenantDeploymentSubmission"]["properties"]["request"]
+                 ["oneOf"]}
+        self.assertEqual(kinds, {"create", "set_readers", "migrate", "retire"})
+        self.assertFalse(schemas["TenantDeploymentAction"]["additionalProperties"])
+        self.assertEqual(set(schemas["TenantDeploymentAction"]["required"]), {
+            "idempotency_key", "expected_operation_generation", "expected_lifecycle_generation",
+        })
+        view = schemas["TenantDeploymentOperation"]
+        self.assertTrue({"operation_id", "kind", "tenant_id", "phase", "next_step",
+                         "operation_generation", "lifecycle_generation", "receipt_digest",
+                         "observed"} <= set(view["required"]))
+        self.assertEqual(set(view["properties"]["phase"]["enum"]), {
+            "accepted", "reserved", "cancelling", "activated", "succeeded", "cancelled",
+        })
+
 
 if __name__ == "__main__":
     unittest.main()

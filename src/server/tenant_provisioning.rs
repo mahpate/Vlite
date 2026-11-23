@@ -1039,7 +1039,7 @@ pub(super) fn activate(
 mod admin;
 
 pub(super) use admin::Deployments;
-pub use admin::tenant_deployment_command;
+pub use admin::{TenantDeployments, TenantDeploymentsConfig, tenant_deployment_command};
 
 /// design-tenant-provisioning ITEM-004: the managed tenant-deployment routes.
 pub(super) fn routes() -> Router<Service> {

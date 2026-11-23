@@ -13,12 +13,12 @@ use vlite::{
     server::{
         BearerToken, CloudRestore, GatewayTrust, GatewayTrustConfig, GroupCommitConfig, Managed,
         ManagedHandle, ReaderApply, ReaderApplyConfig, RecoveryError, RestoreMode, ServeMode,
-        ServerOptions, Service, WriterAuthority, configured_admin_router, read_token_file,
-        selected_database,
+        ServerOptions, Service, TenantDeploymentsConfig, WriterAuthority, configured_admin_router,
+        read_token_file, selected_database,
     },
 };
 
-const USAGE: &str = "usage: vlite-server <database-path> [--providers-file <path> | VLITE_PROVIDERS_FILE] [--memory-bindings-file <path> | VLITE_MEMORY_BINDINGS_FILE] [--create-if-missing <dimensions> [--create-format 3|4|5]] (default 5: graph-enabled; 3 and 4 create plain vector files) [--bind <ip:port>] [--tls-cert <pem> --tls-key <pem>] [--otlp-endpoint <url>] [--grpc-bind <ip:port> [--grpc-tls-cert <pem> --grpc-tls-key <pem> [--grpc-tls-client-ca <pem>]]] [--allow-remote] [--ann-snapshot] [--lock-held-reads] [--group-commit [--group-commit-requests <1..16>] [--group-commit-bytes <1024..268435456>] [--group-commit-delay-ms <0..100>]] [--durability periodic|full|none] (default periodic) [--flush-interval-ms <1..60000>] (periodic only, default 60000; none keeps the database in memory only, needs --create-if-missing and loses all data when the server stops) [--encryption-key-file <path> | VLITE_ENCRYPTION_KEY | VLITE_ENCRYPTION_KEY_HEX] [--token-file <path> | --insecure-local]; admin: VLITE_AUTH_TOKEN or VLITE_AUTH_TOKEN_FILE; optional read-only: VLITE_READ_ONLY_TOKEN or VLITE_READ_ONLY_TOKEN_FILE; backups/credentials/persistent audit: VLITE_ADMIN_DIR; off-by-default schedules: VLITE_AUTO_MAINTENANCE_INTERVAL_SECS, VLITE_BACKUP_INTERVAL_SECS, VLITE_BACKUP_RETENTION_ENABLED=1, VLITE_BACKUP_RETAIN_LAST, VLITE_BACKUP_RETAIN_DAYS, VLITE_BACKUP_DRILL_EVERY, VLITE_BACKUP_DRILL_MAX_BYTES; VLITE_SLOW_QUERY_MS; VLITE_METRICS_WITH_MEMORY=1 (serve /metrics and the metrics summary while agent memory is configured; their totals then include memory data); dashboard sign-in (needs VLITE_ADMIN_DIR and an admin token): VLITE_TRUSTED_PROXY=1 behind a proxy that sets X-Forwarded-Proto/For, VLITE_SESSION_IDLE_MINUTES (default 30), VLITE_SESSION_MAX_HOURS (default 8), optional first super admin: VLITE_ADMIN_USERNAME with VLITE_ADMIN_PASSWORD_FILE; [--log-buffer <n>] (default 2000, maximum 100000); [--serve-mode standalone|writer|reader | VLITE_SERVE_MODE] (default standalone; reader serves an existing file read-only and refuses writes, creation, durability, group commit, ANN snapshots, gRPC and VLITE_ADMIN_DIR); [--reader-apply-file <json>] (reader mode only, no environment variable; JSON requires target_file, follower_dir, capacity_bytes (1..1073741824, 1 GiB cap), staleness_bound_ms (1..3600000), poll_interval_ms (positive and below the staleness bound); optional shared_key_file; two private follower slots <follower_dir>/reader-a|reader-b; positional path must be <follower_dir>/reader-a/database.vlite; encrypted databases refused); opt-in Azure Blob cloud backup policy: PUT /v1/admin/cloud-backup (emulator shared key: VLITE_CLOUD_BACKUP_SHARED_KEY_FILE); offline isolated cloud restore: vlite-server cloud-sets | cloud-restore (run either without arguments for its usage); [--gateway-trust-file <json>] (feature-aca-ha gateway-trusted backend: data requests are authorized only by gateway-signed principal envelopes checked against the shared control state; refuses --insecure-local, --grpc-bind, --durability none and VLITE_ADMIN_DIR); DB-free gateway: vlite-server gateway --config <json>; its keys: vlite-server gateway-keygen; its shared control state: vlite-server control-state publish|update (run either without arguments for its usage; a database literally named gateway, gateway-keygen, control-state, failover, authority or tenant-deployment needs a ./ prefix); managed tenant deployments (offline; no cloud action): vlite-server tenant-deployment create|readers|migrate|retire|status|resume|cancel|... (run without a verb for usage)\n\
+const USAGE: &str = "usage: vlite-server <database-path> [--providers-file <path> | VLITE_PROVIDERS_FILE] [--memory-bindings-file <path> | VLITE_MEMORY_BINDINGS_FILE] [--create-if-missing <dimensions> [--create-format 3|4|5]] (default 5: graph-enabled; 3 and 4 create plain vector files) [--bind <ip:port>] [--tls-cert <pem> --tls-key <pem>] [--otlp-endpoint <url>] [--grpc-bind <ip:port> [--grpc-tls-cert <pem> --grpc-tls-key <pem> [--grpc-tls-client-ca <pem>]]] [--allow-remote] [--ann-snapshot] [--lock-held-reads] [--group-commit [--group-commit-requests <1..16>] [--group-commit-bytes <1024..268435456>] [--group-commit-delay-ms <0..100>]] [--durability periodic|full|none] (default periodic) [--flush-interval-ms <1..60000>] (periodic only, default 60000; none keeps the database in memory only, needs --create-if-missing and loses all data when the server stops) [--encryption-key-file <path> | VLITE_ENCRYPTION_KEY | VLITE_ENCRYPTION_KEY_HEX] [--token-file <path> | --insecure-local]; admin: VLITE_AUTH_TOKEN or VLITE_AUTH_TOKEN_FILE; optional read-only: VLITE_READ_ONLY_TOKEN or VLITE_READ_ONLY_TOKEN_FILE; backups/credentials/persistent audit: VLITE_ADMIN_DIR; off-by-default schedules: VLITE_AUTO_MAINTENANCE_INTERVAL_SECS, VLITE_BACKUP_INTERVAL_SECS, VLITE_BACKUP_RETENTION_ENABLED=1, VLITE_BACKUP_RETAIN_LAST, VLITE_BACKUP_RETAIN_DAYS, VLITE_BACKUP_DRILL_EVERY, VLITE_BACKUP_DRILL_MAX_BYTES; VLITE_SLOW_QUERY_MS; VLITE_METRICS_WITH_MEMORY=1 (serve /metrics and the metrics summary while agent memory is configured; their totals then include memory data); dashboard sign-in (needs VLITE_ADMIN_DIR and an admin token): VLITE_TRUSTED_PROXY=1 behind a proxy that sets X-Forwarded-Proto/For, VLITE_SESSION_IDLE_MINUTES (default 30), VLITE_SESSION_MAX_HOURS (default 8), optional first super admin: VLITE_ADMIN_USERNAME with VLITE_ADMIN_PASSWORD_FILE; [--log-buffer <n>] (default 2000, maximum 100000); [--serve-mode standalone|writer|reader | VLITE_SERVE_MODE] (default standalone; reader serves an existing file read-only and refuses writes, creation, durability, group commit, ANN snapshots, gRPC and VLITE_ADMIN_DIR); [--reader-apply-file <json>] (reader mode only, no environment variable; JSON requires target_file, follower_dir, capacity_bytes (1..1073741824, 1 GiB cap), staleness_bound_ms (1..3600000), poll_interval_ms (positive and below the staleness bound); optional shared_key_file; two private follower slots <follower_dir>/reader-a|reader-b; positional path must be <follower_dir>/reader-a/database.vlite; encrypted databases refused); opt-in Azure Blob cloud backup policy: PUT /v1/admin/cloud-backup (emulator shared key: VLITE_CLOUD_BACKUP_SHARED_KEY_FILE); offline isolated cloud restore: vlite-server cloud-sets | cloud-restore (run either without arguments for its usage); [--gateway-trust-file <json>] (feature-aca-ha gateway-trusted backend: data requests are authorized only by gateway-signed principal envelopes checked against the shared control state; refuses --insecure-local, --grpc-bind, --durability none and VLITE_ADMIN_DIR); DB-free gateway: vlite-server gateway --config <json>; its keys: vlite-server gateway-keygen; its shared control state: vlite-server control-state publish|update (run either without arguments for its usage; a database literally named gateway, gateway-keygen, control-state, failover, authority or tenant-deployment needs a ./ prefix); managed tenant deployments (offline; no cloud action): vlite-server tenant-deployment create|readers|migrate|retire|status|resume|cancel|... (run without a verb for usage); [--tenant-deployments-file <json>] (opt-in admin REST routes /v1/admin/tenant-deployments and /v1/admin/tenant-deployment-operations, intent-only with no cloud action; JSON requires target_file and object, optional shared_key_file; needs VLITE_ADMIN_DIR and an admin token, refuses --insecure-local and --durability none, and holds the admin directory so the offline tenant-deployment and control-state commands answer admin_dir_busy while it runs)\n\
 vlite-server failover report|execute --target-file <json> [options] (run without a verb for usage; execute requires the old writer at zero replicas and the exact report acknowledgement); unqualified automatic failover (GATE-005 open, off by default): vlite-server failover auto --config <json> | failover policy show|enable|disable --target-file <json> [options]\n\
 vlite-server authority init|show --target-file <json> [options] (run without a verb for usage)\n\
 vlite-server gateway-measure bootstrap --config <json> | mint --gateway-config <json> --token-file <path> --output <new-private-file> (disposable proposal evidence only; a database named gateway-measure needs a ./ prefix)\n\
@@ -64,6 +64,9 @@ struct Config {
     authority_shared_key_file: Option<PathBuf>,
     authority_recheck: Duration,
     archive_policy_file: Option<PathBuf>,
+    /// `--tenant-deployments-file`: opt-in, intent-only managed tenant
+    /// deployment REST routes (validated; nothing contacted yet).
+    tenant_deployments: Option<TenantDeploymentsConfig>,
 }
 
 /// Dashboard sign-in settings from the environment.
@@ -236,6 +239,7 @@ fn config() -> Result<Config, Box<dyn Error>> {
     let mut authority_shared_key_file: Option<PathBuf> = None;
     let mut authority_recheck_ms = None;
     let mut archive_policy_file: Option<PathBuf> = None;
+    let mut tenant_deployments_file: Option<PathBuf> = None;
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some(
@@ -272,6 +276,9 @@ fn config() -> Result<Config, Box<dyn Error>> {
             }
             Some("--reader-apply-file") if reader_apply_file.is_none() => {
                 reader_apply_file = Some(args.next().ok_or(USAGE)?.into());
+            }
+            Some("--tenant-deployments-file") if tenant_deployments_file.is_none() => {
+                tenant_deployments_file = Some(args.next().ok_or(USAGE)?.into());
             }
             Some("--gateway-trust-file") if gateway_trust_file.is_none() => {
                 gateway_trust_file = Some(args.next().ok_or(USAGE)?.into());
@@ -645,6 +652,27 @@ fn config() -> Result<Config, Box<dyn Error>> {
             Some(GatewayTrustConfig::read(file)?)
         }
     };
+    let tenant_deployments = match &tenant_deployments_file {
+        None => None,
+        Some(file) => {
+            // Admin-authenticated, persistent routes only; refused before a
+            // database is created or opened.
+            if admin_directory.is_none() {
+                return Err("--tenant-deployments-file needs VLITE_ADMIN_DIR".into());
+            }
+            for (refused, option) in [
+                (insecure_local, "--insecure-local"),
+                (in_memory, "--durability none"),
+            ] {
+                if refused {
+                    return Err(
+                        format!("--tenant-deployments-file cannot be used with {option}").into(),
+                    );
+                }
+            }
+            Some(TenantDeploymentsConfig::read(file)?)
+        }
+    };
     if in_memory {
         if encryption_key.is_some() {
             return Err("encryption protects data at rest; --durability none never writes the database, so remove the encryption key".into());
@@ -690,6 +718,7 @@ fn config() -> Result<Config, Box<dyn Error>> {
         authority_shared_key_file,
         authority_recheck: Duration::from_millis(authority_recheck_ms.unwrap_or(5000)),
         archive_policy_file,
+        tenant_deployments,
     };
     // Validate every option before creating or opening a database.
     options(&config, None).validate()?;
@@ -951,6 +980,30 @@ async fn run() -> Result<i32, Box<dyn Error>> {
         } else {
             None
         };
+    // Opt-in managed tenant deployment routes: hold the admin directory's
+    // control-state lock before any database opens, so a refusal creates
+    // nothing. Connecting builds a client only; no store request is made.
+    let tenant_deployments = match config.tenant_deployments.take() {
+        Some(deployments) => {
+            let admin = config
+                .admin_directory
+                .clone()
+                .expect("validated: --tenant-deployments-file needs VLITE_ADMIN_DIR");
+            let opened = tokio::task::spawn_blocking(move || deployments.open(&admin))
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|result| result);
+            match opened {
+                Ok(opened) => Some(opened),
+                Err(error) => {
+                    stop_apply(apply.take()).await;
+                    stop_trust(trust).await;
+                    return Err(error.into());
+                }
+            }
+        }
+        None => None,
+    };
     let mut recovery = managed.as_ref().and_then(Managed::recovery_reason);
     if let Some(mut startup) = authority.take() {
         let safe = (|| -> Result<(), Box<dyn Error>> {
@@ -1138,6 +1191,10 @@ async fn run() -> Result<i32, Box<dyn Error>> {
     };
     let service = match &apply {
         Some(apply) => service.with_reader_apply(apply),
+        None => service,
+    };
+    let service = match &tenant_deployments {
+        Some(deployments) => service.with_managed_tenant_deployments(deployments),
         None => service,
     };
     let registered = (|| -> Result<(), Box<dyn Error>> {

@@ -24,6 +24,9 @@ use std::path::PathBuf;
 pub(in crate::server) struct Deployments {
     objects: Objects,
     ops: Operations,
+    /// A serving process's hold on its admin directory's control-state
+    /// lock (`TenantDeploymentsConfig::open`); the OS releases it on exit.
+    _lock: Option<std::fs::File>,
 }
 
 impl Deployments {
@@ -35,6 +38,7 @@ impl Deployments {
         Self {
             objects: Objects::new(store.clone(), control_object),
             ops: Operations::new(store, ops_prefix),
+            _lock: None,
         }
     }
 
@@ -62,7 +66,72 @@ impl Service {
         self.tenant_deployments = Some(deployments);
         self
     }
+
+    /// Serves the managed tenant-deployment routes over an opened
+    /// `--tenant-deployments-file` (vlite-server).
+    pub fn with_managed_tenant_deployments(self, deployments: &TenantDeployments) -> Self {
+        self.with_tenant_deployments(deployments.0.clone())
+    }
 }
+
+// ---------------------------------------------------------------- runtime
+
+/// A validated `--tenant-deployments-file`: the control-state source the
+/// routes work on (`{target_file, object, shared_key_file?}`, the
+/// `control-state` CLI's inputs). Nothing is contacted yet.
+pub struct TenantDeploymentsConfig {
+    source: control_state::Source,
+}
+
+fn runtime_invalid(detail: impl std::fmt::Display) -> String {
+    format!("tenant_deployments_invalid: {detail}")
+}
+
+impl TenantDeploymentsConfig {
+    pub fn read(path: &std::path::Path) -> Result<Self, String> {
+        use crate::server::gateway_trust::{MAX_CONFIG_BYTES, read_bounded};
+        let bytes = read_bounded(path, MAX_CONFIG_BYTES, "tenant deployments file")
+            .map_err(runtime_invalid)?;
+        let source: control_state::Source =
+            serde_json::from_slice(&bytes).map_err(runtime_invalid)?;
+        source.validate().map_err(runtime_invalid)?;
+        Ok(Self { source })
+    }
+
+    /// Takes the admin directory's control-state lock for the process's
+    /// lifetime (so `tenant-deployment` and `control-state` cannot change
+    /// the tenants this server holds; else `admin_dir_busy`) and builds the
+    /// store client. Writes nothing to the store and contacts nothing.
+    /// Blocking: call off the async runtime.
+    pub fn open(self, admin_directory: &std::path::Path) -> Result<TenantDeployments, String> {
+        use crate::server::gateway_mode::CONTROL_STATE_LOCK;
+        let io = |what: &'static str| {
+            move |error: std::io::Error| format!("admin_dir_invalid: {what}: {}", error.kind())
+        };
+        std::fs::create_dir_all(admin_directory).map_err(io("admin directory"))?;
+        let directory = std::fs::canonicalize(admin_directory).map_err(io("admin directory"))?;
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(directory.join(CONTROL_STATE_LOCK))
+            .map_err(io("control-state lock"))?;
+        lock.try_lock().map_err(|_| {
+            "admin_dir_busy: another process holds this admin directory's control-state lock"
+                .to_owned()
+        })?;
+        let deployments = Deployments::connect(&self.source)
+            .map_err(|error| format!("{}: {}", error.code, error.message))?;
+        Ok(TenantDeployments(Arc::new(Deployments {
+            _lock: Some(lock),
+            ..deployments
+        })))
+    }
+}
+
+/// An opened `--tenant-deployments-file`, for
+/// `Service::with_managed_tenant_deployments`.
+pub struct TenantDeployments(Arc<Deployments>);
 
 // --------------------------------------------------------------- requests
 
@@ -1612,5 +1681,139 @@ mod tests {
         let error =
             tenant_deployment_command(&args(&["status", "--request-file", "x"])).unwrap_err();
         assert!(error.starts_with("invalid_arguments"), "{error}");
+    }
+
+    /// A `--tenant-deployments-file` naming a loopback emulator target
+    /// whose port is closed: nothing below contacts it.
+    fn runtime_files(root: &std::path::Path) -> (std::path::PathBuf, Value) {
+        let target = root.join("target.json");
+        std::fs::write(
+            &target,
+            json!({"account":"devstoreaccount1","container":"data","coordination_container":"coord",
+                "prefix":"p/","endpoint":"http://127.0.0.1:9/devstoreaccount1",
+                "auth":"emulator_shared_key"})
+            .to_string(),
+        )
+        .unwrap();
+        let key = root.join("key");
+        std::fs::write(&key, "c2VjcmV0LWtleS1ub3QtZWNob2Vk").unwrap();
+        let config = root.join("tenant-deployments.json");
+        let value = json!({"target_file": target, "object": "control/state.json",
+            "shared_key_file": key});
+        std::fs::write(&config, value.to_string()).unwrap();
+        (config, value)
+    }
+
+    #[test]
+    fn runtime_configuration_is_bounded_strict_and_validated() {
+        let directory = tempfile::tempdir().unwrap();
+        let (config, base) = runtime_files(directory.path());
+        assert!(TenantDeploymentsConfig::read(&config).is_ok());
+        for change in [
+            json!({"unknown": true}),
+            json!({"object": "../escape"}),
+            json!({"object": "owner.json"}),
+        ] {
+            let mut value = base.clone();
+            for (name, field) in change.as_object().unwrap() {
+                value[name] = field.clone();
+            }
+            std::fs::write(&config, value.to_string()).unwrap();
+            let error = TenantDeploymentsConfig::read(&config).err().unwrap();
+            assert!(error.starts_with("tenant_deployments_invalid"), "{error}");
+        }
+        std::fs::write(&config, vec![b' '; 70 * 1024]).unwrap();
+        let error = TenantDeploymentsConfig::read(&config).err().unwrap();
+        assert!(error.starts_with("tenant_deployments_invalid"), "{error}");
+        let error = TenantDeploymentsConfig::read(&directory.path().join("missing"))
+            .err()
+            .unwrap();
+        assert!(error.starts_with("tenant_deployments_invalid"), "{error}");
+    }
+
+    #[test]
+    fn an_opened_runtime_holds_the_admin_directory_against_the_cli() {
+        let directory = tempfile::tempdir().unwrap();
+        let (config, value) = runtime_files(directory.path());
+        let admin = directory.path().join("admin");
+        let opened = TenantDeploymentsConfig::read(&config)
+            .unwrap()
+            .open(&admin)
+            .unwrap();
+        // The CLI would otherwise change tenants.json under the server.
+        let args: Vec<OsString> = [
+            "status",
+            "--operation",
+            "0",
+            "--target-file",
+            value["target_file"].as_str().unwrap(),
+            "--object",
+            "control/state.json",
+            "--admin-dir",
+            admin.to_str().unwrap(),
+        ]
+        .iter()
+        .map(OsString::from)
+        .collect();
+        let error = tenant_deployment_command(&args).unwrap_err();
+        assert!(error.starts_with("admin_dir_busy"), "{error}");
+        let error = TenantDeploymentsConfig::read(&config)
+            .unwrap()
+            .open(&admin)
+            .err()
+            .unwrap();
+        assert!(error.starts_with("admin_dir_busy"), "{error}");
+        drop(opened);
+        assert!(
+            TenantDeploymentsConfig::read(&config)
+                .unwrap()
+                .open(&admin)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn an_opened_runtime_serves_the_routes_with_admin_authentication() {
+        let directory = tempfile::tempdir().unwrap();
+        let (config, _) = runtime_files(directory.path());
+        let opened = TenantDeploymentsConfig::read(&config)
+            .unwrap()
+            .open(&directory.path().join("admin"))
+            .unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let unconfigured = fixture_with(false, Some(TOKEN));
+        let path = "/v1/admin/tenant-deployment-operations/not-an-operation";
+        let (status, body) = runtime.block_on(unconfigured.call("GET", path, None));
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"]["code"], "tenant_deployments_not_configured");
+        let mut served = fixture_with(false, Some(TOKEN));
+        served.app = crate::server::configured_routes(
+            served
+                .service
+                .clone()
+                .with_managed_tenant_deployments(&opened),
+        );
+        // Refused before the store is contacted.
+        let (status, body) = runtime.block_on(served.call("GET", path, None));
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert_eq!(body["error"]["code"], "operation_not_found");
+        let open = fixture_with(false, None);
+        let open_app = crate::server::configured_routes(
+            open.service
+                .clone()
+                .with_managed_tenant_deployments(&opened),
+        );
+        let served = Fixture {
+            app: open_app,
+            ..open
+        };
+        let (status, body) = runtime.block_on(served.call_as(None, "GET", path, None));
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"]["code"], "admin_auth_required");
+        drop(served);
+        drop(runtime);
     }
 }

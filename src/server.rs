@@ -98,7 +98,9 @@ pub use gateway_mode::{control_state_command, gateway_keygen, run_gateway};
 pub use gateway_trust::{GatewayTrust, GatewayTrustConfig};
 pub use reader_apply::{ReaderApply, ReaderApplyConfig};
 pub use serve_mode::ServeMode;
-pub use tenant_provisioning::tenant_deployment_command;
+pub use tenant_provisioning::{
+    TenantDeployments, TenantDeploymentsConfig, tenant_deployment_command,
+};
 pub use writer_authority::{WriterAuthority, authority_command};
 
 /// Emit a legacy stderr line and also capture it in the bounded server log buffer.

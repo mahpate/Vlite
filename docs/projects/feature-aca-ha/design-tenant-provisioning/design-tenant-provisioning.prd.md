@@ -486,8 +486,8 @@ EPIC-001 and EPIC-002 are owner-authorized and implemented offline (see their st
 
 | Task | Description | Status | Relevant Files |
 |------|-------------|--------|----------------|
-| ITEM-004 | Add administrator-only create/status/readers/migration/retirement intent endpoints and generation-bound resume/cancel/acknowledge-delivery/replace-credentials/rollback/release actions. Persist action idempotency; reject unavailable transition handlers until their dependent epic is implemented. Create non-routable metadata from the persisted ID. Do not provision from legacy create/public gateway. Test stale/replayed acknowledgements, explicit irreversible release refusal and secret redaction. | Done (offline; REST unconfigured in production, see section 15) | `src/server/tenant_provisioning/admin.rs`, `src/server/tenants.rs`, `src/server.rs` |
-| ITEM-005 | Add equivalent control CLI/status and explicit action verbs using the same generation/idempotency contracts; generic resume cannot acknowledge delivery or release. Register all new routes in classifier/API HTML/OpenAPI. Arguments carry profile/file references, never literal tokens. Validate route inventory and unchanged legacy 201 behavior. | Done (offline; OpenAPI deferred, see section 15) | `src/bin/vlite-server.rs`, `src/server/gateway.rs`, `site/api.html`, `src/openapi.json` |
+| ITEM-004 | Add administrator-only create/status/readers/migration/retirement intent endpoints and generation-bound resume/cancel/acknowledge-delivery/replace-credentials/rollback/release actions. Persist action idempotency; reject unavailable transition handlers until their dependent epic is implemented. Create non-routable metadata from the persisted ID. Do not provision from legacy create/public gateway. Test stale/replayed acknowledgements, explicit irreversible release refusal and secret redaction. | Done (offline; REST opt-in via `--tenant-deployments-file`, intent-only, see section 15) | `src/server/tenant_provisioning/admin.rs`, `src/server/tenants.rs`, `src/server.rs`, `src/bin/vlite-server.rs` |
+| ITEM-005 | Add equivalent control CLI/status and explicit action verbs using the same generation/idempotency contracts; generic resume cannot acknowledge delivery or release. Register all new routes in classifier/API HTML/OpenAPI. Arguments carry profile/file references, never literal tokens. Validate route inventory and unchanged legacy 201 behavior. | Done (offline, see section 15) | `src/bin/vlite-server.rs`, `src/server/gateway.rs`, `site/api.html`, `src/openapi.json`, `tests/openapi_contract.py` |
 
 ### EPIC-003: Non-routable proof, scoped policy and mutation-path interlocks
 
@@ -626,9 +626,22 @@ The owner's instruction to pick up per-tenant writer and reader provisioning nex
   - `vlite-server tenant-deployment {create|readers|migrate|retire|status|<action verb>}` uses the same accept/act contracts against the control-state store.
   - Arguments are file references only (`--request-file`); no literal tokens.
   - The routes are registered in the gateway classifier (187 REST routes), `site/api.html` and the admin-coverage inventory.
+  - All six operations are registered in `src/openapi.json`:
+    - Operation IDs: `TenantDeploymentCreate`, `TenantDeploymentSetReaders`, `TenantDeploymentMigrate`, `TenantDeploymentRetire`, `TenantDeploymentOperationGet` and `TenantDeploymentOperationAction`.
+    - Strict request schemas: `TenantDeploymentSubmission` (with the four `kind` variants) and `TenantDeploymentAction`.
+    - Response schemas: `TenantDeploymentAccepted` and `TenantDeploymentOperation`.
+    - Every operation lists its error codes.
+  - `tests/openapi_contract.py` derives the six routes from the router source and the action verbs from the handler. It fails if a route, the request/response schema, an error status or a verb is missing.
+- **REST runtime opt-in (follow-up commit):**
+  - REST is off by default. Without the flag, the routes answer 409 `tenant_deployments_not_configured`.
+  - `vlite-server <db> --tenant-deployments-file <json>` serves the routes. The JSON is the existing strict control-state source: `{"target_file", "object", "shared_key_file"?}`. It is read bounded and validated before any database is opened or created; an invalid file refuses startup with `tenant_deployments_invalid:`.
+  - The flag requires `VLITE_ADMIN_DIR`. It refuses `--insecure-local` and `--durability none`. Gateway-trust and reader modes already refuse `VLITE_ADMIN_DIR`, so they cannot combine with it. Requests need an authenticated administrator.
+  - It reuses the configured `ObjectStore`, control-state, retained-profile and file mechanisms. No new dependency and no cloud actuator are added. Execution stays intent-only (OD-002).
+  - For the server's lifetime it holds the admin directory's control-state lock. The offline `tenant-deployment` and `control-state` commands therefore answer `admin_dir_busy` instead of racing it.
+  - Recovery mode does not serve these routes.
+  - The public gateway and legacy `POST /v1/tenants` are unchanged.
+  - Existing-tenant migration is still not implemented. The migrate route only records intent.
 - **Deviations (documented, not hidden):**
-  - **REST is unconfigured in production.** Nothing calls `Service::with_tenant_deployments`, so the REST routes return 409 `tenant_deployments_not_configured`. The CLI is the operable surface. A runtime opt-in needs a bounded follow-up item.
-  - **OpenAPI is unchanged.** `src/openapi.json` is a partial contract (127 of 187 paths) and the guard does not require new paths. Adding them is deferred to the EPIC-007 documentation item.
   - **File count.** Ten code, test and doc files changed, beyond the seven-file guideline. The extra files are required inventory and CLI wiring (`gateway_mode.rs` `CONTROL_STATE_LOCK` visibility, `control_state.rs`, `tests/admin_route_coverage.py`).
   - **Cancelled-create remnant.** A cancelled create leaves a non-routable tenant metadata entry. Cleanup belongs to retirement (EPIC-004 ITEM-011).
 - **Verification:**
@@ -638,3 +651,16 @@ The owner's instruction to pick up per-tenant writer and reader provisioning nex
   - Route guards pass: `api_route_inventory`, `admin_route_coverage`, `api_reference`, `api_reference_ui` and `openapi_contract`.
   - An independent code review found one medium issue: cancel without a held reservation was persisted before being refused. It is fixed and covered by tests.
   - No cloud, ARM, emulator or deployment actions were run.
+- **Follow-up verification (REST opt-in and OpenAPI):**
+  - The three new `admin.rs` runtime tests check:
+    - The configuration is bounded, strict and validated.
+    - The opened runtime holds the admin directory against the CLI.
+    - The opened runtime serves the routes with admin authentication.
+  - `tests/server_cli.rs::tenant_deployment_routes_are_opt_in_and_refused_before_creating_a_database` checks:
+    - Five startup refusals, each leaving no database file.
+    - The default answers 409 `tenant_deployments_not_configured`.
+    - An opted-in server answers 404 `operation_not_found`.
+    - The CLI answers `admin_dir_busy` while the server runs.
+  - `tests/openapi_contract.py` failed before registration and passes after it. Removing one registered path makes it fail again.
+  - `cargo test --features server --lib`: 2177 passed (`tenant_provisioning`: 52).
+  - `cargo clippy --features server --all-targets`, `rustfmt --check`, `git diff --check` and the five route/API guard scripts are clean.

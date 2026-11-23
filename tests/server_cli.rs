@@ -1986,3 +1986,144 @@ fn gateway_commands_validate_configuration_and_keep_keys_out_of_output() {
         assert!(!ok && stdout.is_empty() && !stderr.is_empty(), "{args:?}");
     }
 }
+
+/// The managed tenant deployment REST routes are served only with an
+/// explicit `--tenant-deployments-file`; every unusable combination is
+/// refused before a database is created, and nothing contacts the store
+/// (a closed loopback port) for a request it can refuse locally.
+#[test]
+fn tenant_deployment_routes_are_opt_in_and_refused_before_creating_a_database() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let target = root.join("target.json");
+    std::fs::write(
+        &target,
+        json!({"account":"devstoreaccount1","container":"data","coordination_container":"coord",
+            "prefix":"p/","endpoint":"http://127.0.0.1:9/devstoreaccount1",
+            "auth":"emulator_shared_key"})
+        .to_string(),
+    )
+    .unwrap();
+    let key = root.join("key");
+    std::fs::write(&key, "c2VjcmV0LWtleS1ub3QtZWNob2Vk").unwrap();
+    let config = root.join("tenant-deployments.json");
+    std::fs::write(
+        &config,
+        json!({"target_file": target, "object": "control/state.json", "shared_key_file": key})
+            .to_string(),
+    )
+    .unwrap();
+    let invalid = root.join("invalid.json");
+    std::fs::write(
+        &invalid,
+        json!({"target_file": target, "unknown": 1}).to_string(),
+    )
+    .unwrap();
+    let admin = root.join("admin");
+    let command = |path: &Path, args: &[&std::ffi::OsStr], admin_dir: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_vlite-server"));
+        command
+            .arg(path)
+            .args(["--create-if-missing", "2", "--bind", "127.0.0.1:0"])
+            .args(args)
+            .env_remove("VLITE_AUTH_TOKEN_FILE")
+            .env_remove("VLITE_ADMIN_DIR")
+            .env_remove("VLITE_PROVIDERS_FILE")
+            .env("VLITE_AUTH_TOKEN", TOKEN);
+        if admin_dir {
+            command.env("VLITE_ADMIN_DIR", &admin);
+        }
+        command
+    };
+    let flag: &std::ffi::OsStr = "--tenant-deployments-file".as_ref();
+    let refused = root.join("refused.vlite");
+    for (args, admin_dir, expected) in [
+        (
+            vec![flag, config.as_os_str()],
+            false,
+            "--tenant-deployments-file needs VLITE_ADMIN_DIR",
+        ),
+        (
+            vec![flag, config.as_os_str(), "--insecure-local".as_ref()],
+            true,
+            "--tenant-deployments-file cannot be used with --insecure-local",
+        ),
+        (
+            vec![
+                flag,
+                config.as_os_str(),
+                "--durability".as_ref(),
+                "none".as_ref(),
+            ],
+            true,
+            "--tenant-deployments-file cannot be used with --durability none",
+        ),
+        (
+            vec![flag, invalid.as_os_str()],
+            true,
+            "tenant_deployments_invalid",
+        ),
+        (
+            vec![flag, config.as_os_str(), flag, config.as_os_str()],
+            true,
+            "\"usage: ",
+        ),
+    ] {
+        let mut command = command(&refused, &args, admin_dir);
+        if args.contains(&"--insecure-local".as_ref()) {
+            command.env_remove("VLITE_AUTH_TOKEN");
+        }
+        let output = command.output().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{args:?}");
+        assert!(stderr.contains(expected), "{args:?}: {stderr}");
+        assert!(!refused.exists(), "{args:?}");
+    }
+
+    let start = |path: &Path, args: &[&std::ffi::OsStr]| {
+        let mut child = command(path, args, true)
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let address = line
+            .trim()
+            .strip_prefix("LISTENING http://")
+            .unwrap_or_else(|| panic!("startup address: {line:?}"))
+            .to_owned();
+        Server { child, address }
+    };
+    let status = "/v1/admin/tenant-deployment-operations/not-an-operation";
+    // Default: the routes exist but answer unconfigured.
+    let server = start(&root.join("default.vlite"), &[]);
+    let (code, body) = server.request("GET", status, Value::Null);
+    assert_eq!(code, 409, "{body}");
+    assert_eq!(body["error"]["code"], "tenant_deployments_not_configured");
+    drop(server);
+    // Opted in: the same request reaches the operation surface.
+    let server = start(&root.join("served.vlite"), &[flag, config.as_os_str()]);
+    let (code, body) = server.request("GET", status, Value::Null);
+    assert_eq!(code, 404, "{body}");
+    assert_eq!(body["error"]["code"], "operation_not_found");
+    // The server holds the admin directory: the offline CLI is refused.
+    let output = Command::new(env!("CARGO_BIN_EXE_vlite-server"))
+        .args([
+            "tenant-deployment",
+            "status",
+            "--operation",
+            "0",
+            "--object",
+        ])
+        .arg("control/state.json")
+        .arg("--target-file")
+        .arg(&target)
+        .arg("--admin-dir")
+        .arg(&admin)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("admin_dir_busy"));
+}
