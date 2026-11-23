@@ -11,6 +11,7 @@ use super::{
     cloud_backup::{PinKind, Sets},
     cloud_recovery::{Staging, rename_no_replace, sync_directory},
     gateway_mode::{flags, utf8},
+    tenant_provisioning::guard::Guards,
     writer_fence::{State, WriterFence},
 };
 
@@ -388,6 +389,12 @@ fn claim_prepared(
             }
         }
     }
+    // design-tenant-provisioning ITEM-007: a target a managed lifecycle
+    // operation holds stays unwritable until that operation enables writes.
+    // Checked at the claim only: a writer already serving is not stopped.
+    Guards::of(&store)
+        .check_write_enable()
+        .map_err(|refusal| format!("{}: {}", refusal.code(), refusal.message()))?;
     let (claim, _) = store
         .claim(&observed, super::admin::now_ms() as u64)
         .map_err(describe)?;
@@ -566,6 +573,35 @@ mod tests {
             let (_, store) = setup();
             refusal(store, lineage, "writer_authority_lineage_mismatch");
         }
+    }
+
+    #[test]
+    fn startup_refuses_a_claim_until_the_lifecycle_guard_enables_writes() {
+        use crate::server::tenant_provisioning::guard::{
+            Guards,
+            tests::{OPERATION, TENANT, held},
+        };
+        let (memory, store) = setup();
+        held(&memory, "test/", false);
+        let before = memory.raw(KEY);
+        refusal(store, Some(LINEAGE), "lifecycle_write_disabled");
+        assert_eq!(memory.raw(KEY), before, "a refused claim must not write");
+        let (memory, store) = setup();
+        memory.fault(Op::Get, "lifecycle-guard", Fault::Refuse, 0, 1);
+        refusal(store, Some(LINEAGE), "lifecycle_guard_unavailable");
+        let (memory, store) = setup();
+        memory.set_raw("test/lifecycle-guard.json", b"{}");
+        refusal(store, Some(LINEAGE), "lifecycle_guard_invalid");
+        // Write-enabled and released guards both let the writer claim.
+        let (memory, store) = setup();
+        held(&memory, "test/", true);
+        assert_eq!(claim(store, Some(LINEAGE)).unwrap().epoch(), Some(1));
+        let (memory, store) = setup();
+        held(&memory, "test/", false);
+        Guards::new(memory.clone(), "test/")
+            .release(TENANT, OPERATION)
+            .unwrap();
+        assert_eq!(claim(store, Some(LINEAGE)).unwrap().epoch(), Some(1));
     }
 
     fn prepared(env: &Env, store: &AuthorityStore) -> WriterAuthority {

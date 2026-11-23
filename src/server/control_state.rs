@@ -1094,7 +1094,8 @@ impl Objects {
     /// it to the winner. Only `Edit::Reimport` reads the admin directory. A
     /// given `directory` replaces the tenant routes. With `expected`, the
     /// update is refused (409 `control_state_generation_mismatch`) unless
-    /// the published generation is exactly that.
+    /// the published generation is exactly that. A tenant whose lifecycle
+    /// slot is reserved only takes restrictions (`keep_reservations`).
     pub(super) fn apply(
         &self,
         now: u64,
@@ -1123,11 +1124,116 @@ impl Objects {
                 }
                 Edit::Directory => current.clone(),
             };
-            Ok(match directory {
+            let next = match directory {
                 Some(directory) => next.with_directory(directory.to_vec()),
                 None => next,
-            })
+            };
+            keep_reservations(current, &next)?;
+            Ok(next)
         })
+    }
+}
+
+/// design-tenant-provisioning ITEM-007: a control-state edit (legacy
+/// directory replacement, revoke, suspend/resume, admin re-import, so also
+/// an admin tenant deletion) may change a tenant whose lifecycle slot is
+/// reserved only by adding a restriction: a suspension, a revocation or an
+/// earlier credential expiry. Its route, tenant record, tenant-bound
+/// credentials and slot stay as published until the managed operation
+/// releases the slot; otherwise 409 `lifecycle_reserved`, nothing written.
+fn keep_reservations(current: &Snapshot, next: &Snapshot) -> Result<(), ApiError> {
+    for entry in &current.lifecycle {
+        if !matches!(entry.slot, Slot::Reserved { .. }) {
+            continue;
+        }
+        let tenant = entry.tenant.as_str();
+        let (before, after) = (
+            TenantView::of(current, tenant)?,
+            TenantView::of(next, tenant)?,
+        );
+        if current.record_for(tenant) != next.record_for(tenant)
+            || current.lifecycle(tenant) != next.lifecycle(tenant)
+            || !after.restricts(&before)
+        {
+            return Err(lifecycle_error(
+                "lifecycle_reserved",
+                "a managed operation holds the tenant; until it ends, a control-state edit may only suspend it or revoke its credentials",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// What `keep_reservations` compares: the tenant record without its
+/// suspension time, and each tenant-bound credential without its
+/// revocation and expiry, kept separately so they may only tighten.
+struct TenantView {
+    tenant: Option<Value>,
+    suspended: bool,
+    credentials: std::collections::BTreeMap<String, (Value, bool, u64)>,
+}
+
+impl TenantView {
+    fn of(snapshot: &Snapshot, tenant: &str) -> Result<Self, ApiError> {
+        let value = |v: Result<Value, serde_json::Error>| v.map_err(|_| Snapshot::invalid());
+        let mut record = snapshot
+            .tenants
+            .iter()
+            .find(|t| t.id == tenant)
+            .map(|t| value(serde_json::to_value(t)))
+            .transpose()?;
+        let suspended = record
+            .as_mut()
+            .and_then(Value::as_object_mut)
+            .and_then(|t| t.remove("suspended_unix_ms"))
+            .is_some_and(|at| !at.is_null());
+        let mut credentials = std::collections::BTreeMap::new();
+        let Value::Array(entries) = value(serde_json::to_value(&snapshot.credentials))? else {
+            return Err(Snapshot::invalid());
+        };
+        for mut entry in entries {
+            let Some(fields) = entry.as_object_mut() else {
+                return Err(Snapshot::invalid());
+            };
+            if fields.get("tenant_id").and_then(Value::as_str) != Some(tenant) {
+                continue;
+            }
+            let revoked = fields
+                .remove("revoked_unix_ms")
+                .is_some_and(|at| !at.is_null());
+            let expires = fields
+                .remove("expires_unix_ms")
+                .and_then(|at| at.as_u64())
+                .ok_or_else(Snapshot::invalid)?;
+            let id = fields
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or_else(Snapshot::invalid)?
+                .to_owned();
+            credentials.insert(id, (entry, revoked, expires));
+        }
+        Ok(Self {
+            tenant: record,
+            suspended,
+            credentials,
+        })
+    }
+
+    /// Whether `self` is `before` with at most added restrictions.
+    fn restricts(&self, before: &Self) -> bool {
+        self.tenant == before.tenant
+            && (self.suspended || !before.suspended)
+            && self.credentials.len() == before.credentials.len()
+            && before
+                .credentials
+                .iter()
+                .all(|(id, (old, revoked, expires))| {
+                    self.credentials
+                        .get(id)
+                        .is_some_and(|(new, now_revoked, now_expires)| {
+                            new == old && (*now_revoked || !revoked) && now_expires <= expires
+                        })
+                })
     }
 }
 
@@ -2138,5 +2244,125 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(error.code, "tenant_not_found");
+    }
+
+    /// design-tenant-provisioning ITEM-007: publishes `directory`, then
+    /// reserves T1 for a `kind` operation.
+    fn reserved(w: &World, directory: Vec<Route>, kind: OperationKind) -> Objects {
+        let objects = w.objects();
+        objects
+            .create(w.import().with_directory(directory), 1)
+            .unwrap();
+        objects
+            .update(2, |current| {
+                current.reserve(T1, &"1".repeat(32), kind, &"2".repeat(64))
+            })
+            .unwrap();
+        objects
+    }
+
+    fn assert_reserved_refusal(objects: &Objects, result: Result<Snapshot, ApiError>) {
+        let before = objects.read().unwrap().0.generation();
+        let error = result.err().expect("refused");
+        assert_eq!(
+            (error.status, error.code),
+            (StatusCode::CONFLICT, "lifecycle_reserved")
+        );
+        assert_eq!(objects.read().unwrap().0.generation(), before);
+    }
+
+    #[test]
+    fn a_reserved_tenant_takes_only_restrictions_from_control_edits() {
+        let w = world();
+        let directory = vec![
+            Route::dedicated_for_test(T1, 1),
+            Route::dedicated_for_test(T2, 1),
+        ];
+        let objects = reserved(&w, directory.clone(), OperationKind::SetReaders);
+
+        // The legacy directory replacement cannot move, change or drop the
+        // reserved tenant's route.
+        let mut moved = directory.clone();
+        moved[0].epoch = Some(2);
+        let mut readers = directory.clone();
+        readers[0].read_routing = ReadRouting::Readers;
+        for routes in [moved, readers, vec![directory[1].clone()]] {
+            let result = objects.apply(3, &Edit::Directory, Some(&routes[..]), None);
+            assert_reserved_refusal(&objects, result);
+        }
+        // A re-import cannot add a credential to it or delete it.
+        let (newer, _) = credentials::tests::issued(
+            &[
+                ("aaaaaaaaaaaa", Some(T1)),
+                ("bbbbbbbbbbbb", Some(T2)),
+                ("cccccccccccc", None),
+                ("dddddddddddd", Some(T1)),
+            ],
+            0x77,
+        );
+        let result = objects.apply(3, &Edit::Reimport(&newer, &w.tenants), None, None);
+        assert_reserved_refusal(&objects, result);
+        let only_t2 = tenants::Store::for_test(vec![tenants::Tenant::for_test(T2, None)]);
+        let result = objects.apply(3, &Edit::Reimport(&w.credentials, &only_t2), None, None);
+        assert_reserved_refusal(&objects, result);
+
+        // Restrictions still apply at once, and only restrictions.
+        objects
+            .apply(3, &revoke("aaaaaaaaaaaa"), None, None)
+            .unwrap();
+        objects.apply(4, &suspend(T1, true), None, None).unwrap();
+        let result = objects.apply(5, &suspend(T1, false), None, None);
+        assert_reserved_refusal(&objects, result);
+        // A re-import that keeps the reserved tenant (and its published
+        // restrictions) as it is still publishes.
+        objects
+            .apply(5, &Edit::Reimport(&w.credentials, &w.tenants), None, None)
+            .unwrap();
+
+        // Unreserved tenants keep the legacy behaviour.
+        let mut t2_moved = directory.clone();
+        t2_moved[1].epoch = Some(2);
+        objects
+            .apply(6, &Edit::Directory, Some(&t2_moved[..]), None)
+            .unwrap();
+        objects.apply(7, &suspend(T2, true), None, None).unwrap();
+        objects.apply(8, &suspend(T2, false), None, None).unwrap();
+        let (newer_t2, _) = credentials::tests::issued(
+            &[
+                ("aaaaaaaaaaaa", Some(T1)),
+                ("bbbbbbbbbbbb", Some(T2)),
+                ("cccccccccccc", None),
+                ("dddddddddddd", Some(T2)),
+            ],
+            0x77,
+        );
+        let read = objects
+            .apply(9, &Edit::Reimport(&newer_t2, &w.tenants), None, None)
+            .unwrap();
+        assert_eq!(read.generation(), 9);
+        assert!(read.record_for(T1).unwrap() == &directory[0]);
+        assert!(read.reserved(T1));
+        assert_eq!(read.admit(T1).err().unwrap().code, "tenant_suspended");
+    }
+
+    #[test]
+    fn a_create_reservation_cannot_be_routed_or_deleted_by_a_control_edit() {
+        let w = world();
+        let t2 = Route::dedicated_for_test(T2, 1);
+        let objects = reserved(&w, vec![t2.clone()], OperationKind::Create);
+        // Routing the unrouted reserved tenant outside its operation would
+        // bypass the operation's verification and activation receipt.
+        let routes = [t2.clone(), Route::dedicated_for_test(T1, 1)];
+        let result = objects.apply(3, &Edit::Directory, Some(&routes[..]), None);
+        assert_reserved_refusal(&objects, result);
+        let only_t2 = tenants::Store::for_test(vec![tenants::Tenant::for_test(T2, None)]);
+        let result = objects.apply(3, &Edit::Reimport(&w.credentials, &only_t2), None, None);
+        assert_reserved_refusal(&objects, result);
+        // Nothing about T1 changed; T2's route may still be replaced.
+        objects
+            .apply(3, &Edit::Directory, Some(&[][..]), None)
+            .unwrap();
+        let (read, _) = objects.read().unwrap();
+        assert!(read.record_for(T1).is_none() && read.reserved(T1));
     }
 }

@@ -48,6 +48,16 @@ fn verifier(keys: &[&Signer], minimum: u64) -> Verifier {
 }
 
 fn claims(tenant: Option<&str>, lineage: u64, ops: &[credentials::Op], generation: u64) -> Claims {
+    claims_for("abcdefghijkl", tenant, lineage, ops, generation)
+}
+
+fn claims_for(
+    id: &str,
+    tenant: Option<&str>,
+    lineage: u64,
+    ops: &[credentials::Op],
+    generation: u64,
+) -> Claims {
     let now = now();
     Claims {
         aud: AUDIENCE.into(),
@@ -55,7 +65,7 @@ fn claims(tenant: Option<&str>, lineage: u64, ops: &[credentials::Op], generatio
         exp: now + 30_000,
         generation,
         principal: credentials::Principal::of(&credentials::Grant::for_user(
-            "abcdefghijkl".into(),
+            id.into(),
             "gateway principal".into(),
             tenant.map(str::to_owned),
             ops,
@@ -370,4 +380,106 @@ async fn backend_holds_the_highest_generation_and_accepts_rotation_overlap() {
         (status, body["error"]["code"].as_str()),
         (StatusCode::UNAUTHORIZED, Some("envelope_stale"))
     );
+}
+
+/// design-tenant-provisioning ITEM-006 through the router: a backend that
+/// decides from its tenant's control projection serves a pending `create`
+/// only to the operation's validator and only read-only, while the control
+/// state still routes nothing to the tenant (so the public gateway cannot
+/// reach it); without a clock proof (OD-005) it refuses every decision.
+#[tokio::test]
+async fn a_projection_backend_serves_only_the_pending_validator_read_only() {
+    use credentials::Op;
+    use tenant_provisioning::projection::{ClockProof, Reader, tests as fixture};
+    let key = env::signer("k1", 1);
+    let backend = |clock: Option<ClockProof>| {
+        let mut service = service();
+        let lineage = service.lineage.unwrap();
+        let memory = fixture::world(false, lineage);
+        fixture::publisher(&memory)
+            .publish(fixture::T, Some(&fixture::pending(AUDIENCE, lineage)), now)
+            .unwrap();
+        let reader = Reader::new(memory.clone(), fixture::NAME, fixture::T, HOUR, clock).unwrap();
+        let polled = reader.poll().map_err(|e| e.code);
+        service.trust = Some(Arc::new(Trust::for_projection_test(
+            verifier(&[&key], 1),
+            Arc::new(reader),
+            AUDIENCE,
+        )));
+        (router(service), lineage, memory, polled)
+    };
+    let header = principal_envelope::HEADER;
+    let code = |body: &Value| body["error"]["code"].as_str().map(str::to_owned);
+
+    let (router, lineage, memory, polled) = backend(Some(ClockProof::for_test(1_000)));
+    // Generation 2: the fixture's reservation of the tenant for `create`.
+    assert_eq!(polled, Ok(2));
+    let (snapshot, _) = Objects::new(memory, fixture::SOURCE).read().unwrap();
+    assert!(snapshot.record_for(fixture::T).is_none(), "never routed");
+    let token = |id: &str, tenant: &str, ops: &[Op]| {
+        key.sign(&claims_for(id, Some(tenant), lineage, ops, 1))
+            .unwrap()
+    };
+    let validator = token(fixture::VALIDATOR, fixture::T, &[Op::Read]);
+    let (status, _) = call(&router, "GET", "/v1/collections", &[(header, &validator)]).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body) = call(&router, "POST", "/v1/collections", &[(header, &validator)]).await;
+    assert_eq!(
+        (status, code(&body).as_deref()),
+        (StatusCode::FORBIDDEN, Some("forbidden_scope"))
+    );
+    for (token, expected) in [
+        (
+            token(fixture::VALIDATOR, fixture::T, &[Op::Read, Op::Collections]),
+            (StatusCode::FORBIDDEN, "pending_validation_read_only"),
+        ),
+        (
+            token(fixture::VALIDATOR, fixture::T, &[Op::Read, Op::Write]),
+            (StatusCode::FORBIDDEN, "pending_validation_read_only"),
+        ),
+        (
+            token("abcdefghijkl", fixture::T, &[Op::Read]),
+            (StatusCode::UNAUTHORIZED, "envelope_invalid"),
+        ),
+        (
+            token(fixture::VALIDATOR, T1, &[Op::Read]),
+            (StatusCode::UNAUTHORIZED, "envelope_invalid"),
+        ),
+    ] {
+        let (status, body) = call(&router, "GET", "/v1/collections", &[(header, &token)]).await;
+        assert_eq!(
+            (status, code(&body).as_deref()),
+            (expected.0, Some(expected.1))
+        );
+    }
+    let (status, body) = call(&router, "GET", "/ready", &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["generation"], 2);
+    assert!(body.get("admission").is_none() && body.get("pending").is_none());
+
+    let (router, lineage, _, polled) = backend(None);
+    assert_eq!(polled, Err("projection_freshness_unproven"));
+    let validator = key
+        .sign(&claims_for(
+            fixture::VALIDATOR,
+            Some(fixture::T),
+            lineage,
+            &[Op::Read],
+            1,
+        ))
+        .unwrap();
+    for (path, headers) in [
+        ("/ready", vec![]),
+        ("/v1/collections", vec![(header, validator.as_str())]),
+    ] {
+        let (status, body) = call(&router, "GET", path, &headers).await;
+        assert_eq!(
+            (status, code(&body).as_deref()),
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Some("projection_freshness_unproven")
+            ),
+            "{path}"
+        );
+    }
 }

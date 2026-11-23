@@ -11,6 +11,7 @@ use super::{
     authority::{AuthorityError, AuthorityStore, HeadRef, Observed, Phase},
     backup_policy::ArchiveStatus,
     gateway_mode::{flags, utf8},
+    tenant_provisioning::guard::{Guards, Refusal},
 };
 
 const FAILOVER_USAGE: &str = "vlite-server failover report|execute --target-file <json> [--shared-key-file <path>] [--archive-status-file <json>] [--observed-sequence <n> --observed-unix-ms <ms>] [execute only, all required: --ack-report-id <id> --expected-epoch <n> --expected-revision <rev> --old-replicas <n>]; unqualified automatic failover (GATE-005 open, off by default): vlite-server failover auto --config <json> | failover policy show|enable|disable --target-file <json>";
@@ -150,6 +151,7 @@ pub fn failover_command(args: &[OsString]) -> Result<Value, String> {
                 FailoverError::Unavailable => "authority is unavailable",
                 FailoverError::Missing => "authority is missing",
                 FailoverError::Invalid => "authority is invalid",
+                FailoverError::Lifecycle(refusal) => refusal.message(),
             };
             format!("{}: {description}", error.code())
         })
@@ -287,6 +289,9 @@ pub(super) enum FailoverError {
     Unavailable,
     Missing,
     Invalid,
+    /// design-tenant-provisioning ITEM-007: a managed lifecycle operation
+    /// holds the target, or its guard cannot be read or parsed.
+    Lifecycle(Refusal),
 }
 
 impl FailoverError {
@@ -300,6 +305,7 @@ impl FailoverError {
             Self::Unavailable => "failover_authority_unavailable",
             Self::Missing => "failover_authority_missing",
             Self::Invalid => "failover_authority_invalid",
+            Self::Lifecycle(refusal) => refusal.code(),
         }
     }
 }
@@ -425,6 +431,12 @@ pub(super) fn execute(
         {
             return Err(FailoverError::ReportStale);
         }
+        // ITEM-007: checked last, so the window before the transfer CAS is
+        // as small as possible; a holder still re-reads the authority after
+        // holding to catch a transfer that passed this check first.
+        Guards::of(store)
+            .check_transfer()
+            .map_err(FailoverError::Lifecycle)?;
         let prepared =
             store.prepare_transfer(&current, ack.expected_epoch, &ack.expected_revision)?;
         super::log_stderr(
@@ -968,6 +980,46 @@ mod tests {
             &memory,
             || execute(&store, &report, &ack(&report)),
             FailoverError::Missing,
+        );
+    }
+
+    #[test]
+    fn failover_refuses_a_target_held_by_a_lifecycle_operation() {
+        use crate::server::tenant_provisioning::guard::{
+            Guards, Refusal,
+            tests::{OPERATION, TENANT, held},
+        };
+        for write_enabled in [false, true] {
+            let (memory, store, _, _) = setup();
+            let report = build_report(&store, None, None).unwrap();
+            held(&memory, "test/", write_enabled);
+            assert_no_put(
+                &memory,
+                || execute(&store, &report, &ack(&report)),
+                FailoverError::Lifecycle(Refusal::Reserved),
+            );
+            assert_eq!(
+                FailoverError::Lifecycle(Refusal::Reserved).code(),
+                "lifecycle_reserved"
+            );
+        }
+        // An unreadable guard refuses closed; a released one does not.
+        let (memory, store, _, _) = setup();
+        let report = build_report(&store, None, None).unwrap();
+        memory.fault(Op::Get, "lifecycle-guard", Fault::Refuse, 0, 1);
+        assert_no_put(
+            &memory,
+            || execute(&store, &report, &ack(&report)),
+            FailoverError::Lifecycle(Refusal::Unavailable),
+        );
+        held(&memory, "test/", false);
+        Guards::of(&store).release(TENANT, OPERATION).unwrap();
+        assert_eq!(
+            execute(&store, &report, &ack(&report))
+                .unwrap()
+                .record
+                .epoch,
+            2
         );
     }
 

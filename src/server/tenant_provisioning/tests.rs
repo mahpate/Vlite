@@ -576,7 +576,8 @@ fn directory_replacement_cannot_silently_drop_an_activated_route() {
         )
         .err()
         .unwrap();
-    assert_eq!(error.code, "control_state_invalid");
+    // ITEM-007: the reservation guard refuses before snapshot validation.
+    assert_eq!(error.code, "lifecycle_reserved");
     assert!(w.snapshot().record_for(T).is_some());
 }
 
@@ -770,8 +771,9 @@ fn legacy_migration_and_lifecycle_reservation_exclude_each_other() {
             .code,
         "lifecycle_reserved"
     );
-    // A lifecycle reservation on T blocks a legacy migration of T.
-    reserve(&w.ops, &w.objects, &w.intent_for_t("held"), NOW).unwrap();
+    // A lifecycle reservation on T blocks a legacy migration of T. A control
+    // edit cannot route T while a create reservation holds it (ITEM-007),
+    // so T is routed first and then held by a reader update.
     w.objects
         .apply(
             NOW,
@@ -779,6 +781,11 @@ fn legacy_migration_and_lifecycle_reservation_exclude_each_other() {
             Some(&[Route::shared_for_test(OTHER), Route::shared_for_test(T)]),
             None,
         )
+        .unwrap();
+    w.objects
+        .update(NOW, |current| {
+            current.reserve(T, &"3".repeat(32), Kind::SetReaders, &"4".repeat(64))
+        })
         .unwrap();
     let mut blocked = migration.clone();
     blocked.id = "move-two".into();
@@ -1186,4 +1193,59 @@ fn journal_is_strict() {
             "{pointer}"
         );
     }
+}
+
+/// ITEM-008 assessment fixture on the real set protocol: a reader's
+/// operation pin rewrites the whole set record, in the same coordination
+/// store and prefix as the writer authority and the lifecycle guard. No
+/// object-level grant can therefore allow the pin without also allowing
+/// publication, deletion and verification rewrites, so reader fleets stay
+/// denied. This proves the layout only, not Azure RBAC or mount enforcement.
+#[test]
+fn reader_pins_share_authority_scope_so_reader_fleets_stay_denied() {
+    use crate::server::cloud_backup::PinKind;
+    use std::collections::BTreeMap;
+    let (env, authority, _claim) = crate::server::cloud_recovery::tests::setup_ha();
+    guard::Guards::of(&authority).hold(T, OTHER).unwrap();
+    let (_, prefix) = env.sets.coordination();
+    let objects = || -> BTreeMap<String, Vec<u8>> {
+        env.meta
+            .names()
+            .into_iter()
+            .filter_map(|name| env.meta.raw(&name).map(|bytes| (name, bytes)))
+            .collect()
+    };
+    let before = objects();
+    let record = format!("{prefix}sets/{}/record.json", env.set_id);
+    for control in [
+        format!("{prefix}authority.json"),
+        format!("{prefix}{}", guard::OBJECT),
+        record.clone(),
+    ] {
+        assert!(before.contains_key(&control), "{control} shares the store");
+    }
+    env.sets
+        .pin(
+            &env.set_id,
+            "reader-apply:replica-1",
+            PinKind::Operation,
+            NOW,
+        )
+        .unwrap();
+    let after = objects();
+    let changed: Vec<_> = after
+        .iter()
+        .filter(|(name, bytes)| before.get(*name) != Some(*bytes))
+        .map(|(name, _)| name.clone())
+        .collect();
+    assert_eq!(changed, [record.as_str()], "a pin writes only the record");
+    // The one object a pin needs also carries the set's lifecycle state.
+    let written: Value = serde_json::from_slice(&after[&record]).unwrap();
+    for field in ["state", "manifest_sha256", "pins", "delete_reason"] {
+        assert!(written.get(field).is_some(), "{field}");
+    }
+    assert_eq!(written["pins"].as_array().unwrap().len(), 1);
+    let refusal = pin_scope_unproven();
+    assert_eq!(refusal.status, axum::http::StatusCode::CONFLICT);
+    assert_eq!(refusal.code, "pin_scope_unproven");
 }

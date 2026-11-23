@@ -21,6 +21,7 @@
 
 use super::control_state::{Feed, Source};
 use super::principal_envelope::{Policy, Refusal, Verifier};
+use super::tenant_provisioning::projection::Reader;
 use super::*;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
@@ -129,10 +130,20 @@ pub struct GatewayTrust(Arc<Trust>);
 
 pub(super) struct Trust {
     verifier: Verifier,
-    feed: Arc<Feed>,
+    view: View,
     audience: String,
     propagation: Duration,
     draining: AtomicBool,
+}
+
+/// What a trusted backend decides from: the shared control state, or
+/// (design-tenant-provisioning ITEM-006) its tenant's control projection.
+/// The projection view has no `--gateway-trust-file` opt-in yet: it
+/// refuses every request without a qualified clock proof (OD-005).
+enum View {
+    Full(Arc<Feed>),
+    #[cfg_attr(not(test), allow(dead_code))]
+    Projection(Arc<Reader>),
 }
 
 impl GatewayTrust {
@@ -152,7 +163,7 @@ impl GatewayTrust {
             .map_err(|error| format!("{}: {}", error.code, error.message))?;
         let trust = Arc::new(Trust {
             verifier,
-            feed: feed.clone(),
+            view: View::Full(feed.clone()),
             audience: file.audience,
             propagation: Duration::from_millis(file.readiness_propagation_ms),
             draining: AtomicBool::new(false),
@@ -194,7 +205,9 @@ impl GatewayTrust {
 
     /// Stops and joins the poll thread (blocking; at most one read).
     pub fn stop(&self) {
-        self.0.feed.stop();
+        if let View::Full(feed) = &self.0.view {
+            feed.stop();
+        }
     }
 }
 
@@ -210,9 +223,23 @@ impl Service {
 impl Trust {
     #[cfg(test)]
     pub(super) fn for_test(verifier: Verifier, feed: Arc<Feed>, audience: &str) -> Self {
+        Self::with_view(verifier, View::Full(feed), audience)
+    }
+
+    #[cfg(test)]
+    pub(super) fn for_projection_test(
+        verifier: Verifier,
+        reader: Arc<Reader>,
+        audience: &str,
+    ) -> Self {
+        Self::with_view(verifier, View::Projection(reader), audience)
+    }
+
+    #[cfg(test)]
+    fn with_view(verifier: Verifier, view: View, audience: &str) -> Self {
         Self {
             verifier,
-            feed,
+            view,
             audience: audience.to_owned(),
             propagation: Duration::ZERO,
             draining: AtomicBool::new(false),
@@ -221,7 +248,8 @@ impl Trust {
 
     /// The request's role: `None` without an envelope (then 401), the
     /// envelope's scoped grant when this backend serves its tenant.
-    /// `lineage` is this backend's database lineage.
+    /// `lineage` is this backend's database lineage. Under a projection's
+    /// pending admission only the operation's read-only validator is served.
     pub(super) fn authenticate(
         &self,
         headers: &HeaderMap,
@@ -235,34 +263,57 @@ impl Trust {
             (Ok(token), None) => token,
             _ => return Err(Refusal::Malformed.error()),
         };
-        let snapshot = self.feed.current()?;
-        let grant = self
-            .verifier
-            .verify_with(token, admin::now_ms() as u64, |tenant| {
-                tenant
-                    .and_then(|tenant| snapshot.record_for(tenant))
-                    .is_some_and(|record| {
-                        record.audience == self.audience && lineage == Some(record.lineage)
+        let now = admin::now_ms() as u64;
+        let grant = match &self.view {
+            View::Full(feed) => {
+                let snapshot = feed.current()?;
+                let grant = self
+                    .verifier
+                    .verify_with(token, now, |tenant| {
+                        tenant
+                            .and_then(|tenant| snapshot.record_for(tenant))
+                            .is_some_and(|record| {
+                                record.audience == self.audience && lineage == Some(record.lineage)
+                            })
                     })
-            })
-            .map_err(Refusal::error)?;
-        let tenant = grant
-            .tenant_id
-            .as_deref()
-            .ok_or_else(|| Refusal::Tenant.error())?;
-        snapshot.admit(tenant)?;
+                    .map_err(Refusal::error)?;
+                let tenant = grant
+                    .tenant_id
+                    .as_deref()
+                    .ok_or_else(|| Refusal::Tenant.error())?;
+                snapshot.admit(tenant)?;
+                grant
+            }
+            View::Projection(reader) => {
+                let projection = reader.current()?;
+                let grant = self
+                    .verifier
+                    .verify_with(token, now, |tenant| {
+                        projection.serves(tenant, &self.audience, lineage)
+                    })
+                    .map_err(Refusal::error)?;
+                projection.admit_grant(&grant)?;
+                grant
+            }
+        };
         Ok(Some(admin::Role::Scoped(grant)))
     }
 
-    /// The tenant quota from the current snapshot (fail closed when stale).
+    /// The tenant quota from the current view (fail closed when stale).
     pub(super) fn tenant_quota(&self, tenant: &str) -> Result<Option<tenants::Tenant>, ApiError> {
-        self.feed.current()?.tenant_quota(tenant)
+        match &self.view {
+            View::Full(feed) => feed.current()?.tenant_quota(tenant),
+            View::Projection(reader) => reader.current()?.tenant_quota(tenant),
+        }
     }
 
-    /// Admits `tenant` (known, not suspended) against the current snapshot
+    /// Admits `tenant` (known, not suspended) against the current view
     /// (fail closed when stale), as the tenant store does standalone.
     pub(super) fn admit(&self, tenant: &str) -> Result<(), ApiError> {
-        self.feed.current()?.admit(tenant)
+        match &self.view {
+            View::Full(feed) => feed.current()?.admit(tenant),
+            View::Projection(reader) => reader.current()?.admit(tenant),
+        }
     }
 
     /// `/ready` in this mode.
@@ -270,8 +321,11 @@ impl Trust {
         if self.draining.load(Ordering::SeqCst) {
             return Err(draining());
         }
-        let snapshot = self.feed.current()?;
-        Ok(json!({"status":"ready","generation":snapshot.generation(),
+        let generation = match &self.view {
+            View::Full(feed) => feed.current()?.generation(),
+            View::Projection(reader) => reader.current()?.source_generation(),
+        };
+        Ok(json!({"status":"ready","generation":generation,
             "minimum_generation":self.verifier.minimum()}))
     }
 }

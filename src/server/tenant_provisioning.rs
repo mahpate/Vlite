@@ -20,6 +20,12 @@
 //!
 //! EPIC-002 (`admin`): the administrator routes and the `tenant-deployment`
 //! CLI over this contract. No cloud action is dispatched (OD-002).
+//!
+//! EPIC-003: `projection` is the tenant-only, freshness-bound control view a
+//! backend could serve a pending validator from (ITEM-006; no production
+//! opt-in yet); `guard` is the durable target lifecycle guard checked by
+//! manual and automatic failover and by the writer's authority claim
+//! (ITEM-007); [`pin_scope_unproven`] keeps reader fleets denied (ITEM-008).
 #![cfg_attr(not(test), allow(dead_code))]
 
 use super::cloud_backup::{Cond, ObjectStore, StoreError};
@@ -405,6 +411,37 @@ fn conflict(code: &'static str, message: &'static str) -> ApiError {
 
 fn ended() -> ApiError {
     conflict("operation_terminal", "the operation has already ended")
+}
+
+/// Whether this payload would run readers, which pin sets (ITEM-008).
+fn pins_sets(payload: &Payload) -> bool {
+    matches!(
+        payload,
+        Payload::SetReaders {
+            fleet: Fleet::Present { .. },
+            ..
+        }
+    )
+}
+
+/// ITEM-008: reader fleets are denied until a reader's pin scope is proven.
+///
+/// A reader pins its set by rewriting the whole set record
+/// (`{p}sets/{id}/record.json`, `Sets::pin`): the same object carries the
+/// publication and deletion state, the manifest digest and the verification,
+/// and it lives in the same coordination store and prefix as the writer
+/// authority, the auto-failover state and the lifecycle guard. A Blob grant
+/// is per object at best, so no grant on this layout allows the pin without
+/// those writes, and offline fixtures prove neither Azure RBAC nor mount
+/// enforcement. Bounded follow-up before ACA execution: broker pin and
+/// release through the VLite control role as an operation-bound request, or
+/// move pins to per-replica objects a reader may write alone; then qualify
+/// the grants and mounts in the cloud.
+fn pin_scope_unproven() -> ApiError {
+    conflict(
+        "pin_scope_unproven",
+        "reader fleets are denied: reader pins rewrite the whole set record in the writer's coordination scope, and no tenant-scoped pin grant or brokered pin path is proven yet (ITEM-008); cancel to release the reservation",
+    )
 }
 
 fn not_owner() -> ApiError {
@@ -1037,6 +1074,8 @@ pub(super) fn activate(
 // ---------------------------------------------------------------- routes
 
 mod admin;
+pub(super) mod guard;
+pub(super) mod projection;
 
 pub(super) use admin::Deployments;
 pub use admin::{TenantDeployments, TenantDeploymentsConfig, tenant_deployment_command};

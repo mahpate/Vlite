@@ -153,6 +153,11 @@ impl Grant {
     pub(super) fn allows(&self, op: Op) -> bool {
         self.ops & bit(op) != 0
     }
+    /// Whether every operation the grant allows is one of `ops`.
+    pub(super) fn allows_only(&self, ops: &[Op]) -> bool {
+        let listed = ops.iter().fold(0, |mask, op| mask | bit(*op));
+        self.ops & !listed == 0
+    }
 
     /// Cheap name pre-check before the collection is resolved.
     pub(super) fn names(&self, name: &str) -> bool {

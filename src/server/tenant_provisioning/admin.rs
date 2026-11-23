@@ -388,6 +388,10 @@ fn render(
             "cancelling",
             "cancel again to seal and release the reservation",
         ),
+        None if reserved && pins_sets(&intent.payload) => (
+            "reserved",
+            "reader fleets are blocked until reader pin scope is proven (ITEM-008); cancel to release the reservation",
+        ),
         None if reserved => (
             "reserved",
             "cloud execution is blocked (OD-002); cancel to release the reservation",
@@ -474,10 +478,12 @@ fn stored_action(
 fn available(
     verb: Verb,
     request: &ActionRequest,
+    payload: &Payload,
     ended: bool,
     slot: Option<&Slot>,
 ) -> Result<(), ApiError> {
     match verb {
+        Verb::Resume if !ended && pins_sets(payload) => Err(pin_scope_unproven()),
         Verb::Resume => Ok(()),
         Verb::Cancel if ended => Err(super::ended()),
         Verb::Cancel => match slot {
@@ -580,6 +586,7 @@ fn act(
             available(
                 verb,
                 &request,
+                &intent.payload,
                 terminal.is_some(),
                 holds(&snapshot, &intent),
             )?;
@@ -1457,7 +1464,11 @@ mod tests {
             "expected_lifecycle_generation": 0,
         }))
         .unwrap();
-        let error = available(Verb::Cancel, &request, false, None).unwrap_err();
+        let readers = Payload::SetReaders {
+            tenant_id: ROUTED.into(),
+            fleet: Fleet::Absent {},
+        };
+        let error = available(Verb::Cancel, &request, &readers, false, None).unwrap_err();
         assert_eq!(error.code, "transition_unavailable");
     }
 
@@ -1517,6 +1528,51 @@ mod tests {
         let path = format!("/v1/admin/tenant-deployments/{ROUTED}/readers");
         let (status, _) = f.call("POST", &path, Some(retire)).await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    /// ITEM-008: a reader fleet would pin sets with whole-record writes in
+    /// the writer's coordination scope, so it cannot advance; it can still
+    /// be read and cancelled, and removing readers needs no pins.
+    #[tokio::test]
+    async fn reader_fleets_are_denied_until_pin_scope_is_proven() {
+        let f = fixture();
+        let path = format!("/v1/admin/tenant-deployments/{ROUTED}/readers");
+        let present = json!({
+            "idempotency_key": "readers-present",
+            "request": {"kind": "set_readers", "tenant_id": ROUTED, "fleet": {
+                "state": "present", "min_replicas": 1, "max_replicas": 2,
+                "reader_profile": sha(PROFILE), "scaling_rule": sha(INIT),
+                "read_routing": "writer_only"}},
+            "contents": [PROFILE, INIT],
+        });
+        let (status, body) = f.call("POST", &path, Some(present)).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+        let operation = body["operation"].clone();
+        assert_eq!(operation["phase"], "reserved");
+        assert!(
+            operation["next_step"]
+                .as_str()
+                .unwrap()
+                .contains("pin scope"),
+            "{operation}"
+        );
+        let (status, body) = f.action(&operation, "resume", "resume-1", json!({})).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"]["code"], "pin_scope_unproven");
+        // Refused before any record: the key stays free for cancel.
+        let (status, body) = f.action(&operation, "cancel", "resume-1", json!({})).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["operation"]["phase"], "cancelled");
+        let absent = json!({
+            "idempotency_key": "readers-absent",
+            "request": {"kind": "set_readers", "tenant_id": ROUTED, "fleet": {"state": "absent"}},
+        });
+        let (status, body) = f.call("POST", &path, Some(absent)).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+        let (status, body) = f
+            .action(&body["operation"], "resume", "resume-2", json!({}))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
     }
 
     #[tokio::test]

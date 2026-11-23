@@ -27,6 +27,7 @@ use super::{
     cloud_backup::{Cond, ObjectStore, StoreError, random_hex},
     failover::{FailoverAck, FailoverError, LossReport, build_report, execute},
     gateway_mode::{flags, utf8},
+    tenant_provisioning::guard::Guards,
     users,
 };
 
@@ -470,6 +471,11 @@ impl<A: Actions> Supervisor<A> {
             Ok(_) => return Tick::Held("authority_changed"),
             Err(_) => return Tick::Held("authority_unavailable"),
         }
+        // design-tenant-provisioning ITEM-007: a target held by a managed
+        // lifecycle operation is never fenced; `execute` checks again.
+        if let Err(refusal) = Guards::of(&self.authority).check_transfer() {
+            return Tick::Held(refusal.code());
+        }
         match self.actions.fence(seen) {
             Err(_) => return Tick::Aborted("fence_failed"),
             Ok(0) => {}
@@ -499,6 +505,7 @@ impl<A: Actions> Supervisor<A> {
             Err(FailoverError::ReportStale | FailoverError::Conflict) => {
                 return Tick::Aborted("authority_changed");
             }
+            Err(FailoverError::Lifecycle(refusal)) => return Tick::Aborted(refusal.code()),
             Err(_) => return Tick::Aborted("transfer_failed"),
         };
         let new_epoch = transferred.record.epoch;
@@ -1424,6 +1431,43 @@ mod tests {
             .unwrap();
         assert_eq!(supervisor.tick(), Tick::Suspected(1));
         assert_eq!(fake.fences(), 0);
+    }
+
+    #[test]
+    fn drill_a_lifecycle_hold_blocks_promotion_before_the_fence() {
+        let (memory, _, before) = setup();
+        enable(&memory);
+        crate::server::tenant_provisioning::guard::tests::held(&memory, "test/", true);
+        let fake = Fake::down();
+        let mut supervisor = supervisor(&memory, &fake, 2);
+        seen_ready(&mut supervisor, &fake);
+        assert_eq!(supervisor.tick(), Tick::Suspected(1));
+        assert_eq!(supervisor.tick(), Tick::Held("lifecycle_reserved"));
+        assert_eq!(fake.fences(), 0);
+        assert_eq!(fake.promotes(), 0);
+        assert_eq!(authority(&memory).read().unwrap().record, before.record);
+        // Unreadable guard: still no fence.
+        memory.fault(Op::Get, "lifecycle-guard", Fault::Refuse, 0, 1);
+        assert_eq!(supervisor.tick(), Tick::Suspected(1));
+        assert_eq!(supervisor.tick(), Tick::Held("lifecycle_guard_unavailable"));
+        assert_eq!(fake.fences(), 0);
+    }
+
+    #[test]
+    fn drill_a_hold_taken_during_the_fence_aborts_the_transfer() {
+        let (memory, _, before) = setup();
+        enable(&memory);
+        let fake = Fake::down();
+        let held = memory.clone();
+        *fake.during_fence.lock().unwrap() = Some(Box::new(move || {
+            crate::server::tenant_provisioning::guard::tests::held(&held, "test/", false);
+        }));
+        let mut supervisor = supervisor(&memory, &fake, 1);
+        seen_ready(&mut supervisor, &fake);
+        assert_eq!(supervisor.tick(), Tick::Aborted("lifecycle_reserved"));
+        assert_eq!(fake.fences(), 1);
+        assert_eq!(fake.promotes(), 0);
+        assert_eq!(authority(&memory).read().unwrap().record, before.record);
     }
 
     #[test]
