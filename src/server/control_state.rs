@@ -435,6 +435,15 @@ impl Snapshot {
         Ok(self)
     }
 
+    /// design-tenant-provisioning EPIC-002: `self` with `tenant` added and
+    /// left unrouted (idempotent, see `tenants::insert_in`); nothing else
+    /// changes.
+    pub(super) fn with_tenant(&self, tenant: &tenants::Tenant) -> Result<Self, ApiError> {
+        let mut next = self.clone();
+        tenants::insert_in(&mut next.tenants, tenant)?;
+        Ok(next)
+    }
+
     /// The directory record for `tenant`, if it is routed.
     pub(super) fn record_for(&self, tenant: &str) -> Option<&Route> {
         self.directory.iter().find(|route| route.tenant == tenant)
@@ -1248,9 +1257,17 @@ impl Source {
 
     /// Opens the store (blocking client: call off the async runtime).
     pub(super) fn connect(&self) -> Result<Objects, cloud_recovery::RecoveryError> {
+        let (store, prefix) = self.coordination()?;
+        Ok(Objects::new(store, format!("{prefix}{}", self.object)))
+    }
+
+    /// The coordination store and its prefix (blocking, as `connect`).
+    pub(super) fn coordination(
+        &self,
+    ) -> Result<(Arc<dyn ObjectStore>, String), cloud_recovery::RecoveryError> {
         let sets = cloud_recovery::connect(&self.target_file, self.shared_key_file.as_deref())?;
         let (store, prefix) = sets.coordination();
-        Ok(Objects::new(store, format!("{prefix}{}", self.object)))
+        Ok((store, prefix.to_owned()))
     }
 }
 

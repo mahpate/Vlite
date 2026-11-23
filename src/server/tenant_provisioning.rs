@@ -18,8 +18,8 @@
 //! sealed before the slot is released, and only after every recorded side
 //! effect is settled.
 //!
-//! Library only: no route, CLI or cloud dispatch is wired here (later
-//! epics). Fakes drive it in tests.
+//! EPIC-002 (`admin`): the administrator routes and the `tenant-deployment`
+//! CLI over this contract. No cloud action is dispatched (OD-002).
 #![cfg_attr(not(test), allow(dead_code))]
 
 use super::cloud_backup::{Cond, ObjectStore, StoreError};
@@ -1032,6 +1032,39 @@ pub(super) fn activate(
         |current| current.activate(&intent.tenant_id, &intent.operation_id, route, proof_digest),
     )?;
     receipt(&snapshot).ok_or_else(indeterminate)
+}
+
+// ---------------------------------------------------------------- routes
+
+mod admin;
+
+pub(super) use admin::Deployments;
+pub use admin::tenant_deployment_command;
+
+/// design-tenant-provisioning ITEM-004: the managed tenant-deployment routes.
+pub(super) fn routes() -> Router<Service> {
+    Router::new()
+        .route("/v1/admin/tenant-deployments", post(admin::create))
+        .route(
+            "/v1/admin/tenant-deployments/{tenant}/readers",
+            post(admin::readers),
+        )
+        .route(
+            "/v1/admin/tenant-deployments/{tenant}/migrations",
+            post(admin::migrate),
+        )
+        .route(
+            "/v1/admin/tenant-deployments/{tenant}/retire",
+            post(admin::retire),
+        )
+        .route(
+            "/v1/admin/tenant-deployment-operations/{operation}",
+            get(admin::operation_status),
+        )
+        .route(
+            "/v1/admin/tenant-deployment-operations/{operation}/{action}",
+            post(admin::operation_action),
+        )
 }
 
 #[cfg(test)]

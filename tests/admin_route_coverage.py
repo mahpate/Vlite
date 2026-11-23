@@ -107,7 +107,18 @@ INVENTORY = {
 
 # Admin routes deliberately without a dashboard control. Each needs a reason, and
 # the dashboard must not half-implement one.
-BACKEND_ONLY = {}
+_TENANT_DEPLOYMENTS = (
+    "design-tenant-provisioning EPIC-002: managed tenant deployments are API/CLI only "
+    "until the provisioning UI epic; cloud execution is blocked (OD-002)"
+)
+BACKEND_ONLY = {
+    ("POST", "/v1/admin/tenant-deployments"): _TENANT_DEPLOYMENTS,
+    ("POST", "/v1/admin/tenant-deployments/{tenant}/readers"): _TENANT_DEPLOYMENTS,
+    ("POST", "/v1/admin/tenant-deployments/{tenant}/migrations"): _TENANT_DEPLOYMENTS,
+    ("POST", "/v1/admin/tenant-deployments/{tenant}/retire"): _TENANT_DEPLOYMENTS,
+    ("GET", "/v1/admin/tenant-deployment-operations/{operation}"): _TENANT_DEPLOYMENTS,
+    ("POST", "/v1/admin/tenant-deployment-operations/{operation}/{action}"): _TENANT_DEPLOYMENTS,
+}
 
 # Graph routes (src/server/graph.rs).
 # graph.js builds its own controls inside <section id="graph"> (the Graph workspace), so the control id is

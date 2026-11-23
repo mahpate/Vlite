@@ -98,6 +98,7 @@ pub use gateway_mode::{control_state_command, gateway_keygen, run_gateway};
 pub use gateway_trust::{GatewayTrust, GatewayTrustConfig};
 pub use reader_apply::{ReaderApply, ReaderApplyConfig};
 pub use serve_mode::ServeMode;
+pub use tenant_provisioning::tenant_deployment_command;
 pub use writer_authority::{WriterAuthority, authority_command};
 
 /// Emit a legacy stderr line and also capture it in the bounded server log buffer.
@@ -271,6 +272,9 @@ pub struct Service {
     /// feature-aca-ha ITEM-019: apply progress of a reader that follows the
     /// writer's archive; unset everywhere else.
     reader: Option<Arc<reader_apply::Progress>>,
+    /// design-tenant-provisioning ITEM-004: the managed tenant-deployment
+    /// store; unset, those routes answer `tenant_deployments_not_configured`.
+    tenant_deployments: Option<Arc<tenant_provisioning::Deployments>>,
 }
 
 impl Service {
@@ -370,6 +374,7 @@ impl Service {
             writer_fence: writer_fence::WriterFence::disabled(),
             trust: None,
             reader: None,
+            tenant_deployments: None,
         })
     }
 
@@ -1004,6 +1009,7 @@ fn routes(service: Service) -> Router {
         .merge(backup_policy::routes())
         .merge(serve_mode::routes())
         .merge(auto_failover::routes())
+        .merge(tenant_provisioning::routes())
         .merge(credentials::routes())
         .merge(data_routes())
         .merge(features::routes())

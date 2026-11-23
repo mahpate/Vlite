@@ -122,6 +122,34 @@ pub(super) fn quota_in(tenants: &[Tenant], id: &str) -> Result<Option<Tenant>, A
         Some(t) => Ok(Some(t.clone())),
     }
 }
+/// design-tenant-provisioning EPIC-002: adds `tenant` to a tenant list (the
+/// local store or a control-state snapshot) unless the same live tenant is
+/// already there. A deleted tenant or a different name or quota under the ID
+/// is 409 `tenant_id_conflict`. Returns whether it was added.
+pub(super) fn insert_in(tenants: &mut Vec<Tenant>, tenant: &Tenant) -> Result<bool, ApiError> {
+    if let Some(existing) = tenants.iter().find(|t| t.id == tenant.id) {
+        if existing.deleted
+            || existing.name != tenant.name
+            || existing.max_vectors != tenant.max_vectors
+        {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "tenant_id_conflict",
+                "a different or deleted tenant already has this ID",
+            ));
+        }
+        return Ok(false);
+    }
+    if tenants.len() >= 1024 {
+        return Err(unprocessable("tenant capacity reached"));
+    }
+    tenants.push(tenant.clone());
+    if !valid_store(tenants) {
+        tenants.pop();
+        return Err(unprocessable("tenant ID or name is invalid"));
+    }
+    Ok(true)
+}
 #[cfg(test)]
 impl Tenant {
     pub(super) fn for_test(id: &str, suspended: Option<u64>) -> Self {
@@ -230,6 +258,41 @@ impl Store {
     /// deleted and suspended ones included so their state propagates.
     pub(super) fn snapshot(&self) -> Result<Vec<Tenant>, ApiError> {
         Ok(self.tenants.lock().map_err(internal)?.clone())
+    }
+    /// design-tenant-provisioning EPIC-002: creates live tenant `id` from an
+    /// operation's persisted ID, never allocating one, so retries converge on
+    /// one tenant. Idempotent (see `insert_in`); audited `tenant_created`
+    /// with the operation. Callers serialize tenant mutations, as the legacy
+    /// create does.
+    pub(super) fn create_with_id(
+        &self,
+        audit: Option<&audit::Log>,
+        id: &str,
+        name: &str,
+        max_vectors: Option<u64>,
+        operation_id: &str,
+    ) -> Result<Tenant, ApiError> {
+        valid_name(name)?;
+        let tenant = Tenant {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            max_vectors,
+            deleted: false,
+            suspended_unix_ms: None,
+        };
+        let mut next = self.tenants.lock().map_err(internal)?.clone();
+        if !insert_in(&mut next, &tenant)? {
+            return Ok(tenant);
+        }
+        if let Some(log) = audit {
+            log.append(
+                json!({"event":"tenant_created", "tenant_id":id, "operation_id":operation_id}),
+                true,
+            )
+            .map_err(internal)?;
+        }
+        self.commit(&next)?;
+        Ok(tenant)
     }
     fn commit(&self, next: &[Tenant]) -> Result<(), ApiError> {
         let directory = self.path.parent().expect("tenant directory");

@@ -1191,7 +1191,7 @@ enum Mutation {
 
 /// Name of the admin-directory file `control-state` locks, so two commands
 /// on one admin directory never interleave.
-const CONTROL_STATE_LOCK: &str = "control-state.lock";
+pub(super) const CONTROL_STATE_LOCK: &str = "control-state.lock";
 
 /// `vlite-server control-state publish|update`: the shared control state's
 /// command line, through its compare-and-swap. `publish` creates generation 1
