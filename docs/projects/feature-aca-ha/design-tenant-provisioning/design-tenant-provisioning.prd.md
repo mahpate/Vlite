@@ -11,7 +11,7 @@ tags: [design, architecture, aca, tenant-isolation, provisioning, migration]
 
 **DESIGN ONLY — implementation and deployment are not authorized by this document.** This is the next focused design requested by the owner: “also, as discussed previously per tenant writers and auto wirter/reader provisioning design needs to pickup next.”
 
-> **Superseding note (EPIC-001 only):** the owner later authorized offline implementation of EPIC-001 (ITEM-001..003) — “go ahead with above fixes” and “Start above together in parallel.” That authorization covers EPIC-001 code and fake-store tests only. EPIC-002..007, cloud/Azure execution, deployment, qualification runs, gate/policy changes, merge and PR creation remain unauthorized. See section 15 for the implementation notes.
+> **Superseding note (EPIC-001..003 only):** the owner later authorized offline implementation of EPIC-001 (ITEM-001..003) — “go ahead with above fixes” and “Start above together in parallel” — then EPIC-002 (“please go ahead”) and EPIC-003 (“what are you waiting for why you are not pickingup next work items?”). That authorization covers offline code and local fixtures only. EPIC-004..007, existing-tenant migration, cloud/Azure execution, deployment, qualification runs, gate/policy changes, push, merge and PR creation remain unauthorized. See section 15 for the implementation notes.
 This companion extends [feature-aca-ha.prd.md](../feature-aca-ha.prd.md), specifically section 3.11 and EPIC-007/008. It does not reopen delivered primitives or rewrite their history. Its identifiers are local to this companion; `HA:ITEM-028`, for example, names an item in the parent. The parent’s introductory implementation snapshot is historical; the source inventory below distinguishes current code from missing orchestration.
 
 The intended result is an administrator-managed onboarding operation that creates a tenant’s own database, one active writer, and independently scalable readers, then publishes gateway routing only after proof. Today ordinary tenants remain namespaces in a shared database; creating one does **not** provision infrastructure. Neither the current singleton nor its storage is adopted or changed implicitly.
@@ -466,7 +466,7 @@ An implementation that discovers additional mutation surfaces MUST add a reviewe
 
 ## 14. Implementation Plan
 
-EPIC-001 and EPIC-002 are owner-authorized and implemented offline (see their status columns and section 15). All other work below is **Not Started** and requires separate implementation authorization. Completion is by listed tests/proofs, not estimated time or a historical checkpoint number. Each epic has at most seven unique code/test/doc files; later-discovered surfaces require a separately bounded item. Existing parent epics remain Done at their recorded primitive/scaffold scope.
+EPIC-001 and EPIC-002 are owner-authorized and implemented offline. EPIC-003 is owner-authorized and partly implemented offline: ITEM-006/007 are partial and ITEM-008 is blocked (see their status columns and section 15). EPIC-004 and later work is **Not Started** and requires separate implementation authorization. Completion is by listed tests/proofs, not estimated time or a historical checkpoint number. Each epic has at most seven unique code/test/doc files; later-discovered surfaces require a separately bounded item. Existing parent epics remain Done at their recorded primitive/scaffold scope.
 
 **Dependency interpretation:** The graph orders offline implementation and local fixtures only. Qualification is a separate execution permission, not a prerequisite for writing its own fake/local tests. EPIC-004/005/006 can produce local code and evidence without passing ACA gates, but cannot execute real cloud operations or migrate a production source. EPIC-007 evaluates the evidence from those implementations under separate authorization; its outcome then controls rollout. No circular “qualify before implementing qualification fixtures” dependency is intended.
 
@@ -495,9 +495,9 @@ EPIC-001 and EPIC-002 are owner-authorized and implemented offline (see their st
 
 | Task | Description | Status | Relevant Files |
 |------|-------------|--------|----------------|
-| ITEM-006 | Produce tenant-only backend projection without credentials/other tenant inventory; implement source-read-start freshness witness, monotonic publication and expiry within the existing `S_ctl`, not transport-read age. Add operation-bound pending read-only validation/proof; keep public gateway unaware of pending routes. Test stalled publisher with healthy projection reads, slow reads, replay/restart/clock regression and blocked clock proof, revocation and inability to mutate. | Not Started | `src/server/control_state.rs`, `src/server/gateway_trust.rs`, `src/server.rs`, `src/server/tenant_provisioning.rs` |
-| ITEM-007 | Enforce managed reservation at manual/automatic failover and authority-entry paths, and existing control-state edits. Leave auto-failover disabled. Inventory all selected-tenant mutation/background paths; implement central barriers only where coverage is proven, refuse unsupported surfaces, and persist target validation/write-enable guard. Do not claim a route-layer check covers queued work. | Not Started | `src/server/auto_failover.rs`, `src/server/failover.rs`, `src/server/writer_authority.rs`, `src/server/control_state.rs`, `src/server.rs` |
-| ITEM-008 | Prove effective tenant-scoped Blob/mount access, including necessary reader pin writes without authority/global-control writes. If existing object placement cannot enforce it, return a concrete blocker and a bounded follow-up for isolated metadata/pin brokering before ACA execution; never broaden grants as a passing test. | Not Started | `src/server/tenant_provisioning.rs`, `src/server/gateway_trust.rs` |
+| ITEM-006 | Produce tenant-only backend projection without credentials/other tenant inventory; implement source-read-start freshness witness, monotonic publication and expiry within the existing `S_ctl`, not transport-read age. Add operation-bound pending read-only validation/proof; keep public gateway unaware of pending routes. Test stalled publisher with healthy projection reads, slow reads, replay/restart/clock regression and blocked clock proof, revocation and inability to mutate. | Partial (offline; contract, backend reader and request-path view tested; no production publisher or opt-in; OD-005 clock proof open, see section 15) | `src/server/tenant_provisioning/projection.rs` (new), `src/server/gateway_trust.rs`, `src/server/gateway_trust_tests.rs`, `src/server/credentials.rs` |
+| ITEM-007 | Enforce managed reservation at manual/automatic failover and authority-entry paths, and existing control-state edits. Leave auto-failover disabled. Inventory all selected-tenant mutation/background paths; implement central barriers only where coverage is proven, refuse unsupported surfaces, and persist target validation/write-enable guard. Do not claim a route-layer check covers queued work. | Partial (offline; authority claim, manual/automatic failover and control edits guarded; no production holder; an already-serving writer's data/background/queued work is not barriered, see section 15) | `src/server/tenant_provisioning/guard.rs` (new), `src/server/auto_failover.rs`, `src/server/failover.rs`, `src/server/writer_authority.rs`, `src/server/control_state.rs`, `src/server/tenant_provisioning/tests.rs` |
+| ITEM-008 | Prove effective tenant-scoped Blob/mount access, including necessary reader pin writes without authority/global-control writes. If existing object placement cannot enforce it, return a concrete blocker and a bounded follow-up for isolated metadata/pin brokering before ACA execution; never broaden grants as a passing test. | Blocked (existing placement cannot scope pin writes; reader fleets denied with 409 `pin_scope_unproven`; bounded follow-up in section 15) | `src/server/tenant_provisioning.rs`, `src/server/tenant_provisioning/admin.rs`, `src/server/tenant_provisioning/tests.rs`, `src/openapi.json`, `site/api.html` |
 
 ### EPIC-004: Idempotent ACA prerequisite and writer provisioning
 
@@ -664,3 +664,124 @@ The owner's instruction to pick up per-tenant writer and reader provisioning nex
   - `tests/openapi_contract.py` failed before registration and passes after it. Removing one registered path makes it fail again.
   - `cargo test --features server --lib`: 2177 passed (`tenant_provisioning`: 52).
   - `cargo clippy --features server --all-targets`, `rustfmt --check`, `git diff --check` and the five route/API guard scripts are clean.
+
+### EPIC-003 implementation notes (offline, owner-authorized)
+
+The owner's question after EPIC-002, "what are you waiting for why you are not pickingup next work items?", authorized EPIC-003 offline code and local fixtures only. The following remain unauthorized: EPIC-004 and later epics, existing-tenant migration orchestration (the owner's standing exclusion), Azure/ACA calls, deployment, qualification, gate acceptance, policy relaxation, enabling auto-failover, push, merge and PR creation.
+
+None of the three items is Done. ITEM-006 and ITEM-007 are partial; ITEM-008 is blocked. The EPIC-003 exit ("no managed lifecycle bypass remains") is therefore **not met**. Local fixtures here are not evidence of Azure RBAC, mount enforcement or clock qualification.
+
+- **ITEM-006: tenant-only projection** (`src/server/tenant_provisioning/projection.rs`, new). Status: Partial.
+  - **Projection contents.** The `Publisher` derives one tenant's projection (`vlite.control-projection/1`, at most 64 KiB) from a new read of the shared control state. It carries:
+    - the tenant record;
+    - its admission: either the directory route (`active`), or an operation-bound read-only validator admission (`pending`) for a tenant that is still unrouted and reserved for `create`;
+    - the source generation and digest;
+    - a witness: revision, `read_start_unix_ms` (the wall time taken *before* the source read) and `deadline = read_start + S_ctl`. Because the clock is read before the source, a slow read uses up the same budget.
+
+    The projection never contains a credential, a credential hash or another tenant's data. Publishing writes nothing to the control state, so the public gateway, which routes from the directory, never sees a pending tenant.
+  - **Monotonic publication.**
+    - Publication is a compare-and-swap. It refuses a regression of the source, the read start or the revision (`projection_regressed`), a lost race (`projection_conflict` or `projection_indeterminate`) and an unbound pending admission (`projection_pending_unbound`).
+    - The publisher keeps no cache, so a restarted or resumed worker can publish only from a new source read.
+    - Nothing is written on any refusal.
+  - **Freshness at the backend** (`Reader`).
+    - A witness is accepted only with a `ClockProof`. Without one, every decision returns 503 `projection_freshness_unproven` (OD-005), and the reader has no production constructor.
+    - The remaining validity, `deadline - wall - uncertainty`, is anchored to the monotonic clock when a revision is first accepted. Rereading the same witness never extends it, so a stalled publisher expires at its original deadline (`projection_stale`) however healthy the projection reads are.
+    - If the wall clock falls behind the monotonic clock by more than the uncertainty, the reader returns a sticky `projection_clock_regressed` until it restarts.
+    - A missing, foreign, oversized or invalid projection fails closed (`projection_missing`, `projection_invalid` or `projection_unavailable`).
+    - Clocks are sampled under the reader's lock (`poll_with` / `current_with`).
+  - **Request-path integration** (`src/server/gateway_trust.rs`).
+    - Backend trust reads either the full feed or the projection (`View::Full` or `View::Projection`) for admission, quota and readiness generation.
+    - Pending admission allows only the bound validator credential for the operation's audience and lineage, and only with a read-only grant (`Grant::allows_only` with Read, Search and GraphRead, in `src/server/credentials.rs`). Anything else returns `pending_validation_read_only`, `forbidden_scope` or `envelope_invalid`.
+    - A suspended tenant is refused (`tenant_suspended`).
+    - `/ready` reports the source generation but never the admission.
+  - **Tests.** Ten unit tests cover: tenant-only content, operation binding, publication regression and races, publisher restart, a required clock proof, a stalled publisher despite healthy reads, a slow source read, replayed or altered witnesses, wall-clock regression, and foreign or unreadable projections.
+
+    The router test `a_projection_backend_serves_only_the_pending_validator_read_only` checks that, with a clock proof:
+    - the validator's GET returns 200, and its POST and any write or management grant are refused;
+    - other credentials and other tenants are refused;
+    - the tenant is never routed.
+
+    Without a clock proof, `/ready` and the data routes return 503 `projection_freshness_unproven`.
+  - **Not done:**
+    - There is no production publisher; it is the control worker in ITEM-010/016.
+    - There is no `--gateway-trust-file` opt-in; the strict schema still refuses one. `View::Projection` is therefore constructed only by tests, and public gateway exposure is unchanged.
+    - The private readiness-proof channel is EPIC-004.
+    - Only a `create` reservation can carry a pending admission.
+- **ITEM-007: lifecycle interlocks.** Status: Partial.
+  - **Durable target guard** (`src/server/tenant_provisioning/guard.rs`, new).
+    - `{prefix}lifecycle-guard.json` (`vlite.lifecycle-guard/1`) sits beside `authority.json`.
+    - Its states are `held -> write_enabled -> released` (or `held -> released`). Only the holding operation can move it forward, and only forward; a released guard can be held by a later operation.
+    - Every write is a compare-and-swap.
+    - Every check fails closed: an unreadable guard returns `lifecycle_guard_unavailable`, and an invalid one `lifecycle_guard_invalid`.
+  - **Authority entry.** `writer_authority::claim_prepared`, the only production authority `claim`, calls `check_write_enable`. A writer cannot claim authority at startup while the guard is `held` (`lifecycle_write_disabled`). This is the persisted target validation/write-enable guard.
+  - **Manual failover.** `failover::execute`, the only production `prepare_transfer`, calls `check_transfer` before preparing the transfer. Both `held` and `write_enabled` refuse with `FailoverError::Lifecycle`, code `lifecycle_reserved`.
+  - **Automatic failover.**
+    - The supervisor checks the guard before fencing (`Tick::Held`). `execute` checks again after fencing, so a hold that lands during the fence aborts the transfer (`Tick::Aborted`).
+    - Auto-failover stays disabled; no default or opt-in changed.
+  - **Control-state edits.**
+    - `Objects::apply` calls `keep_reservations` (`src/server/control_state.rs`). This covers legacy directory replacement, revoke, suspend/resume and admin re-import, which includes admin tenant deletion.
+    - While a tenant's slot is reserved, an edit may change it only by adding a restriction: a suspension, a revocation or an earlier expiry. A changed route, tenant record, tenant-bound credential or slot returns 409 `lifecycle_reserved`, and nothing is written.
+    - The managed lifecycle paths themselves (the `tenant_provisioning` CAS and `admin.rs`) use `Objects::update` and are deliberately unguarded.
+  - **Mutation inventory (source-grounded).**
+    - Authority claim: only `writer_authority::claim_prepared`. Guarded.
+    - Authority transfer: only `failover::execute`, which the `failover execute` CLI and `auto_failover` both use. Guarded.
+    - Control-state writers:
+      - `gateway_mode` publish is create-only.
+      - `gateway_mode` update goes through `Objects::apply`. Guarded.
+      - `tenant_migration` already refuses a reserved tenant at prepare (`Snapshot` migration insert), and `reserve` refuses while a migration is open.
+      - `tenant_provisioning` is the legitimate managed path.
+    - **Not barriered:** application data writes, background jobs and queued work inside a writer that is *already serving*. A later hold does not stop that writer. Coverage today rests only on two facts: a reserved `create` tenant is unrouted and cannot be routed by a control edit, and a held target refuses the startup claim. Neither proves a central data-path barrier.
+  - **Tests.**
+    - `control_state`: two tests (reserved tenants accept only restrictions; a create reservation cannot be routed or deleted by an edit).
+    - `guard`: four tests (hold and release, holder-only forward moves, CAS, fail-closed reads).
+    - `failover_refuses_a_target_held_by_a_lifecycle_operation`.
+    - Two auto-failover drills: a hold before the fence, and a hold during the fence.
+    - `startup_refuses_a_claim_until_the_lifecycle_guard_enables_writes`.
+    - Two existing `tenant_provisioning` tests changed for the guarded edit. In `directory_replacement_cannot_silently_drop_an_activated_route`, the refusal is now `lifecycle_reserved`, raised before snapshot validation. `legacy_migration_and_lifecycle_reservation_exclude_each_other` now routes T before holding it with a reader update, because a control edit can no longer route a create-reserved tenant.
+  - **Not done:**
+    - There is no production holder (`hold`, `enable_writes`, `release`); the operation worker is ITEM-010/016.
+    - The holder must hold before it starts the target writer, and after holding must re-read the authority to close the check-then-transfer window.
+    - An already-serving writer is not stopped.
+- **ITEM-008: effective tenant scope.** Status: Blocked.
+  - **Assessment of the existing layout.**
+    - Reader pins are not separate objects. `Sets::pin` / `release` compare-and-swap the whole set record `{prefix}sets/{id}/record.json`. That record also holds `state`, `manifest_sha256`, the verification fields and `delete_reason`, which together are the set's publication, restore and deletion control.
+    - The record is in the same coordination store and prefix as `authority.json`, `auto-failover.json` and `lifecycle-guard.json`.
+    - A container- or `{prefix}`-scoped grant therefore also allows authority and guard writes.
+    - A narrower `{prefix}sets/` path-conditioned grant would exclude those objects, but it was not qualified here. It would still let a reader rewrite every set's publication and deletion state, because a Blob grant is per object at best and the pin cannot be written separately.
+    - The fixture `reader_pins_share_authority_scope_so_reader_fleets_stay_denied` demonstrates this layout: the authority, guard and set record share the store and prefix, and a pin changes only the set record. It proves nothing about Azure RBAC or mount behaviour.
+  - **Denial while blocked.**
+    - `resume` of a `set_readers` operation for a present fleet returns 409 `pin_scope_unproven` through the shared `act` path, so REST and CLI behave the same.
+    - The status `next_step` names the blocker, and `cancel` still releases the reservation.
+    - An absent (scale-to-zero) fleet is unaffected.
+    - Projection mode has no production opt-in. The managed workflow has no reader actuator (EPIC-005 is not started), and no deploy script or role template was changed.
+    - No grant was broadened. The documentation is in `src/openapi.json` and `site/api.html`.
+  - **Bounded follow-up, required before any ACA reader execution:**
+    - Either (a) broker pin and release through the VLite control role as an operation-bound request, or (b) move pins into per-replica pin objects or a separate container, with layout and janitor changes in `cloud_backup` (EPIC-005 ITEM-012/013).
+    - Then qualify the effective grants and mount enforcement in the cloud.
+- **Deviations (documented, not hidden):**
+  - **File count.** 16 files changed, beyond the seven-file guideline: 12 `.rs` files (two new), `src/openapi.json`, `site/api.html` and this PRD. The extra files are the inventoried guard call sites and the request-path view; there was no speculative refactor.
+  - **Test order for ITEM-008.** Its two tests were written before the implementation but were not observed failing first.
+  - **Candidate file list.** `src/server.rs` and `tenant_migration.rs` from the earlier candidate lists were not needed.
+- **Review:**
+  - An independent code review of the full diff found no significant issues.
+  - It raised two low-severity notes, both currently unreachable in production, and both kept fail-closed:
+    1. **Clock drift.** `check_clock` anchors at max(wall, expected), so monotonic-vs-wall drift beyond the uncertainty yields a false but sticky `projection_clock_regressed`. The doc comment now states that a qualified clock proof must bound that drift (OD-005).
+    2. **Concurrent polls.** Two concurrent `poll` calls read outside the lock, so the slower one can return a non-sticky `projection_regressed`. This is harmless; the next poll succeeds.
+- **Verification:**
+  - `cargo test --features server --lib`: 2200 passed, 0 failed, 10 ignored.
+  - The focused set `projection lifecycle tenant_provisioning:: failover writer_authority control_state gateway_trust reader_apply`: 210 passed.
+  - `cargo clippy --features server --all-targets -- -D warnings`, `rustfmt --edition 2024 --check` on the 12 `.rs` files and `git diff --check` are all clean.
+  - These guard scripts pass: `api_route_inventory`, `admin_route_coverage`, `api_reference` (950 items), `api_reference_ui`, `openapi_contract` and `content_budget`.
+  - No Azure, ARM, ACA, emulator, deployment or live-target actions were run.
+- **Residual blockers to local implementation:**
+  - The ITEM-010/016 control worker, which is the production projection publisher and the guard holder.
+  - A projection opt-in in the gateway-trust configuration.
+  - The EPIC-004 readiness-proof channel.
+  - A central data, background and queued-work barrier for an already-serving writer, which EPIC-006 migration requires.
+  - ITEM-008 follow-up (a) or (b).
+- **Residual blockers to live qualification:**
+  - OD-005: a qualified `ClockProof` that also bounds monotonic-vs-wall drift.
+  - Read scope of the projection storage.
+  - Effective Azure RBAC and mount enforcement for reader pins after the ITEM-008 follow-up.
+  - Qualification of the auto-failover interlock before any enablement.
+  - MEAS-, GATE- and cloud gates are unchanged and open.
