@@ -4602,6 +4602,233 @@ mod epic_004 {
             )));
         }
 
+        // ------- e36403e1 review: admin submissions never hold a slot (R1)
+
+        fn cli(w: &World, command: admin::Command) -> Result<serde_json::Value, ApiError> {
+            let deployments = admin::Deployments::new(w.memory.clone(), CONTROL, PREFIX);
+            admin::run(&deployments, &w.tenants, None, command, NOW)
+        }
+
+        /// `vlite-server tenant-deployment readers|retire`: the operation.
+        fn cli_submit(w: &World, key: &str, payload: &Payload) -> serde_json::Value {
+            let contents: Vec<String> = match payload {
+                Payload::SetReaders {
+                    fleet: Fleet::Present { .. },
+                    ..
+                } => [RPROFILE, RULE]
+                    .iter()
+                    .map(|c| String::from_utf8(c.to_vec()).unwrap())
+                    .collect(),
+                _ => Vec::new(),
+            };
+            let request = serde_json::json!({
+                "idempotency_key": key, "request": payload, "contents": contents,
+            });
+            let command = admin::Command::Submit {
+                kind: payload.kind(),
+                tenant: Some(T.into()),
+                request: request.to_string().into_bytes(),
+            };
+            cli(w, command).unwrap()["operation"].clone()
+        }
+
+        /// `vlite-server tenant-deployment cancel` quoting `operation`'s
+        /// current tokens.
+        fn cli_cancel(w: &World, id: &str, key: &str) -> Result<serde_json::Value, ApiError> {
+            let status = cli(
+                w,
+                admin::Command::Status {
+                    operation: id.into(),
+                },
+            )
+            .unwrap()["operation"]
+                .clone();
+            let request = serde_json::json!({
+                "idempotency_key": key,
+                "expected_operation_generation": status["operation_generation"],
+                "expected_lifecycle_generation": status["lifecycle_generation"],
+                "expected_receipt": status["receipt_digest"],
+            });
+            cli(
+                w,
+                admin::Command::Act {
+                    operation: id.into(),
+                    verb: "cancel".into(),
+                    request: request.to_string().into_bytes(),
+                },
+            )
+        }
+
+        fn loaded(w: &World, operation: &serde_json::Value) -> Intent {
+            w.ops
+                .load(operation["operation_id"].as_str().unwrap())
+                .unwrap()
+                .intent
+        }
+
+        /// A fresh reader change and then a retirement naming its receipt
+        /// still anchor, reserve and complete.
+        fn lifecycle_still_anchors(w: &World, arm: &MockArm, config: &str, revision: &str) {
+            let fresh = readers(w, "fresh", present(1, 4));
+            let sealed = add(w, arm, &fresh, config, &fleet_at(1, revision)).unwrap();
+            let retire = retire_with(w, "fresh-retire", &receipt_of(&sealed));
+            let d = driver(w, arm, &retire);
+            d.reserve_retirement(&w.objects, NOW).unwrap();
+            let guards = Guards::new(w.memory.clone(), TARGET);
+            let sealed = d.retire(&w.objects, &guards, NOW).unwrap();
+            assert_eq!(sealed.outcome(), &TerminalOutcome::Retired);
+        }
+
+        #[test]
+        fn admin_reader_and_retirement_submissions_hold_no_slot_and_never_poison_anchoring() {
+            for retirement in [false, true] {
+                let w = world();
+                let arm = MockArm::default();
+                let (_, latest) = with_reader(&w, &arm);
+                let anchor = released_by(&w);
+                let payload = if retirement {
+                    Payload::Retire {
+                        tenant_id: T.into(),
+                        expected_receipt: latest.clone(),
+                        reason: "offboarded".into(),
+                        data_disposition: DataDisposition::Retain,
+                    }
+                } else {
+                    Payload::SetReaders {
+                        tenant_id: T.into(),
+                        fleet: present(2, 4),
+                    }
+                };
+                let submitted = cli_submit(&w, "cli-a", &payload);
+                assert_eq!(submitted["phase"], "accepted", "{submitted}");
+                assert_eq!(submitted["observed"]["reserved"], false);
+                // A duplicate submission reserves nothing either.
+                let again = cli_submit(&w, "cli-a", &payload);
+                assert_eq!(again["operation_id"], submitted["operation_id"]);
+                assert_eq!(released_by(&w), anchor, "no planless slot");
+                // Nothing is held, so there is nothing to cancel.
+                let id = submitted["operation_id"].as_str().unwrap();
+                let refused = cli_cancel(&w, id, "cancel-a").unwrap_err();
+                assert_eq!(refused.code, "transition_unavailable");
+                assert_eq!(released_by(&w), anchor);
+                lifecycle_still_anchors(&w, &arm, "v2", "r1");
+            }
+        }
+
+        #[test]
+        fn an_admin_submission_reserved_by_its_planned_actuator_cancels_through_its_plan() {
+            let w = world();
+            let arm = MockArm::default();
+            with_reader(&w, &arm);
+            let payload = Payload::SetReaders {
+                tenant_id: T.into(),
+                fleet: present(2, 4),
+            };
+            let submitted = cli_submit(&w, "cli-a", &payload);
+            let a = loaded(&w, &submitted);
+            let d = driver(&w, &arm, &a);
+            d.reserve_readers(&w.objects, Some(ENDPOINT), NOW).unwrap();
+            // A legitimate same-operation retry keeps its bound slot.
+            d.reserve_readers(&w.objects, Some(ENDPOINT), NOW).unwrap();
+            let id = a.operation_id.as_str();
+            let status = cli(
+                &w,
+                admin::Command::Status {
+                    operation: id.into(),
+                },
+            )
+            .unwrap();
+            assert_eq!(status["operation"]["phase"], "reserved");
+            let cancelled = cli_cancel(&w, id, "cancel-a").unwrap();
+            assert_eq!(cancelled["operation"]["phase"], "cancelled");
+            assert_eq!(released_by(&w).as_deref(), Some(id));
+            // The cancelled anchor hops through A's plan: no poisoning.
+            lifecycle_still_anchors(&w, &arm, "v2", "r1");
+        }
+
+        #[test]
+        fn a_duplicate_admin_submission_of_a_stale_plan_takes_no_slot() {
+            for same_route in [false, true] {
+                let w = world();
+                let arm = MockArm::default();
+                if same_route {
+                    with_reader(&w, &arm);
+                } else {
+                    activated(&w, &arm);
+                }
+                let payload = Payload::SetReaders {
+                    tenant_id: T.into(),
+                    fleet: present(2, 4),
+                };
+                let a = loaded(&w, &cli_submit(&w, "cli-a", &payload));
+                plan_only(&w, &arm, &a, Some(ENDPOINT));
+                let route = digest(&w);
+                let b = readers(&w, "readers-b", present(1, 3));
+                let observed = if same_route {
+                    fleet_at(1, "r1")
+                } else {
+                    fleet(1)
+                };
+                add(&w, &arm, &b, "v2", &observed).unwrap();
+                assert_eq!(digest(&w) == route, same_route);
+                let again = cli_submit(&w, "cli-a", &payload);
+                assert_eq!(again["observed"]["reserved"], false, "{again}");
+                assert_stale_refused(&w, &arm, &a, Some(ENDPOINT), "readers_unanchored");
+                assert_eq!(
+                    cli_cancel(&w, &a.operation_id, "cancel-a")
+                        .unwrap_err()
+                        .code,
+                    "transition_unavailable"
+                );
+                let revision = if same_route { "r2" } else { "r1" };
+                lifecycle_still_anchors(&w, &arm, "v3", revision);
+            }
+        }
+
+        /// A slot held without plan binding (only a test fixture or state
+        /// persisted by 2e53839d/e36403e1 admin submissions can hold one)
+        /// never passes as this operation's planned reservation. Its cancel
+        /// leaves no plan to hop through, so later changes stay refused:
+        /// fail closed, never repaired.
+        #[test]
+        fn a_slot_held_without_its_plan_route_is_refused_and_fails_closed() {
+            let w = world();
+            let arm = MockArm::default();
+            activated(&w, &arm);
+            let a = readers(&w, "readers-a", present(1, 2));
+            plan_only(&w, &arm, &a, Some(ENDPOINT));
+            let b = readers(&w, "readers-b", present(1, 2));
+            add(&w, &arm, &b, "v1", &fleet(1)).unwrap();
+            reserve(&w.ops, &w.objects, &a, NOW).unwrap();
+            let calls = arm.calls().len();
+            let d = driver(&w, &arm, &a);
+            assert_eq!(
+                d.reserve_readers(&w.objects, Some(ENDPOINT), NOW)
+                    .unwrap_err()
+                    .code,
+                "readers_unanchored"
+            );
+            d.set_readers(
+                &w.objects,
+                Some(&reader_app("v9")),
+                Some(&PinScope::for_test()),
+                Some(&fleet(1)),
+                NOW,
+            )
+            .unwrap_err();
+            assert_eq!(arm.calls().len(), calls, "no reader app effect");
+            request_cancel(&w.objects, &a, NOW).unwrap();
+            w.ops.release(&w.objects, &a, NOW).unwrap();
+            let fresh = readers(&w, "fresh", present(1, 3));
+            assert_eq!(
+                driver(&w, &arm, &fresh)
+                    .reserve_readers(&w.objects, Some(ENDPOINT), NOW)
+                    .unwrap_err()
+                    .code,
+                "readers_unanchored"
+            );
+        }
+
         fn pins(env: &crate::server::cloud_recovery::tests::Env) -> Vec<String> {
             env.sets
                 .list()

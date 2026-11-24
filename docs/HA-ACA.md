@@ -610,8 +610,16 @@ future qualified path must keep.
   compare-and-swap. A plan made before another change sealed or was
   cancelled is refused without taking the slot, even if the route is the
   same. Retirement is bound the same way (`retirement_receipt_mismatch`).
-  REST/CLI `reserve` of a reader change or retirement does not use this
-  binding yet (composition blocker). The first
+  A same-operation retry that already holds the slot continues only if the
+  slot was reserved against its plan's route.
+  REST/CLI submission of a reader change or retirement records the operation
+  (phase `accepted`, `observed.reserved` false) but reserves nothing: only the
+  plan-anchored actuator reserves, so cancel returns
+  `transition_unavailable` until then and a submission never blocks or
+  poisons later anchoring. Only `create` is reserved on submission. Slots
+  reserved without a plan by earlier local builds are refused, not adopted;
+  once cancelled they leave no plan to anchor on, so later changes stay
+  refused (fail closed, not repaired). The first
   endpoint is published by compare-and-swap. A later operation must keep the
   same endpoint (`reader_endpoint_changed`). Reader apps are private copies
   owned by the plan. A writer app or a different reader gives

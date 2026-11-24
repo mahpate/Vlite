@@ -1048,8 +1048,12 @@ fn holds<'a>(snapshot: &'a Snapshot, intent: &Intent) -> Option<&'a Slot> {
         })
 }
 
-/// ITEM-002: reserves the tenant's slot for the operation. An operation
-/// that has sealed its terminal record can never reserve again.
+/// ITEM-002: reserves the tenant's slot for the operation, unbound to any
+/// plan. An operation that has sealed its terminal record can never reserve
+/// again. Test fixture only (R1): production reserves `create` with its
+/// tenant metadata in `admin`, and every other kind only through
+/// [`reserve_after`], bound to the predecessor and route its plan read.
+#[cfg(test)]
 pub(super) fn reserve(
     ops: &Operations,
     objects: &Objects,

@@ -1042,7 +1042,12 @@ impl<'a> Driver<'a> {
     /// slot still released by the operation this check read and the route
     /// unchanged, so a stale plan (another change sealed or cancelled since,
     /// even with the same route) takes no slot: `mismatch`. A same-operation
-    /// executor that already holds the slot succeeds.
+    /// retry that already holds the slot succeeds only when the slot was
+    /// reserved against this plan's route; a slot this operation holds
+    /// without that binding (state persisted by an earlier build's planless
+    /// admin reservation) is refused, never adopted. Such a slot taken at
+    /// the same route after a newer receipt is indistinguishable, since a
+    /// reserved slot records no predecessor (documented limitation).
     fn reserve_planned(
         &self,
         objects: &Objects,
@@ -1052,15 +1057,21 @@ impl<'a> Driver<'a> {
         if self.ops.read_terminal(self.op())?.is_some() {
             return Err(ended());
         }
-        let (snapshot, _) = objects.read()?;
-        if holds(&snapshot, self.intent).is_some() {
-            return Ok(());
-        }
         let journal = self.ops.journal(self.op())?;
         let mut words = plan(&journal).ok_or_else(mismatch)?.split(' ');
         let (Some(planned), Some(route)) = (words.next(), words.next()) else {
             return Err(mismatch());
         };
+        let (snapshot, _) = objects.read()?;
+        if let Some(slot) = holds(&snapshot, self.intent) {
+            return match slot {
+                Slot::Reserved {
+                    expected_route: Some(held),
+                    ..
+                } if held == route => Ok(()),
+                _ => Err(mismatch()),
+            };
+        }
         let anchor = self.anchor(objects, mismatch)?;
         if anchor.operation_id != planned || anchor.receipt.route_digest != route {
             return Err(mismatch());

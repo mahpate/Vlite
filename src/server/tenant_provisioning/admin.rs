@@ -280,8 +280,13 @@ fn local_tenant(
     )
 }
 
-/// Publishes the reservation unless the operation already ended. For
-/// `create` the same generation adds the tenant's metadata, unrouted.
+/// Publishes a `create` reservation, with the tenant's metadata, unrouted,
+/// in one generation unless the operation already ended. Every other kind
+/// reserves nothing here: only its plan-anchored actuator reserves, in a
+/// CAS bound to the released predecessor and route its plan read
+/// (`reserve_after`). A planless slot would be refused by that actuator, and
+/// cancelling it would leave a cancelled anchor without a plan for later
+/// operations to follow.
 fn reserve_for(
     deployments: &Deployments,
     intent: &Intent,
@@ -292,7 +297,7 @@ fn reserve_for(
         return Ok(());
     }
     let Some(tenant) = tenant else {
-        return reserve(&deployments.ops, &deployments.objects, intent, now);
+        return Ok(());
     };
     lifecycle_cas(
         &deployments.objects,
@@ -400,6 +405,16 @@ fn render(
             "reserved",
             "cloud execution is blocked (OD-002); cancel to release the reservation",
         ),
+        None if !matches!(intent.payload, Payload::Create { .. }) && pins_sets(&intent.payload) => {
+            (
+                "accepted",
+                "nothing is reserved: only the plan-anchored actuator reserves, and reader fleets are blocked until reader pin scope is proven (ITEM-008)",
+            )
+        }
+        None if !matches!(intent.payload, Payload::Create { .. }) => (
+            "accepted",
+            "nothing is reserved: only the plan-anchored actuator reserves, and cloud execution is blocked (OD-002)",
+        ),
         None => (
             "accepted",
             "resubmit the same request to reserve the tenant",
@@ -496,8 +511,11 @@ fn available(
                 "retirement_required",
                 "the operation already activated its route; retire the tenant instead",
             )),
-            None => Err(unavailable_transition(
+            None if matches!(payload, Payload::Create { .. }) => Err(unavailable_transition(
                 "cancel needs this operation to hold the tenant reservation; resubmit the request to reserve it",
+            )),
+            None => Err(unavailable_transition(
+                "cancel needs this operation to hold the tenant reservation; only its plan-anchored actuator reserves it",
             )),
         },
         Verb::AcknowledgeDelivery => Err(unavailable_transition(
@@ -886,7 +904,7 @@ fn read_request(path: &std::path::Path) -> Result<Vec<u8>, String> {
 }
 
 /// What one command line asks for, after its flags are read.
-enum Command {
+pub(super) enum Command {
     Submit {
         kind: Kind,
         tenant: Option<String>,
@@ -905,7 +923,7 @@ enum Command {
 const CLI_ACTOR: &str = "cli:tenant-deployment";
 
 /// Runs one command against open stores (blocking); the CLI's testable core.
-fn run(
+pub(super) fn run(
     deployments: &Deployments,
     store: &tenants::Store,
     log: Option<&audit::Log>,
@@ -1536,7 +1554,10 @@ mod tests {
 
     /// ITEM-008: a reader fleet would pin sets with whole-record writes in
     /// the writer's coordination scope, so it cannot advance; it can still
-    /// be read and cancelled, and removing readers needs no pins.
+    /// be read, and removing readers needs no pins. R1: a reader submission
+    /// takes no slot (only its plan-anchored actuator reserves), so there is
+    /// no planless reservation to cancel and later lifecycle anchoring is
+    /// never poisoned.
     #[tokio::test]
     async fn reader_fleets_are_denied_until_pin_scope_is_proven() {
         let f = fixture();
@@ -1549,10 +1570,18 @@ mod tests {
                 "read_routing": "writer_only"}},
             "contents": [PROFILE, INIT],
         });
-        let (status, body) = f.call("POST", &path, Some(present)).await;
+        let before = f.snapshot().lifecycle(ROUTED).cloned();
+        let (status, body) = f.call("POST", &path, Some(present.clone())).await;
         assert_eq!(status, StatusCode::ACCEPTED, "{body}");
         let operation = body["operation"].clone();
-        assert_eq!(operation["phase"], "reserved");
+        assert_eq!(operation["phase"], "accepted");
+        assert_eq!(operation["observed"]["reserved"], false);
+        let (_, again) = f.call("POST", &path, Some(present)).await;
+        assert_eq!(
+            again["operation"]["operation_id"],
+            operation["operation_id"]
+        );
+        assert_eq!(f.snapshot().lifecycle(ROUTED).cloned(), before, "no slot");
         assert!(
             operation["next_step"]
                 .as_str()
@@ -1563,10 +1592,12 @@ mod tests {
         let (status, body) = f.action(&operation, "resume", "resume-1", json!({})).await;
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(body["error"]["code"], "pin_scope_unproven");
-        // Refused before any record: the key stays free for cancel.
+        // Refused before any record: the key stays free for cancel, which
+        // is refused too because nothing is reserved.
         let (status, body) = f.action(&operation, "cancel", "resume-1", json!({})).await;
-        assert_eq!(status, StatusCode::OK, "{body}");
-        assert_eq!(body["operation"]["phase"], "cancelled");
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"]["code"], "transition_unavailable");
+        assert_eq!(f.snapshot().lifecycle(ROUTED).cloned(), before, "no anchor");
         let absent = json!({
             "idempotency_key": "readers-absent",
             "request": {"kind": "set_readers", "tenant_id": ROUTED, "fleet": {"state": "absent"}},
