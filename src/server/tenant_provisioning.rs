@@ -1294,12 +1294,18 @@ struct Readiness {
     writer: aca::Observed,
     policy_generation_required: u64,
     policy_generation_observed: u64,
+    /// The exact writer-only route the readiness observation covered; the
+    /// activation may publish only this route.
+    route: Route,
 }
 
-/// ITEM-010 readiness proof. Only [`prove`] creates one.
+/// ITEM-010 readiness proof, bound to its operation and exact route. Only
+/// [`prove`] creates one.
 #[derive(Debug)]
 pub(super) struct Proof {
     digest: String,
+    operation_id: String,
+    route_digest: String,
     epoch: u64,
     lineage: u64,
 }
@@ -1334,6 +1340,7 @@ fn prove(
         _ => Vec::new(),
     };
     let owner = format!("{}:{}", aca::OWNER_TAG, intent.tenant_id);
+    let route = &readiness.route;
     if record.phase != authority::Phase::Serving
         || record.writer_id.is_none()
         || head.epoch != record.epoch
@@ -1344,12 +1351,14 @@ fn prove(
         || active.len() != 1
         || readiness.policy_generation_required == 0
         || readiness.policy_generation_observed < readiness.policy_generation_required
+        || !writer_only(route, intent, seed.lineage, record.epoch)
     {
         return Err(proof_refused());
     }
+    let route_digest = control_state::route_digest(route);
     let digest = sha256_hex(
         format!(
-            "vlite.readiness/1\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
+            "vlite.readiness/2\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
             intent.operation_id,
             record.lineage,
             record.epoch,
@@ -1358,14 +1367,30 @@ fn prove(
             head.chain_sha256,
             active[0].name,
             readiness.policy_generation_observed,
+            route_digest,
         )
         .as_bytes(),
     );
     Ok(Proof {
         digest,
+        operation_id: intent.operation_id.clone(),
+        route_digest,
         epoch: record.epoch,
         lineage: seed.lineage,
     })
+}
+
+/// The writer-only dedicated route of `intent`'s tenant, seeded lineage
+/// and `epoch` (no reader, no authority-mode override).
+fn writer_only(route: &Route, intent: &Intent, lineage: u64, epoch: u64) -> bool {
+    route.tenant == intent.tenant_id
+        && route.kind == control_state::Kind::Dedicated
+        && route.read_routing == control_state::ReadRouting::WriterOnly
+        && route.reader.is_none()
+        && route.authority_mode.is_none()
+        && route.lineage == lineage
+        && epoch > 0
+        && route.epoch == Some(epoch)
 }
 
 /// ITEM-010 credential delivery: one candidate at a time, replaced only
@@ -1581,22 +1606,42 @@ pub(super) fn activate_create(
         // A retry after the seal: report the same sealed outcome.
         return ops.release(objects, intent, now);
     }
-    let seed = recorded_seed(&ops.journal(&intent.operation_id)?).ok_or_else(seed_unrecorded)?;
-    if route.tenant != intent.tenant_id
-        || route.kind != control_state::Kind::Dedicated
-        || route.read_routing != control_state::ReadRouting::WriterOnly
-        || route.reader.is_some()
-        || route.authority_mode.is_some()
-        || route.lineage != seed.lineage
-        || route.lineage != proof.lineage
-        || route.epoch != Some(proof.epoch)
-    {
-        return Err(conflict(
+    let route_invalid = || {
+        conflict(
             "activation_route_invalid",
             "the route is not the proven writer-only route of the seeded lineage and epoch",
-        ));
-    }
+        )
+    };
+    // A crash after the route CAS: the durable receipt is the proof that
+    // ran; a later checkpoint (another readiness digest) or an expired or
+    // revoked credential must not strand it. Only this operation's exact
+    // committed route is accepted.
     let (snapshot, _) = objects.read()?;
+    if let Some(Slot::Reserved {
+        receipt: Some(receipt),
+        ..
+    }) = holds(&snapshot, intent)
+        && receipt.operation_id == intent.operation_id
+    {
+        let committed = snapshot
+            .record_for(&intent.tenant_id)
+            .map(control_state::route_digest);
+        if committed.as_deref() != Some(receipt.route_digest.as_str())
+            || control_state::route_digest(route) != receipt.route_digest
+        {
+            return Err(route_invalid());
+        }
+        guards.release(&intent.tenant_id, &intent.operation_id)?;
+        return ops.release(objects, intent, now);
+    }
+    let seed = recorded_seed(&ops.journal(&intent.operation_id)?).ok_or_else(seed_unrecorded)?;
+    if proof.operation_id != intent.operation_id
+        || control_state::route_digest(route) != proof.route_digest
+        || !writer_only(route, intent, seed.lineage, proof.epoch)
+        || route.lineage != proof.lineage
+    {
+        return Err(route_invalid());
+    }
     let tenant = Some(intent.tenant_id.clone());
     if snapshot.live_credential(&delivered.credential_id, now) != Some((tenant, seed.lineage)) {
         return Err(conflict(

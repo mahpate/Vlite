@@ -1312,6 +1312,9 @@ mod epic_004 {
         /// Lost acknowledgement before any ID was returned.
         Unknown,
         Refused(&'static str),
+        /// Refused with no effect, after `Observed` appeared at the name
+        /// (another actor won the race since the pre-dispatch read).
+        RefuseAfter(&'static str, Observed),
         /// Someone else's resource appears at the name.
         Collide(Observed),
     }
@@ -1396,6 +1399,10 @@ mod epic_004 {
                 Begin::Pending(id) => Ok(id.into()),
                 Begin::Unknown => Err(ArmError::Unknown),
                 Begin::Refused(code) => Err(ArmError::Refused(code.into())),
+                Begin::RefuseAfter(code, found) => {
+                    self.put(&call.resource, found);
+                    Err(ArmError::Refused(code.into()))
+                }
                 Begin::Collide(found) => {
                     self.put(&call.resource, found);
                     Ok(id)
@@ -1799,7 +1806,9 @@ mod epic_004 {
         let intent = reserved(&w);
         let d = driver(&w, &arm, &intent);
         assert_eq!(
-            d.cleanup(&w.objects).unwrap_err().code,
+            d.cleanup(&w.objects, &Guards::new(w.memory.clone(), TARGET))
+                .unwrap_err()
+                .code,
             "operation_not_cancelled"
         );
         d.provision(&w.objects, &standard()).unwrap();
@@ -1808,8 +1817,10 @@ mod epic_004 {
             w.ops.release(&w.objects, &intent, NOW).unwrap_err().code,
             "cleanup_pending"
         );
-        d.cleanup(&w.objects).unwrap();
-        d.cleanup(&w.objects).unwrap();
+        d.cleanup(&w.objects, &Guards::new(w.memory.clone(), TARGET))
+            .unwrap();
+        d.cleanup(&w.objects, &Guards::new(w.memory.clone(), TARGET))
+            .unwrap();
         let deletes: Vec<_> = arm
             .calls()
             .into_iter()
@@ -1835,7 +1846,9 @@ mod epic_004 {
         request_cancel(&w.objects, &intent, NOW).unwrap();
         arm.polls(running(3));
         assert_eq!(
-            d.cleanup(&w.objects).unwrap_err().code,
+            d.cleanup(&w.objects, &Guards::new(w.memory.clone(), TARGET))
+                .unwrap_err()
+                .code,
             "cloud_outcome_unknown"
         );
         assert_eq!(
@@ -1844,7 +1857,8 @@ mod epic_004 {
         );
         // The late PUT lands; cleanup proves it ours, then deletes it.
         arm.effect(&arm.calls()[0]);
-        d.cleanup(&w.objects).unwrap();
+        d.cleanup(&w.objects, &Guards::new(w.memory.clone(), TARGET))
+            .unwrap();
         assert!(arm.get(APP1).is_none());
         let outcomes: Vec<_> = steps(&w, &intent).into_iter().map(|s| (s.1, s.2)).collect();
         assert_eq!(
@@ -2038,6 +2052,9 @@ mod epic_004 {
         );
         assert!(w.snapshot().record_for(T).is_some());
         assert_eq!(arm.count(&Verb::Stop), 0);
+        assert!(guards.current().unwrap().is_none_or(
+            |g| g.operation_id != intent.operation_id || g.state == guard::State::Released
+        ));
         assert_eq!(
             w.ops.release(&w.objects, &intent, NOW).unwrap().outcome(),
             &TerminalOutcome::Cancelled
@@ -2188,6 +2205,10 @@ mod epic_004 {
             writer: app(&ours(tenant), &sha(APP1.as_bytes()), &[false, true]),
             policy_generation_required: 3,
             policy_generation_observed: 3,
+            route: Route {
+                tenant: tenant.into(),
+                ..route()
+            },
         }
     }
 
@@ -2425,5 +2446,296 @@ mod epic_004 {
             guard::State::Released
         );
         assert_eq!(run().unwrap().digest(), sealed.digest());
+    }
+
+    // ------------------------------------- review corrections (a913ebbe)
+
+    #[test]
+    fn a_running_create_is_never_proven_by_presence_alone() {
+        // Finding 1 (create path): the resource is there, but the recorded
+        // operation still runs; settling `created` would let a later cleanup
+        // delete it while the create can still act.
+        let w = world();
+        let arm = arm_with_env();
+        let intent = reserved(&w);
+        let d = driver(&w, &arm, &intent);
+        arm.script(Begin::Collide(app(
+            &ours(T),
+            &sha(APP1.as_bytes()),
+            &[true],
+        )));
+        arm.polls(running(3));
+        assert_eq!(
+            d.provision(&w.objects, &app_only()).unwrap_err().code,
+            "cloud_outcome_unknown"
+        );
+        assert_eq!(steps(&w, &intent)[0].2, StepOutcome::Uncertain {});
+        d.provision(&w.objects, &app_only()).unwrap();
+        assert_eq!(steps(&w, &intent)[0].2, settled("created"));
+    }
+
+    #[test]
+    fn cleanup_waits_until_a_running_create_can_no_longer_act() {
+        // Finding 1 (cleanup path).
+        let w = world();
+        let arm = arm_with_env();
+        let intent = reserved(&w);
+        let d = driver(&w, &arm, &intent);
+        arm.script(Begin::Pending("arm-op-slow"));
+        arm.polls(running(3));
+        d.provision(&w.objects, &app_only()).unwrap_err();
+        request_cancel(&w.objects, &intent, NOW).unwrap();
+        arm.effect(&arm.calls()[0]);
+        arm.polls(running(3));
+        assert_eq!(
+            d.cleanup(&w.objects, &Guards::new(w.memory.clone(), TARGET))
+                .unwrap_err()
+                .code,
+            "cloud_outcome_unknown"
+        );
+        assert_eq!(arm.count(&Verb::Delete), 0);
+        assert!(arm.get(APP1).is_some());
+        assert_eq!(
+            w.ops.release(&w.objects, &intent, NOW).unwrap_err().code,
+            "cleanup_pending"
+        );
+        // Once the create is terminal, cleanup deletes it.
+        d.cleanup(&w.objects, &Guards::new(w.memory.clone(), TARGET))
+            .unwrap();
+        assert!(arm.get(APP1).is_none());
+        w.ops.release(&w.objects, &intent, NOW).unwrap();
+    }
+
+    #[test]
+    fn cleanup_does_not_delete_an_unproven_create_without_an_operation_id() {
+        // Finding 1: a lost dispatch has no operation to wait for, so its
+        // resource cannot be shown to be finished; it is never deleted.
+        let w = world();
+        let arm = arm_with_env();
+        let intent = reserved(&w);
+        let d = driver(&w, &arm, &intent);
+        arm.script(Begin::Unknown);
+        d.provision(&w.objects, &app_only()).unwrap_err();
+        request_cancel(&w.objects, &intent, NOW).unwrap();
+        arm.effect(&arm.calls()[0]);
+        assert_eq!(
+            d.cleanup(&w.objects, &Guards::new(w.memory.clone(), TARGET))
+                .unwrap_err()
+                .code,
+            "cloud_outcome_unknown"
+        );
+        assert_eq!(arm.count(&Verb::Delete), 0);
+    }
+
+    #[test]
+    fn a_refused_dispatch_never_records_a_create() {
+        // Finding 2: the port refused, so this operation created nothing,
+        // even though a matching resource of the same tenant now exists.
+        let w = world();
+        let arm = arm_with_env();
+        let intent = reserved(&w);
+        let d = driver(&w, &arm, &intent);
+        let exact = app(&ours(T), &sha(APP1.as_bytes()), &[true]);
+        arm.script(Begin::RefuseAfter("AlreadyExists", exact.clone()));
+        assert_eq!(
+            d.provision(&w.objects, &app_only()).unwrap_err().code,
+            "cloud_action_failed"
+        );
+        assert_eq!(steps(&w, &intent)[0].2, settled("failed:AlreadyExists"));
+        request_cancel(&w.objects, &intent, NOW).unwrap();
+        d.cleanup(&w.objects, &Guards::new(w.memory.clone(), TARGET))
+            .unwrap();
+        assert_eq!(arm.count(&Verb::Delete), 0);
+        assert_eq!(arm.get(APP1), Some(exact));
+        w.ops.release(&w.objects, &intent, NOW).unwrap();
+    }
+
+    fn delivered_for(w: &World, intent: &Intent, id: &str) -> Delivered {
+        let op = &intent.operation_id;
+        w.ops.issue_candidate(op, id).unwrap();
+        w.ops.acknowledge_delivery(op, 1, id).unwrap();
+        w.ops.delivered(op).unwrap()
+    }
+
+    #[test]
+    fn activation_refuses_a_route_substituted_after_readiness() {
+        // Finding 3.
+        let w = world();
+        let (intent, proof) = proven(&w);
+        let guards = Guards::new(w.memory.clone(), TARGET);
+        let delivered = delivered_for(&w, &intent, "aaaaaaaaaaaa");
+        for substituted in [
+            Route {
+                writer: "https://attacker.invalid".into(),
+                ..route()
+            },
+            Route {
+                audience: "other-audience".into(),
+                ..route()
+            },
+            Route {
+                binding_generation: route().binding_generation + 1,
+                ..route()
+            },
+        ] {
+            let error = activate_create(
+                &w.ops,
+                &w.objects,
+                &guards,
+                &intent,
+                &substituted,
+                &proof,
+                &delivered,
+                NOW,
+            )
+            .unwrap_err();
+            assert_eq!(error.code, "activation_route_invalid");
+        }
+        assert!(w.snapshot().record_for(T).is_none());
+    }
+
+    #[test]
+    fn a_committed_activation_is_recovered_after_a_crash_before_the_seal() {
+        // Finding 4: the route CAS committed, then the worker crashed. A
+        // rerun whose readiness digest changed (a later checkpoint) and whose
+        // credential is no longer published still finishes from the receipt.
+        let w = world();
+        let (intent, proof) = proven(&w);
+        let guards = Guards::new(w.memory.clone(), TARGET);
+        let committed =
+            activate(&w.ops, &w.objects, &intent, &route(), &proof.digest, NOW).unwrap();
+        let later = Proof {
+            digest: "e".repeat(64),
+            ..proof
+        };
+        let unpublished = delivered_for(&w, &intent, "cccccccccccc");
+        let sealed = activate_create(
+            &w.ops,
+            &w.objects,
+            &guards,
+            &intent,
+            &route(),
+            &later,
+            &unpublished,
+            NOW,
+        )
+        .unwrap();
+        assert_eq!(
+            sealed.outcome(),
+            &TerminalOutcome::Succeeded { receipt: committed }
+        );
+        assert_eq!(
+            guards.current().unwrap().unwrap().state,
+            guard::State::Released
+        );
+    }
+
+    #[test]
+    fn a_cancelled_retirement_releases_its_guard_and_keeps_the_route() {
+        // Finding 5: the guard was held, then cancellation won the route CAS
+        // (modelled by a failed CAS followed by the cancel).
+        let w = world();
+        let arm = MockArm::default();
+        let (_, receipt) = activated(&w, &arm);
+        let route = w.snapshot().record_for(T).cloned();
+        let intent = retirement(&w, &receipt);
+        let d = driver(&w, &arm, &intent);
+        let guards = Guards::new(w.memory.clone(), TARGET);
+        d.reserve_retirement(&w.objects, NOW).unwrap();
+        w.memory.fault(Op::Put, CONTROL, Fault::Before, 0, 1);
+        d.retire(&w.objects, &guards, NOW).unwrap_err();
+        assert_eq!(guards.current().unwrap().unwrap().state, guard::State::Held);
+        request_cancel(&w.objects, &intent, NOW).unwrap();
+        // The seal waits for the guard to be reconciled.
+        assert_eq!(
+            w.ops.release(&w.objects, &intent, NOW).unwrap_err().code,
+            "cleanup_pending"
+        );
+        assert_eq!(
+            d.retire(&w.objects, &guards, NOW).unwrap_err().code,
+            "operation_cancelled"
+        );
+        assert_eq!(
+            guards.current().unwrap().unwrap().state,
+            guard::State::Released
+        );
+        assert_eq!(
+            w.ops.release(&w.objects, &intent, NOW).unwrap().outcome(),
+            &TerminalOutcome::Cancelled
+        );
+        assert_eq!(w.snapshot().record_for(T).cloned(), route);
+        assert_eq!(arm.count(&Verb::Stop), 0);
+    }
+
+    #[test]
+    fn a_retirement_cancelled_before_it_started_never_holds_the_guard() {
+        // Finding 5: cancellation is noticed before the hold.
+        let w = world();
+        let arm = MockArm::default();
+        let (_, receipt) = activated(&w, &arm);
+        let intent = retirement(&w, &receipt);
+        let d = driver(&w, &arm, &intent);
+        let guards = Guards::new(w.memory.clone(), TARGET);
+        d.reserve_retirement(&w.objects, NOW).unwrap();
+        request_cancel(&w.objects, &intent, NOW).unwrap();
+        assert_eq!(
+            d.retire(&w.objects, &guards, NOW).unwrap_err().code,
+            "operation_cancelled"
+        );
+        assert!(
+            guards
+                .current()
+                .unwrap()
+                .is_none_or(|g| g.operation_id != intent.operation_id)
+        );
+        w.ops.release(&w.objects, &intent, NOW).unwrap();
+    }
+
+    fn retirement_keyed(w: &World, key: &str, expected_receipt: &str) -> Intent {
+        w.ops
+            .accept(
+                ADMIN,
+                key,
+                &Payload::Retire {
+                    tenant_id: T.into(),
+                    expected_receipt: expected_receipt.into(),
+                    reason: "offboarded".into(),
+                    data_disposition: DataDisposition::Retain,
+                },
+                &[],
+                NOW,
+            )
+            .unwrap()
+            .intent
+    }
+
+    #[test]
+    fn a_retirement_after_a_cancelled_one_verifies_the_original_receipt() {
+        // Finding 6.
+        let w = world();
+        let arm = MockArm::default();
+        let (_, receipt) = activated(&w, &arm);
+        let first = retirement_keyed(&w, "retire-1", &receipt);
+        let d = driver(&w, &arm, &first);
+        let guards = Guards::new(w.memory.clone(), TARGET);
+        d.reserve_retirement(&w.objects, NOW).unwrap();
+        request_cancel(&w.objects, &first, NOW).unwrap();
+        d.retire(&w.objects, &guards, NOW).unwrap_err();
+        w.ops.release(&w.objects, &first, NOW).unwrap();
+        // An unrelated receipt is still refused.
+        let wrong = retirement_keyed(&w, "retire-2", &sha(b"receipt"));
+        assert_eq!(
+            driver(&w, &arm, &wrong)
+                .reserve_retirement(&w.objects, NOW)
+                .unwrap_err()
+                .code,
+            "retirement_receipt_mismatch"
+        );
+        let second = retirement_keyed(&w, "retire-3", &receipt);
+        let d = driver(&w, &arm, &second);
+        d.reserve_retirement(&w.objects, NOW).unwrap();
+        let sealed = d.retire(&w.objects, &guards, NOW).unwrap();
+        assert_eq!(sealed.outcome(), &TerminalOutcome::Retired);
+        assert!(w.snapshot().record_for(T).is_none());
     }
 }

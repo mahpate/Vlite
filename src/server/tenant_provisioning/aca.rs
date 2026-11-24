@@ -38,6 +38,10 @@ const DELETE_APP: &str = "delete-app";
 const STOP_APP: &str = "stop-app";
 /// The retirement plan step (ITEM-011).
 const PLAN: &str = "control/receipt";
+/// Journal resource for the retirement's lifecycle guard hold/release.
+const GUARD: &str = "control/guard";
+const HOLD: &str = "hold";
+const RELEASE: &str = "release";
 
 // ------------------------------------------------------------------ port
 
@@ -362,23 +366,27 @@ impl<'a> Driver<'a> {
             .find(|step| step.action == *action))
     }
 
-    /// Polls the persisted cloud operation (if any). `Some(code)`: the
-    /// platform reported a failure; it is only acted on after a readback.
-    fn wait(&self, arm_operation: Option<&str>) -> Option<String> {
-        let operation = arm_operation?;
+    /// Polls the persisted cloud operation. Only a terminal poll result is
+    /// [`Outcome::Succeeded`] or [`Outcome::Failed`]; no ID, a running or
+    /// unknown operation after the budget, or a refused poll stay
+    /// [`Outcome::Open`]: the operation may still act.
+    fn wait(&self, arm_operation: Option<&str>) -> Outcome {
+        let Some(operation) = arm_operation else {
+            return Outcome::Open;
+        };
         for _ in 0..self.polls {
             match self.arm.poll(operation) {
-                Ok(Poll::Succeeded) => return None,
-                Ok(Poll::Failed(code)) | Err(ArmError::Refused(code)) => return Some(code),
-                Ok(Poll::Running) | Err(ArmError::Unknown) => {}
+                Ok(Poll::Succeeded) => return Outcome::Succeeded,
+                Ok(Poll::Failed(code)) => return Outcome::Failed(code),
+                Ok(Poll::Running) | Err(ArmError::Unknown | ArmError::Refused(_)) => {}
             }
         }
-        None
+        Outcome::Open
     }
 
     /// Records `action` and dispatches it once, persisting the returned
     /// cloud operation ID; a resume polls that ID instead. Returns the step
-    /// and any reported failure, for the caller's readback.
+    /// and the operation's outcome, for the caller's readback.
     fn dispatch(&self, action: &Action, call: Call) -> Result<Dispatched, ApiError> {
         match self.ops.record(self.op(), &self.attempt, action)? {
             Decision::Settled(_) => Ok(Dispatched::Settled),
@@ -388,8 +396,10 @@ impl<'a> Driver<'a> {
                         .observe(self.op(), &self.attempt, sequence, &operation)?;
                     Ok(Dispatched::Pending(sequence, self.wait(Some(&operation))))
                 }
-                Err(ArmError::Refused(code)) => Ok(Dispatched::Pending(sequence, Some(code))),
-                Err(ArmError::Unknown) => Ok(Dispatched::Pending(sequence, None)),
+                // The port guarantees a refused call took no effect, so
+                // nothing at the name can be this dispatch's doing.
+                Err(ArmError::Refused(code)) => Ok(Dispatched::Refused(sequence, code)),
+                Err(ArmError::Unknown) => Ok(Dispatched::Pending(sequence, Outcome::Open)),
             },
             Decision::Reconcile(sequence) => {
                 let step = self.step(action)?.ok_or_else(state_invalid)?;
@@ -490,12 +500,19 @@ impl<'a> Driver<'a> {
                 config_digest: desired.config_digest.clone(),
             },
         };
-        let Dispatched::Pending(sequence, reported) = self.dispatch(&action, call)? else {
-            let step = self.step(&action)?.ok_or_else(state_invalid)?;
-            return match step.outcome {
-                StepOutcome::Settled { observed } => created(&observed),
-                StepOutcome::Uncertain {} => Err(unknown()),
-            };
+        let (sequence, outcome) = match self.dispatch(&action, call)? {
+            Dispatched::Settled => {
+                let step = self.step(&action)?.ok_or_else(state_invalid)?;
+                return match step.outcome {
+                    StepOutcome::Settled { observed } => created(&observed),
+                    StepOutcome::Uncertain {} => Err(unknown()),
+                };
+            }
+            Dispatched::Refused(sequence, code) => {
+                self.settle(sequence, &failure(&code))?;
+                return Err(failed());
+            }
+            Dispatched::Pending(sequence, outcome) => (sequence, outcome),
         };
         let found = self.read(&desired.resource)?;
         match &found {
@@ -519,18 +536,20 @@ impl<'a> Driver<'a> {
                         "the revision inventory is incomplete; nothing is proven",
                     ));
                 }
-                if exact(desired, found) {
+                // Presence is proof only once this dispatch's own cloud
+                // operation finished successfully.
+                if outcome == Outcome::Succeeded && exact(desired, found) {
                     self.settle(sequence, "created")
                 } else {
                     Err(unknown())
                 }
             }
-            None => match reported {
-                Some(code) => {
+            None => match outcome {
+                Outcome::Failed(code) => {
                     self.settle(sequence, &failure(&code))?;
                     Err(failed())
                 }
-                None => Err(unknown()),
+                Outcome::Succeeded | Outcome::Open => Err(unknown()),
             },
         }
     }
@@ -541,7 +560,7 @@ impl<'a> Driver<'a> {
     /// verified, non-app, data or archive resource), resolving unknown
     /// creates by their owner tag first. The seal requires it
     /// ([`terminal_ready`]); the caller then calls `Operations::release`.
-    pub(super) fn cleanup(&self, objects: &Objects) -> Result<(), ApiError> {
+    pub(super) fn cleanup(&self, objects: &Objects, guards: &Guards) -> Result<(), ApiError> {
         let (snapshot, _) = objects.read()?;
         if !matches!(
             holds(&snapshot, self.intent),
@@ -555,6 +574,11 @@ impl<'a> Driver<'a> {
                 "operation_not_cancelled",
                 "cleanup runs only after a cancellation was requested",
             ));
+        }
+        // A cancelled retirement never removed the route (the cancel and
+        // the removal are mutually exclusive), so its guard is released.
+        if self.intent.kind() == Kind::Retire {
+            self.release_guard(guards)?;
         }
         for step in self.ops.journal(self.op())?.steps {
             if step.outcome != (StepOutcome::Uncertain {}) {
@@ -577,19 +601,30 @@ impl<'a> Driver<'a> {
         Ok(())
     }
 
-    /// An unknown create, resolved by the owner tag alone (the desired
-    /// configuration is not needed to know the resource is ours).
+    /// An unknown create, resolved by the owner tag only once its recorded
+    /// cloud operation is terminal (the desired configuration is not needed
+    /// to know the resource is ours). While the operation may still act —
+    /// running, unpollable, or never identified — it stays unknown, so
+    /// nothing is deleted and the seal waits.
     fn resolve_create(&self, step: &Step) -> Result<(), ApiError> {
-        let reported = self.wait(step.arm_operation.as_deref());
-        match self.read(&step.action.resource)? {
-            Some(found) if found.owner.as_deref() == Some(self.owner().as_str()) => {
+        let outcome = self.wait(step.arm_operation.as_deref());
+        if outcome == Outcome::Open {
+            return Err(unknown());
+        }
+        match (self.read(&step.action.resource)?, outcome) {
+            (Some(found), Outcome::Succeeded)
+                if found.owner.as_deref() == Some(self.owner().as_str()) =>
+            {
                 self.settle(step.sequence, "created")
             }
-            Some(_) => self.settle(step.sequence, "conflict"),
-            None => match reported {
-                Some(code) => self.settle(step.sequence, &failure(&code)),
-                None => Err(unknown()),
-            },
+            // Ours, yet the operation failed: whether it is this
+            // operation's own partial effect is unproven.
+            (Some(found), _) if found.owner.as_deref() == Some(self.owner().as_str()) => {
+                Err(unknown())
+            }
+            (Some(_), _) => self.settle(step.sequence, "conflict"),
+            (None, Outcome::Failed(code)) => self.settle(step.sequence, &failure(&code)),
+            (None, _) => Err(unknown()),
         }
     }
 
@@ -635,8 +670,10 @@ impl<'a> Driver<'a> {
             owner: self.owner(),
             verb,
         };
-        let Dispatched::Pending(sequence, reported) = self.dispatch(&action, call)? else {
-            return Err(state_invalid());
+        let (sequence, outcome) = match self.dispatch(&action, call)? {
+            Dispatched::Settled => return Err(state_invalid()),
+            Dispatched::Refused(sequence, code) => (sequence, Outcome::Failed(code)),
+            Dispatched::Pending(sequence, outcome) => (sequence, outcome),
         };
         let found = self.read(resource)?;
         if found
@@ -648,12 +685,12 @@ impl<'a> Driver<'a> {
         if proven(found.as_ref()) {
             return self.settle(sequence, done);
         }
-        match reported {
-            Some(code) => {
+        match outcome {
+            Outcome::Failed(code) => {
                 self.settle(sequence, &failure(&code))?;
                 Err(failed())
             }
-            None => Err(unknown()),
+            Outcome::Succeeded | Outcome::Open => Err(unknown()),
         }
     }
 
@@ -708,21 +745,46 @@ impl<'a> Driver<'a> {
         let Some((terminal, digest)) = self.ops.read_terminal(operation_id)? else {
             return Err(mismatch());
         };
+        if digest != *terminal_digest || terminal.tenant_id != self.intent.tenant_id {
+            return Err(mismatch());
+        }
+        // A cancelled retirement replaced the slot but never removed the
+        // route: follow its verified plan exactly one hop back to the
+        // activation it verified (a later plan names that activation again).
+        let (activation, terminal) = match &terminal.outcome {
+            TerminalOutcome::Succeeded { .. } => (operation_id.clone(), terminal),
+            TerminalOutcome::Cancelled => {
+                let journal = self.ops.journal(operation_id)?;
+                let mut words = plan(&journal).ok_or_else(mismatch)?.split(' ');
+                let activation = words.next().ok_or_else(mismatch)?.to_owned();
+                let planned_route = words.next().ok_or_else(mismatch)?.to_owned();
+                let Some((terminal, _)) = self.ops.read_terminal(&activation)? else {
+                    return Err(mismatch());
+                };
+                match &terminal.outcome {
+                    TerminalOutcome::Succeeded { receipt }
+                        if receipt.operation_id == activation
+                            && receipt.route_digest == planned_route => {}
+                    _ => return Err(mismatch()),
+                }
+                (activation, terminal)
+            }
+            TerminalOutcome::Retired => return Err(mismatch()),
+        };
         let TerminalOutcome::Succeeded { receipt } = &terminal.outcome else {
             return Err(mismatch());
         };
         let route = snapshot
             .record_for(&self.intent.tenant_id)
             .map(control_state::route_digest);
-        if digest != *terminal_digest
-            || terminal.tenant_id != self.intent.tenant_id
+        if terminal.tenant_id != self.intent.tenant_id
             || super::admin::receipt_digest(receipt) != expected
             || route.as_deref() != Some(receipt.route_digest.as_str())
         {
             return Err(mismatch());
         }
-        let apps = apps(&self.ops.journal(operation_id)?, CREATE_APP, &["created"]);
-        Ok(std::iter::once(operation_id.clone())
+        let apps = apps(&self.ops.journal(&activation)?, CREATE_APP, &["created"]);
+        Ok(std::iter::once(activation)
             .chain(std::iter::once(receipt.route_digest.clone()))
             .chain(apps)
             .collect::<Vec<_>>()
@@ -753,8 +815,12 @@ impl<'a> Driver<'a> {
         let mut words = plan.split(' ').skip(1);
         let route = words.next().ok_or_else(state_invalid)?.to_owned();
         let planned: Vec<String> = words.map(str::to_owned).collect();
-        guards.hold(&self.intent.tenant_id, self.op())?;
-        lifecycle_cas(
+        if self.cancelled_before_removal(objects)? {
+            self.release_guard(guards)?;
+            return Err(operation_cancelled());
+        }
+        self.hold_guard(guards)?;
+        let removed = lifecycle_cas(
             objects,
             now,
             |snapshot| {
@@ -762,7 +828,15 @@ impl<'a> Driver<'a> {
                     && holds(snapshot, self.intent).is_some()
             },
             |current| current.retire_route(&self.intent.tenant_id, self.op(), &route),
-        )?;
+        );
+        if let Err(error) = removed {
+            // The cancellation won the race after the hold: nothing was
+            // removed, so this operation's guard must not stay held.
+            if self.cancelled_before_removal(objects)? {
+                self.release_guard(guards)?;
+            }
+            return Err(error);
+        }
         for app in &planned {
             self.destructive(app, STOP_APP, Verb::Stop, "stopped", |found| {
                 found.is_none_or(|found| {
@@ -773,13 +847,104 @@ impl<'a> Driver<'a> {
         }
         self.ops.release(objects, self.intent, now)
     }
+
+    /// A cancellation was requested and the route is still there (a
+    /// removal and a cancel are mutually exclusive in the control state).
+    fn cancelled_before_removal(&self, objects: &Objects) -> Result<bool, ApiError> {
+        let (snapshot, _) = objects.read()?;
+        Ok(matches!(
+            holds(&snapshot, self.intent),
+            Some(Slot::Reserved {
+                cancellation_requested: true,
+                ..
+            })
+        ) && snapshot.record_for(&self.intent.tenant_id).is_some())
+    }
+
+    fn guard_action(&self, operation: &str) -> Action {
+        self.action(GUARD, operation, &self.intent.tenant_id, false)
+    }
+
+    /// Holds the lifecycle guard, journaled first so that a cancel always
+    /// knows to reconcile it.
+    fn hold_guard(&self, guards: &Guards) -> Result<(), ApiError> {
+        let action = self.guard_action(HOLD);
+        if let Some(Step {
+            outcome: StepOutcome::Settled { .. },
+            ..
+        }) = self.step(&action)?
+        {
+            return Ok(());
+        }
+        match self.ops.record(self.op(), &self.attempt, &action)? {
+            Decision::Settled(_) => Ok(()),
+            Decision::Dispatch(n) | Decision::Reconcile(n) => {
+                guards.hold(&self.intent.tenant_id, self.op())?;
+                self.settle(n, "held")
+            }
+        }
+    }
+
+    /// After a cancellation won: releases this operation's guard if it
+    /// holds it (never another operation's), and journals the release the
+    /// seal requires ([`terminal_ready`]). Idempotent; a no-op without a
+    /// journaled hold.
+    fn release_guard(&self, guards: &Guards) -> Result<(), ApiError> {
+        let journal = self.ops.journal(self.op())?;
+        let Some(hold) = journal
+            .steps
+            .iter()
+            .find(|step| step.action == self.guard_action(HOLD))
+        else {
+            return Ok(());
+        };
+        if let Some(guard) = guards.current()?
+            && guard.operation_id == *self.op()
+            && guard.state != super::guard::State::Released
+        {
+            guards.release(&self.intent.tenant_id, self.op())?;
+        }
+        if hold.outcome == (StepOutcome::Uncertain {}) {
+            self.settle(hold.sequence, "released")?;
+        }
+        let action = self.guard_action(RELEASE);
+        if let Some(Step {
+            outcome: StepOutcome::Settled { .. },
+            ..
+        }) = self.step(&action)?
+        {
+            return Ok(());
+        }
+        match self.ops.record(self.op(), &self.attempt, &action)? {
+            Decision::Dispatch(n) | Decision::Reconcile(n) => self.settle(n, "released"),
+            Decision::Settled(_) => Ok(()),
+        }
+    }
+}
+
+fn operation_cancelled() -> ApiError {
+    conflict(
+        "operation_cancelled",
+        "a cancellation was requested; the retirement did not remove the route",
+    )
 }
 
 enum Dispatched {
     /// Already settled earlier.
     Settled,
-    /// Step `n` awaits its readback; `Some(code)`: a reported failure.
-    Pending(u64, Option<String>),
+    /// Step `n` was refused by the port with no effect.
+    Refused(u64, String),
+    /// Step `n` awaits its readback, with its cloud operation's outcome.
+    Pending(u64, Outcome),
+}
+
+/// A cloud operation's polled state.
+#[derive(Debug, PartialEq, Eq)]
+enum Outcome {
+    Succeeded,
+    Failed(String),
+    /// Not known to be terminal: it may still act.
+    Open,
 }
 
 fn created(observed: &str) -> Result<(), ApiError> {
@@ -836,15 +1001,25 @@ pub(super) fn terminal_ready(journal: &Journal, outcome: &TerminalOutcome) -> Re
         TerminalOutcome::Succeeded { .. } => Ok(()),
         TerminalOutcome::Cancelled => {
             let deleted = apps(journal, DELETE_APP, &["deleted", "absent"]);
+            let held = journal
+                .steps
+                .iter()
+                .any(|step| step.action.resource == GUARD);
+            let released = journal.steps.iter().any(|step| {
+                step.action.resource == GUARD
+                    && step.action.operation == RELEASE
+                    && matches!(&step.outcome, StepOutcome::Settled { .. })
+            });
             if apps(journal, CREATE_APP, &["created"])
                 .iter()
                 .all(|app| deleted.contains(app))
+                && (!held || released)
             {
                 Ok(())
             } else {
                 Err(conflict(
                     "cleanup_pending",
-                    "an app this operation created is not deleted yet; run the cleanup",
+                    "an app this operation created is not deleted yet, or its lifecycle guard is not released; run the cleanup",
                 ))
             }
         }

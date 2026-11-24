@@ -898,3 +898,41 @@ None of the three items is Done. ITEM-006 and ITEM-007 are partial; ITEM-008 is 
     - The REST/CLI handlers are not wired.
   - **Liveness limits.** A settled failure cannot be retried within the same operation; a new operation is required. A crash before an ARM operation ID is persisted leaves the step unknown until operator resolution.
   - **ITEM-008 follow-up.** This remains for reader pins and pin cleanup. EPIC-005 (readers) and EPIC-006 (migration) are excluded and untouched.
+
+### EPIC-004 review corrections (offline)
+
+These corrections follow the review of a913ebbe. Each finding was reproduced by a focused test that failed on a913ebbe before its fix. ITEM-009, ITEM-010 and ITEM-011 stay **Partial**, and every refusal listed above still applies.
+
+- **Finding 1: an uncertain create is resolved only after its operation has finished.**
+  - Polling now has three states:
+    - `Succeeded`;
+    - `Failed`;
+    - `Open`: no operation ID, still running or unknown after the poll budget, or a refused poll.
+  - A create is settled `created` only when its own persisted operation is `Succeeded` **and** the readback is exact and ours. This applies to both provisioning and cleanup.
+  - While the operation is `Open`, the step stays `cloud_outcome_unknown`. Nothing is deleted, and sealing as cancelled refuses `cleanup_pending`.
+  - Our resource present after a `Failed` operation also stays unknown.
+  - A lost dispatch, which has no operation ID, is never compensated.
+- **Finding 2: a refused dispatch never records a create.**
+  - A begin call that `ArmError::Refused` rejected (the port guarantees it took no effect) settles `failed:{code}` immediately, whatever the readback shows. A matching same-tenant resource that appears at that name is therefore never adopted and never deleted by cleanup.
+- **Finding 3: readiness is bound to the operation and the exact route.**
+  - `Readiness` carries the verified writer-only route, and `prove` validates it. The checks are: the tenant, dedicated, writer-only, readerless, no authority mode, the seed lineage, and the authority epoch (which must be > 0).
+  - `Proof` binds the operation ID and the route digest. The readiness digest (`vlite.readiness/2`) includes the route digest.
+  - `activate_create` refuses `activation_route_invalid` if the operation, writer, audience, binding generation or any other route field differs from the proven route.
+- **Finding 4: a committed activation is recovered.**
+  - If the slot already holds this operation's receipt and the published route's digest equals the receipt's, `activate_create` releases the guard and seals `succeeded` from that durable receipt. This happens before the readiness-proof and credential checks, so it still completes after a later checkpoint has changed the readiness digest, or after the credential has expired or been revoked.
+  - A supplied route that differs from the committed one refuses `activation_route_invalid`.
+- **Finding 5: a cancelled retirement releases its guard.**
+  - Retirement journals a `control/guard` hold step before it holds the guard.
+  - If a cancellation is found before the route is removed (on entry, or after a failed route-removal CAS), retirement releases the guard only when this operation holds it, journals the release, and refuses `operation_cancelled`. If the cancellation came before the hold, it never holds.
+  - `cleanup` also performs this release for a retirement.
+  - Sealing a cancelled operation that journaled a hold refuses `cleanup_pending` until the release is journaled.
+  - The acquisition race is covered by the persisted-held path: hold, failed CAS, cancel, rerun. The cancel CAS cannot be injected in the middle of `lifecycle_cas` with the in-memory store.
+- **Finding 6: retirement after a cancelled retirement.**
+  - When the tenant's released slot points at a sealed **cancelled** operation with a settled retirement plan, verification follows the plan's activation ID exactly one hop.
+  - That activation must be sealed `succeeded` for the tenant. Its receipt's operation ID and route digest must equal the plan's, its receipt digest must equal the expected receipt, and the current route digest must equal the receipt's.
+  - Each later plan names the original activation again, so the chain never grows.
+  - Unrelated or stale receipts and `retired` slots still refuse `retirement_receipt_mismatch`.
+- **Verification.**
+  - `cargo test --features server --lib tenant_provisioning`: 103 passed. This is 94 earlier tests plus 9 new reproductions, and the existing `cancelled_retirement_keeps_the_route` test now asserts the guard state too.
+  - `cargo clippy --features server --all-targets -- -D warnings` is clean, and rustfmt and `git diff --check` are clean.
+  - Full lib suite: `cargo test --features server --lib` 2237 passed, 10 ignored.
