@@ -1463,12 +1463,14 @@ in [HA-ACA](HA-ACA.md#managed-tenant-deployments-local-intent-only-not-aca-quali
 The routes are off by default. Without
 `vlite-server <db> --tenant-deployments-file <json>`
 (`{"target_file", "object", "shared_key_file"?}`, the `control-state` source
-above) they answer 409 `tenant_deployments_not_configured`. Enabling them
+above) authenticated, well-formed requests answer 409
+`tenant_deployments_not_configured`. Authentication and body validation can
+reject a request before this check. Enabling them
 needs `VLITE_ADMIN_DIR` and an admin token, and refuses `--insecure-local` and
 `--durability none`. The server then holds the admin directory's lock, and
 `vlite-server tenant-deployment ...` (same contracts, offline) answers
 `admin_dir_busy`. Requests without admin credentials get
-`admin_auth_required`.
+401 `admin_auth_required`.
 
 | Route | Effect today |
 |-------|--------------|
@@ -1479,10 +1481,18 @@ needs `VLITE_ADMIN_DIR` and an admin token, and refuses `--insecure-local` and
 | `GET /v1/admin/tenant-deployment-operations/{operation}` | Status: `phase`, `next_step`, generation tokens, `desired` and `observed` from the records (not live Azure state). |
 | `POST /v1/admin/tenant-deployment-operations/{operation}/{action}` | `resume` (no-op, never cloud execution) and `cancel`. Every other action is refused (below). |
 
+Submission responses are 202 while the operation is not terminal; an
+identical retry of an ended operation returns 200 with its recorded state.
+
 **Submission body:** `{"idempotency_key", "request": {"kind": ...},
 "contents": [...]}`, where `contents` holds the exact text of every
-referenced profile. A duplicate returns the same operation. The same key with
-different content answers 409 `operation_request_conflict`. A path/body
+referenced profile. Retry through the **same surface and principal**:
+idempotency is scoped to the principal and key, not the key alone. The CLI
+uses `cli:tenant-deployment`; REST uses the authenticated admin principal.
+Switching surfaces or admin principals is a new operation and can allocate
+another unrouted tenant for `create`. Within the same principal's namespace,
+a duplicate returns the same operation; the same key with different content
+answers 409 `operation_request_conflict`. A path/body
 mismatch answers 422 `operation_request_invalid`.
 
 **Action body:** `{"idempotency_key", "expected_operation_generation",

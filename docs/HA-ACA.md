@@ -669,18 +669,25 @@ future qualified path must keep.
   replica clock proof, reader qualification, profile/quota/budget (including
   the writer-storage mount check, OD-006), reader credentials and the
   control-worker/REST composition.
-- **Replica replacement and policy lag:** there is no targeted replica
-  replacement. A replacement is the same guarded in-place update (a new
-  revision), and eligibility is all-or-nothing: one failed replica keeps the
-  change unsealed until a healthy replacement is observed. Replica-side lag
+- **Replica replacement and route drift:** there is no targeted replica
+  replacement. The local fixture dispatches one guarded in-place update,
+  without resending it. One failed replica keeps the change unsealed until
+  an all-healthy fleet is observed on the same active revision used for the
+  failed observations. This does not prove that an unchanged configuration
+  rolls a new ACA revision or triggers replica replacement. Replica-side lag
   (stale age, older binding or epoch, replaced revision) is
   `replica_ineligible`. Control-side lag, meaning a route changed outside the
   lifecycle (for example a binding-generation advance through
   `control-state update --directory-file`), matches no receipt. Later reader
   changes then refuse `readers_unanchored` and retirement refuses
   `retirement_receipt_mismatch`, with no slot or effect. Nothing repairs this
-  implicitly: only republishing the route recorded by the latest receipt
-  re-anchors.
+  implicitly. The fixture restores the receipt's route to isolate the anchor
+  check; that is not an operational rollback procedure. Republish that route
+  only after verifying it still names the authoritative current writer,
+  epoch and binding. Never undo an intentional rebind or writer/epoch move
+  merely to match a receipt; otherwise leave the state unchanged and
+  escalate. Reader-pin/Azure RBAC policy-propagation lag is not modelled by
+  these fixtures and remains open under ITEM-008/ITEM-019.
 
 ## Managed tenant deployments (local intent only, not ACA-qualified)
 
@@ -699,22 +706,28 @@ For managed tenants today, use the manual procedures in this guide.
 | `readers`, `retire` | Recorded as intent only (`accepted`, `observed.reserved: false`). The actuators exist only in offline fixtures. | No |
 | `migrate`, `rollback`, `release`, `acknowledge-delivery`, `replace-credentials` | Excluded (see below). | No |
 
-**Before you start.** REST is off by default. Without the flag every route
-answers 409 `tenant_deployments_not_configured`. Start with
+**Before you start.** REST is off by default. Without the flag, authenticated,
+well-formed requests answer 409 `tenant_deployments_not_configured`;
+authentication and body validation can reject a request before this check. Start with
 `vlite-server <db> --tenant-deployments-file <json>`, where the JSON is
 `{"target_file", "object", "shared_key_file"?}` (the same control-state
 source as `control-state`). This also needs `VLITE_ADMIN_DIR` and an admin
 token, and refuses `--insecure-local` and `--durability none`. While it runs,
 the server holds the admin directory's lock, so the CLI answers
-`admin_dir_busy`. Use either the server or the CLI:
+`admin_dir_busy`. Use either the server or the CLI, and retry through the
+same surface and principal; they do not share an idempotency namespace:
 
 ```sh
-vlite-server tenant-deployment <create|readers|retire> --request-file req.json [--tenant <id>] \
+vlite-server tenant-deployment create --request-file req.json \
+  --target-file target.json --object gateway/control-state.json --admin-dir /data/admin
+vlite-server tenant-deployment <readers|retire> --tenant <id> --request-file req.json \
   --target-file target.json --object gateway/control-state.json --admin-dir /data/admin
 vlite-server tenant-deployment status --operation <id> --target-file ... --object ... --admin-dir ...
 vlite-server tenant-deployment <resume|cancel> --operation <id> --request-file action.json \
   --target-file ... --object ... --admin-dir ...
 ```
+
+`--tenant` is required for `readers`/`retire` and refused for `create`.
 
 Operation records live under `<prefix>tenant-operations/` beside the
 control-state object. Routes, bodies and errors are listed in the
@@ -722,9 +735,13 @@ control-state object. Routes, bodies and errors are listed in the
 
 **Create.** Submit `{"idempotency_key", "request": {"kind": "create", ...},
 "contents": [...]}`. `contents` holds the exact text of every profile it
-names by SHA-256. Resubmitting the same key and content returns the same
-operation (and reserves it if an earlier attempt stopped before that). The
-same key with different content answers `operation_request_conflict`. The
+names by SHA-256. Resubmitting the same key and content through the **same
+surface and principal** returns the same operation (and reserves it if an
+earlier attempt stopped before that). The CLI uses `cli:tenant-deployment`;
+REST uses the authenticated admin principal. Switching surface or principal
+creates a different operation and can allocate another unrouted tenant.
+Within the same principal's namespace, the same key with different content
+answers `operation_request_conflict`. The
 tenant stays unrouted, and status keeps `next_step` at "cloud execution is
 blocked (OD-002)". Profiles, quota and budget have no approved schema
 (OD-006), and no credential view is delivered (OD-004).
@@ -811,7 +828,7 @@ this surface:
 | Command | Shows | Does not show |
 |---------|-------|---------------|
 | `cargo test --features server --lib tenant_provisioning` | Durable intents and idempotency, reservation/route CAS, guards, fake-ARM create/update/delete/stop, unknown-outcome reconciliation, no adoption, retention on cancel/retire, reader anchoring/eligibility, schema compatibility, admin REST/CLI refusals and redaction | Real ARM/ACA behavior, Azure RBAC or mounts, clock/freshness, stop proofs, timing or storage measurements |
-| `cargo test --features server --lib epic_005` | The reader/retirement subset, including stale plans, races, replacement and route lag | Reader routing or reader qualification (ITEM-021) |
+| `cargo test --features server --lib epic_005` | The reader/retirement subset, including stale plans, races, failed-to-healthy fleet observations and route drift | ACA replica replacement, reader-pin/RBAC policy-propagation lag (ITEM-008/019), reader routing or reader qualification (ITEM-021) |
 | `cargo test --features server --test server_cli tenant_deployment` | Routes are opt-in and refused before a database is created | Any served lifecycle |
 | `python tests/openapi_contract.py`, `python tests/admin_route_coverage.py` | Routes are registered with their OpenAPI contracts and are admin-only | Behavior |
 

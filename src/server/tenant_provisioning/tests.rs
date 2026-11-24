@@ -4513,14 +4513,12 @@ mod epic_004 {
 
         // ------------- EPIC-007 ITEM-018: local runbook regression gaps
 
-        /// Replacing a failed replica with an unchanged desired configuration
-        /// is the same guarded in-place update (it rolls a new revision);
-        /// there is no targeted replica replacement and failed replicas are
-        /// not filtered out: one failed replica keeps the change unsealed
-        /// until a replacement is observed. Writer and endpoint never change
-        /// and the update is dispatched once.
+        /// A failed replica keeps the change unsealed until an all-healthy
+        /// fleet is observed on the same active revision. The fake update is
+        /// dispatched once; this does not prove ACA rolls a new revision or
+        /// replaces a replica when the desired configuration is unchanged.
         #[test]
-        fn a_failed_replica_is_replaced_only_by_a_revision_rolling_update() {
+        fn a_failed_replica_update_dispatches_once_and_waits_for_a_healthy_fleet() {
             let w = world();
             let arm = MockArm::default();
             with_reader(&w, &arm);
@@ -4556,18 +4554,19 @@ mod epic_004 {
                     config_digest: sha(b"v1")
                 }),
                 1,
-                "one revision-rolling update, never resent"
+                "one in-place update, never resent"
             );
             assert_eq!(writer_calls(&arm), 1);
             assert_eq!(arm.count(&Verb::Stop) + arm.count(&Verb::Delete), 0);
         }
 
-        /// Control-side policy lag: a route change published outside the
+        /// Control-side route drift: a route change published outside the
         /// lifecycle (a binding-generation advance through a legacy directory
         /// edit once the slot is released) matches no receipt, so later reader
         /// changes and retirement are refused with no slot and no effect.
         /// Replica-side lag is `replica_ineligible` (above). Only a route equal
-        /// to the latest receipt's re-anchors; nothing repairs it implicitly.
+        /// to the latest receipt's re-anchors; restoring it here isolates that
+        /// check, not an operator procedure for rolling back a deliberate move.
         #[test]
         fn a_route_change_outside_the_lifecycle_refuses_reader_changes_and_retirement() {
             let w = world();
