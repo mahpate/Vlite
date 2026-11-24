@@ -23,10 +23,20 @@
 //!   (OD-006), so it refuses; [`Driver::cleanup`] deletes, after a cancel,
 //!   only apps this operation created; [`Driver::retire`] removes the
 //!   verified route, stops the apps and seals `retired`. Data, archive and
-//!   every pre-existing or non-app resource are always retained. No reader
-//!   is ever started (EPIC-005), so no reader pin exists to clean up.
+//!   every pre-existing or non-app resource are always retained.
+//! - EPIC-005 ITEM-012/013 (offline): [`Driver::reserve_readers`] anchors a
+//!   reader change on the tenant's latest sealed receipt and plans the
+//!   route it will publish; [`Driver::set_readers`] creates or updates the
+//!   one private reader app, requires an eligible observed fleet (the
+//!   writer authority's head, lineage, epoch, binding and staleness bound;
+//!   unique replicas within the desired bounds) before it republishes the
+//!   route with the reader endpoint, and removes a reader by unpublishing
+//!   the endpoint before stopping the app. The route stays writer-only and
+//!   the writer is never touched. Every proof (pin scope, observation, stop)
+//!   exists only in tests: production refuses (ITEM-008, OD-002, OD-005).
 use super::guard::{self, Guards};
 use super::*;
+use crate::server::cloud_backup::{PinKind, Sets};
 
 /// Owner tag value prefix on every resource this contract creates.
 pub(super) const OWNER_TAG: &str = "vlite-tenant";
@@ -36,6 +46,17 @@ const CREATE_APP: &str = "create-app";
 const VERIFY: &str = "verify";
 const DELETE_APP: &str = "delete-app";
 const STOP_APP: &str = "stop-app";
+/// EPIC-005 journal actions: an in-place reader update, the observed
+/// fleet's eligibility (a read; `fleet/<app>`) and a control-owned release
+/// of a stopped replica's pin (`pin/<set>/<pin>`).
+const UPDATE_APP: &str = "update-app";
+const ELIGIBLE: &str = "eligible";
+const RELEASE_PIN: &str = "release-pin";
+/// Reader plan tokens (EPIC-005), after the anchor and its route.
+const TARGET: &str = "target=";
+const ENDPOINT: &str = "endpoint=";
+const READER: &str = "reader=";
+const NO_ENDPOINT: &str = "-";
 /// The retirement plan step (ITEM-011).
 const PLAN: &str = "control/receipt";
 /// Journal resource for the retirement's lifecycle guard hold/release.
@@ -60,6 +81,11 @@ pub(super) enum Verb {
     Delete,
     /// Deactivate every revision; the app and its storage remain.
     Stop,
+    /// Roll an existing app to a new configuration (one new active
+    /// revision); the port must refuse a missing app.
+    Update {
+        config_digest: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -175,6 +201,7 @@ impl Profile {
                 text(&d.resource)
                     && d.resource.len() <= 512
                     && !d.resource.contains(' ')
+                    && !d.resource.contains('=')
                     && d.resource != PLAN
                     && is_hex(&d.config_digest, 64)
                     && names.insert(d.resource.as_str())
@@ -259,6 +286,142 @@ pub(super) fn preflight(
         ));
     }
     Ok(Preflighted { profile })
+}
+
+/// EPIC-005: proof that a reader's set pins are scoped to its tenant
+/// (ITEM-008). None can exist while pins rewrite the whole set record in
+/// the writer's coordination scope; only tests construct it, so every
+/// production reader fleet refuses `pin_scope_unproven`.
+pub(super) struct PinScope(());
+
+/// EPIC-005: one reader replica as observed (enrollment and follower
+/// status). No production source exists yet; only tests construct a
+/// [`FleetObservation`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ReplicaStatus {
+    pub(super) replica: String,
+    /// The verified set the replica serves.
+    pub(super) set_id: String,
+    pub(super) lineage: u64,
+    pub(super) binding_generation: u64,
+    pub(super) epoch: u64,
+    /// Time since the replica last confirmed it serves the newest verified
+    /// checkpoint, and its configured staleness bound (0: unset).
+    pub(super) age_ms: u64,
+    pub(super) bound_ms: u64,
+    pub(super) failed: bool,
+}
+
+/// The writer authority and every reader replica, read together.
+pub(super) struct FleetObservation {
+    authority: authority::Record,
+    replicas: Vec<ReplicaStatus>,
+}
+
+/// Platform proof that a reader replica stopped at `stopped_unix_ms` (on
+/// the clock its pins were created by: OD-005). Only tests construct it.
+pub(super) struct ReplicaStopped {
+    replica: String,
+    stopped_unix_ms: u64,
+}
+
+#[cfg(test)]
+impl PinScope {
+    pub(super) fn for_test() -> Self {
+        Self(())
+    }
+}
+
+#[cfg(test)]
+impl FleetObservation {
+    pub(super) fn for_test(authority: authority::Record, replicas: Vec<ReplicaStatus>) -> Self {
+        Self {
+            authority,
+            replicas,
+        }
+    }
+}
+
+#[cfg(test)]
+impl ReplicaStopped {
+    pub(super) fn for_test(replica: &str, stopped_unix_ms: u64) -> Self {
+        Self {
+            replica: replica.to_owned(),
+            stopped_unix_ms,
+        }
+    }
+}
+
+/// An app a reader plan names: the writer's, or the operation-owned reader.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct App {
+    name: String,
+    reader: bool,
+}
+
+/// A verified reader change (EPIC-005), as journaled at reservation: the
+/// anchoring operation, the route it published (`planned`, the reserved
+/// route), the route this change publishes (`target`), the reader endpoint
+/// and every app the tenant owns.
+struct ReaderPlan {
+    planned: String,
+    target: String,
+    endpoint: Option<String>,
+    apps: Vec<App>,
+}
+
+impl ReaderPlan {
+    fn parse(plan: &str) -> Option<Self> {
+        let mut words = plan.split(' ').skip(1);
+        let planned = words.next()?.to_owned();
+        let target = words.next()?.strip_prefix(TARGET)?.to_owned();
+        let endpoint = match words.next()?.strip_prefix(ENDPOINT)? {
+            NO_ENDPOINT => None,
+            endpoint => Some(endpoint.to_owned()),
+        };
+        Some(Self {
+            planned,
+            target,
+            endpoint,
+            apps: words.map(app).collect(),
+        })
+    }
+
+    fn readers(&self) -> impl Iterator<Item = &str> {
+        self.apps
+            .iter()
+            .filter(|app| app.reader)
+            .map(|app| app.name.as_str())
+    }
+}
+
+/// The tenant's latest sealed receipt, its published route and owned apps.
+struct Anchor {
+    operation_id: String,
+    receipt: Receipt,
+    route: Route,
+    apps: Vec<App>,
+}
+
+fn app(word: &str) -> App {
+    match word.strip_prefix(READER) {
+        Some(name) => App {
+            name: name.to_owned(),
+            reader: true,
+        },
+        None => App {
+            name: word.to_owned(),
+            reader: false,
+        },
+    }
+}
+
+/// A reader endpoint fits one plan token.
+fn endpoint_valid(endpoint: &str) -> bool {
+    text(endpoint)
+        && endpoint.len() <= 2048
+        && endpoint != NO_ENDPOINT
+        && !endpoint.chars().any(char::is_whitespace)
 }
 
 // ---------------------------------------------------------------- errors
@@ -604,6 +767,16 @@ impl<'a> Driver<'a> {
                 VERIFY => self.settle(step.sequence, "abandoned")?,
                 // Reconciled by its own resumed delete below.
                 DELETE_APP => {}
+                // EPIC-005: an update or stop already reached an app this
+                // tenant owns; it cannot be rolled back, only resolved once
+                // its cloud operation is terminal.
+                UPDATE_APP | STOP_APP => match self.wait(step.arm_operation.as_deref()) {
+                    Outcome::Open => return Err(unknown()),
+                    Outcome::Succeeded => self.settle(step.sequence, "resolved")?,
+                    Outcome::Failed(code) => self.settle(step.sequence, &failure(&code))?,
+                },
+                // A read: nothing was proven eligible.
+                ELIGIBLE => self.settle(step.sequence, "abandoned")?,
                 _ => return Err(unknown()),
             }
         }
@@ -765,6 +938,26 @@ impl<'a> Driver<'a> {
                 "the tenant's sealed activation, receipt or route does not match the retirement",
             )
         };
+        let anchor = self.anchor(objects, mismatch)?;
+        if super::admin::receipt_digest(&anchor.receipt) != expected {
+            return Err(mismatch());
+        }
+        // Every app the tenant owns, the reader's included, is stopped.
+        Ok([anchor.operation_id, anchor.receipt.route_digest]
+            .into_iter()
+            .chain(anchor.apps.into_iter().map(|app| app.name))
+            .collect::<Vec<_>>()
+            .join(" "))
+    }
+
+    /// The tenant's latest sealed receipt: the slot's released operation
+    /// when it succeeded, or, after a cancelled retirement or reader change
+    /// (neither changed the route), exactly one hop back through its
+    /// verified plan to the receipt it verified. The published route must
+    /// be that receipt's. Also returns the apps the tenant owns: those the
+    /// anchor's own plan names plus the readers it created, or, for the
+    /// create, the apps it created. Anything else refuses `mismatch`.
+    fn anchor(&self, objects: &Objects, mismatch: fn() -> ApiError) -> Result<Anchor, ApiError> {
         let (snapshot, _) = objects.read()?;
         let Some(Slot::Released {
             operation_id,
@@ -779,47 +972,60 @@ impl<'a> Driver<'a> {
         if digest != *terminal_digest || terminal.tenant_id != self.intent.tenant_id {
             return Err(mismatch());
         }
-        // A cancelled retirement replaced the slot but never removed the
-        // route: follow its verified plan exactly one hop back to the
-        // activation it verified (a later plan names that activation again).
-        let (activation, terminal) = match &terminal.outcome {
+        let (anchor, terminal) = match &terminal.outcome {
             TerminalOutcome::Succeeded { .. } => (operation_id.clone(), terminal),
             TerminalOutcome::Cancelled => {
                 let journal = self.ops.journal(operation_id)?;
                 let mut words = plan(&journal).ok_or_else(mismatch)?.split(' ');
-                let activation = words.next().ok_or_else(mismatch)?.to_owned();
+                let anchor = words.next().ok_or_else(mismatch)?.to_owned();
                 let planned_route = words.next().ok_or_else(mismatch)?.to_owned();
-                let Some((terminal, _)) = self.ops.read_terminal(&activation)? else {
+                let Some((terminal, _)) = self.ops.read_terminal(&anchor)? else {
                     return Err(mismatch());
                 };
                 match &terminal.outcome {
                     TerminalOutcome::Succeeded { receipt }
-                        if receipt.operation_id == activation
+                        if receipt.operation_id == anchor
                             && receipt.route_digest == planned_route => {}
                     _ => return Err(mismatch()),
                 }
-                (activation, terminal)
+                (anchor, terminal)
             }
             TerminalOutcome::Retired => return Err(mismatch()),
         };
-        let TerminalOutcome::Succeeded { receipt } = &terminal.outcome else {
+        let TerminalOutcome::Succeeded { receipt } = terminal.outcome else {
             return Err(mismatch());
         };
-        let route = snapshot
-            .record_for(&self.intent.tenant_id)
-            .map(control_state::route_digest);
+        let route = snapshot.record_for(&self.intent.tenant_id).cloned();
         if terminal.tenant_id != self.intent.tenant_id
-            || super::admin::receipt_digest(receipt) != expected
-            || route.as_deref() != Some(receipt.route_digest.as_str())
+            || route.as_ref().map(control_state::route_digest).as_deref()
+                != Some(receipt.route_digest.as_str())
         {
             return Err(mismatch());
         }
-        let apps = apps(&self.ops.journal(&activation)?, CREATE_APP, &["created"]);
-        Ok(std::iter::once(activation)
-            .chain(std::iter::once(receipt.route_digest.clone()))
-            .chain(apps)
-            .collect::<Vec<_>>()
-            .join(" "))
+        let journal = self.ops.journal(&anchor)?;
+        let created = apps(&journal, CREATE_APP, &["created"]);
+        let mut owned: Vec<App> = match plan(&journal).and_then(ReaderPlan::parse) {
+            Some(plan) => plan
+                .apps
+                .into_iter()
+                .chain(created.into_iter().map(|name| App { name, reader: true }))
+                .collect(),
+            None => created
+                .into_iter()
+                .map(|name| App {
+                    name,
+                    reader: false,
+                })
+                .collect(),
+        };
+        let mut seen = std::collections::BTreeSet::new();
+        owned.retain(|app| seen.insert(app.name.clone()));
+        Ok(Anchor {
+            operation_id: anchor,
+            receipt,
+            route: route.ok_or_else(mismatch)?,
+            apps: owned,
+        })
     }
 
     /// ITEM-011: holds the target's lifecycle guard (no writer claim or
@@ -1004,6 +1210,520 @@ impl<'a> Driver<'a> {
     }
 }
 
+// ------------------------------------------------- EPIC-005 ITEM-012/013
+
+impl Driver<'_> {
+    /// ITEM-012/013: verifies a reader change against the tenant's latest
+    /// sealed receipt and plans it (the anchor, its route, the route this
+    /// change publishes, the endpoint and every app the tenant owns), then
+    /// reserves the slot. Reader routing, a moved endpoint and a route no
+    /// sealed lifecycle operation published are refused before any record.
+    pub(super) fn reserve_readers(
+        &self,
+        objects: &Objects,
+        endpoint: Option<&str>,
+        now: u64,
+    ) -> Result<(), ApiError> {
+        let Payload::SetReaders { fleet, .. } = &self.intent.payload else {
+            return Err(invalid("not a reader change"));
+        };
+        if self.ops.terminal(self.op())?.is_some() {
+            return Err(ended());
+        }
+        match (fleet, endpoint) {
+            (Fleet::Present { read_routing, .. }, _)
+                if *read_routing != control_state::ReadRouting::WriterOnly =>
+            {
+                return Err(routing_unqualified());
+            }
+            (Fleet::Present { .. }, Some(endpoint)) if endpoint_valid(endpoint) => {}
+            (Fleet::Absent {}, None) => {}
+            _ => {
+                return Err(invalid(
+                    "a reader fleet needs exactly one valid endpoint; removing it takes none",
+                ));
+            }
+        }
+        let action = Action {
+            resource: PLAN.to_owned(),
+            operation: VERIFY.to_owned(),
+            request_digest: self.intent.request_digest.clone(),
+            destructive: false,
+        };
+        if !matches!(
+            self.step(&action)?,
+            Some(Step {
+                outcome: StepOutcome::Settled { .. },
+                ..
+            })
+        ) {
+            let anchor = self.anchor(objects, || {
+                conflict(
+                    "readers_unanchored",
+                    "the tenant's route was not published by a sealed lifecycle operation",
+                )
+            })?;
+            if let (Some(endpoint), Some(current)) = (endpoint, anchor.route.reader.as_deref())
+                && endpoint != current
+            {
+                return Err(conflict(
+                    "reader_endpoint_changed",
+                    "the reader endpoint differs from the published one; remove the readers first",
+                ));
+            }
+            let mut target = anchor.route.clone();
+            target.reader = endpoint.map(str::to_owned);
+            let plan = [
+                anchor.operation_id,
+                anchor.receipt.route_digest,
+                format!("{TARGET}{}", control_state::route_digest(&target)),
+                format!("{ENDPOINT}{}", endpoint.unwrap_or(NO_ENDPOINT)),
+            ]
+            .into_iter()
+            .chain(anchor.apps.into_iter().map(|app| {
+                if app.reader {
+                    format!("{READER}{}", app.name)
+                } else {
+                    app.name
+                }
+            }))
+            .collect::<Vec<_>>()
+            .join(" ");
+            match self.ops.record(self.op(), &self.attempt, &action)? {
+                Decision::Dispatch(n) | Decision::Reconcile(n) => self.settle(n, &plan)?,
+                Decision::Settled(_) => {}
+            }
+        }
+        reserve(self.ops, objects, self.intent, now)
+    }
+
+    /// ITEM-012/013: applies the reserved reader change, then seals and
+    /// releases it. Present: creates (or, when the tenant already owns one,
+    /// updates in place) exactly one private reader app, proves the
+    /// observed fleet eligible, and only then publishes the endpoint with
+    /// the receipt. Absent: unpublishes the endpoint first (from here on the
+    /// change cannot be cancelled), proves every reader app stopped, then
+    /// publishes the receipt. Every proof is required on every call that
+    /// may need it: none is a default. A same-attempt executor that sealed
+    /// the change meanwhile returns its outcome.
+    pub(super) fn set_readers(
+        &self,
+        objects: &Objects,
+        profile: Option<&Preflighted>,
+        scope: Option<&PinScope>,
+        observed: Option<&FleetObservation>,
+        now: u64,
+    ) -> Result<Sealed, ApiError> {
+        match self.apply_readers(objects, profile, scope, observed, now) {
+            Ok(()) => self.ops.release(objects, self.intent, now),
+            Err(error) => match self.ops.terminal(self.op())? {
+                Some(_) => self.ops.release(objects, self.intent, now),
+                None => Err(error),
+            },
+        }
+    }
+
+    fn apply_readers(
+        &self,
+        objects: &Objects,
+        profile: Option<&Preflighted>,
+        scope: Option<&PinScope>,
+        observed: Option<&FleetObservation>,
+        now: u64,
+    ) -> Result<(), ApiError> {
+        let Payload::SetReaders { fleet, .. } = &self.intent.payload else {
+            return Err(invalid("not a reader change"));
+        };
+        if self.ops.terminal(self.op())?.is_some() {
+            return Ok(());
+        }
+        let (snapshot, _) = objects.read()?;
+        if matches!(
+            holds(&snapshot, self.intent),
+            Some(Slot::Reserved {
+                receipt: Some(_),
+                ..
+            })
+        ) {
+            return Ok(());
+        }
+        let journal = self.ops.journal(self.op())?;
+        let plan = plan(&journal).and_then(ReaderPlan::parse).ok_or_else(|| {
+            conflict(
+                "readers_unverified",
+                "the reader change was not verified and reserved; reserve it first",
+            )
+        })?;
+        let proof = sha256_hex(format!("readers\0{}\0{}", self.op(), plan.target).as_bytes());
+        let publish = |reader: Option<&str>, proof: Option<&str>| {
+            publish_readers(
+                self.ops,
+                objects,
+                self.intent,
+                &plan.planned,
+                &plan.target,
+                reader,
+                proof,
+                now,
+            )
+        };
+        match fleet {
+            Fleet::Present {
+                read_routing,
+                min_replicas,
+                max_replicas,
+                ..
+            } => {
+                if *read_routing != control_state::ReadRouting::WriterOnly {
+                    return Err(routing_unqualified());
+                }
+                if scope.is_none() {
+                    return Err(pin_scope_unproven());
+                }
+                let profile = profile.ok_or_else(|| {
+                    conflict(
+                        "profile_unsupported",
+                        "no supported, qualified reader profile was preflighted (OD-006)",
+                    )
+                })?;
+                let mut owned = profile
+                    .profile
+                    .resources
+                    .iter()
+                    .filter(|d| d.ownership == Ownership::Owned);
+                let reader = match (owned.next(), owned.next()) {
+                    (Some(reader), None) if reader.app => reader,
+                    _ => {
+                        return Err(ApiError::new(
+                            StatusCode::BAD_REQUEST,
+                            "reader_profile_invalid",
+                            "a reader profile owns exactly one app",
+                        ));
+                    }
+                };
+                let mismatch = || {
+                    conflict(
+                        "reader_app_mismatch",
+                        "the profile's reader app is not the tenant's reader app",
+                    )
+                };
+                if plan
+                    .apps
+                    .iter()
+                    .any(|app| !app.reader && app.name == reader.resource)
+                {
+                    return Err(mismatch());
+                }
+                self.holding(objects)?;
+                for desired in &profile.profile.resources {
+                    if desired.ownership == Ownership::Verified {
+                        self.verify(desired)?;
+                    }
+                }
+                let mut existing = plan.readers();
+                match existing.next() {
+                    Some(name) if name == reader.resource && existing.next().is_none() => {
+                        self.update(reader)?;
+                    }
+                    Some(_) => return Err(mismatch()),
+                    None => self.create(reader)?,
+                }
+                self.holding(objects)?;
+                self.eligible(
+                    objects,
+                    &reader.resource,
+                    &plan.target,
+                    (*min_replicas, *max_replicas),
+                    observed,
+                )?;
+                publish(plan.endpoint.as_deref(), Some(&proof))
+            }
+            Fleet::Absent {} => {
+                // An endpoint leaves the route before anything stops.
+                self.holding(objects)?;
+                publish(None, None)?;
+                for app in plan.readers() {
+                    self.removing(objects)?;
+                    self.destructive(app, STOP_APP, Verb::Stop, "stopped", |found| {
+                        found.is_none_or(|found| {
+                            matches!(&found.revisions, Revisions::Complete(revisions)
+                                if revisions.iter().all(|r| !r.active))
+                        })
+                    })?;
+                }
+                publish(None, Some(&proof))
+            }
+        }
+    }
+
+    /// The operation still holds its uncancelled reservation, no receipt.
+    fn holding(&self, objects: &Objects) -> Result<(), ApiError> {
+        let (snapshot, _) = objects.read()?;
+        match holds(&snapshot, self.intent) {
+            Some(Slot::Reserved {
+                cancellation_requested: false,
+                receipt: None,
+                ..
+            }) => Ok(()),
+            _ => Err(readers_not_held()),
+        }
+    }
+
+    /// A removal past its unpublish: the reservation is still held (a
+    /// cancel is refused once the route changed).
+    fn removing(&self, objects: &Objects) -> Result<(), ApiError> {
+        let (snapshot, _) = objects.read()?;
+        match holds(&snapshot, self.intent) {
+            Some(Slot::Reserved { receipt: None, .. }) => Ok(()),
+            _ => Err(readers_not_held()),
+        }
+    }
+
+    /// Updates the tenant's existing reader app in place: never one it does
+    /// not own, settled only from this dispatch's successful operation and
+    /// an exact readback.
+    fn update(&self, desired: &Desired) -> Result<(), ApiError> {
+        let action = self.action(&desired.resource, UPDATE_APP, &desired.config_digest, false);
+        let updated = |observed: &str| {
+            if observed == "updated" {
+                Ok(())
+            } else {
+                Err(failed())
+            }
+        };
+        match self.step(&action)? {
+            Some(Step {
+                outcome: StepOutcome::Settled { observed },
+                ..
+            }) => return updated(&observed),
+            Some(_) => {}
+            None => match self.read(&desired.resource)? {
+                None => {
+                    return Err(conflict(
+                        "reader_app_missing",
+                        "the tenant's reader app no longer exists",
+                    ));
+                }
+                Some(found) if found.owner.as_deref() != Some(self.owner().as_str()) => {
+                    return Err(ownership_conflict());
+                }
+                Some(_) => {}
+            },
+        }
+        let call = Call {
+            resource: desired.resource.clone(),
+            owner: self.owner(),
+            verb: Verb::Update {
+                config_digest: desired.config_digest.clone(),
+            },
+        };
+        let (sequence, outcome) = match self.dispatch(&action, call)? {
+            Dispatched::Settled => {
+                return match self.step(&action)?.map(|step| step.outcome) {
+                    Some(StepOutcome::Settled { observed }) => updated(&observed),
+                    _ => Err(unknown()),
+                };
+            }
+            Dispatched::Refused(sequence, code) => {
+                self.settle(sequence, &failure(&code))?;
+                return Err(failed());
+            }
+            Dispatched::Pending(sequence, outcome) => (sequence, outcome),
+        };
+        match outcome {
+            Outcome::Succeeded => match self.read(&desired.resource)? {
+                Some(found)
+                    if found.owner.as_deref() == Some(self.owner().as_str())
+                        && exact(desired, &found) =>
+                {
+                    self.settle(sequence, "updated")
+                }
+                _ => Err(unknown()),
+            },
+            Outcome::Failed(code) => {
+                self.settle(sequence, &failure(&code))?;
+                Err(failed())
+            }
+            Outcome::Open => Err(unknown()),
+        }
+    }
+
+    /// The observed fleet may serve the published route: the writer
+    /// authority serves a head (no base transition), at the route's lineage
+    /// and epoch; every replica is unique, serves exactly that head at the
+    /// route's lineage, binding and epoch within its staleness bound; and
+    /// their number is within the desired bounds (a scale-in is verified
+    /// only once the fleet is reduced). Journaled as a settled read.
+    fn eligible(
+        &self,
+        objects: &Objects,
+        app: &str,
+        target: &str,
+        (min, max): (u32, u32),
+        observed: Option<&FleetObservation>,
+    ) -> Result<(), ApiError> {
+        let action = self.action(&format!("fleet/{app}"), ELIGIBLE, target, false);
+        if let Some(Step {
+            outcome: StepOutcome::Settled { .. },
+            ..
+        }) = self.step(&action)?
+        {
+            return Ok(());
+        }
+        let observed = observed.ok_or_else(|| {
+            conflict(
+                "fleet_observation_unavailable",
+                "no observation of the reader fleet and writer authority is available",
+            )
+        })?;
+        let (snapshot, _) = objects.read()?;
+        let route = snapshot
+            .record_for(&self.intent.tenant_id)
+            .ok_or_else(state_invalid)?;
+        let authority = &observed.authority;
+        let head = match (authority.validate(), &authority.head) {
+            (Ok(()), Some(head)) if authority.phase == authority::Phase::Serving => head,
+            _ => {
+                return Err(conflict(
+                    "reader_base_transition",
+                    "the writer authority is not serving a verified head",
+                ));
+            }
+        };
+        let ineligible = || {
+            conflict(
+                "replica_ineligible",
+                "a reader replica is not bound to the writer's head, lineage, binding and epoch within its staleness bound",
+            )
+        };
+        if authority.lineage != format!("{:016x}", route.lineage)
+            || Some(authority.epoch) != route.epoch
+        {
+            return Err(ineligible());
+        }
+        let replicas = &observed.replicas;
+        let mut names = std::collections::BTreeSet::new();
+        if !replicas.iter().all(|r| names.insert(r.replica.as_str())) {
+            return Err(conflict(
+                "replica_identity_conflict",
+                "two observed replicas share an identity",
+            ));
+        }
+        if replicas.len() > max as usize {
+            return Err(conflict(
+                "reader_fleet_not_reduced",
+                "more replicas run than the desired maximum; the scale-in is not verified",
+            ));
+        }
+        if replicas.len() < min as usize {
+            return Err(conflict(
+                "reader_fleet_below_min",
+                "fewer eligible replicas run than the desired minimum",
+            ));
+        }
+        if replicas.iter().any(|r| {
+            r.set_id != head.set_id
+                || r.lineage != route.lineage
+                || r.binding_generation != route.binding_generation
+                || Some(r.epoch) != route.epoch
+                || r.failed
+                || r.bound_ms == 0
+                || r.age_ms > r.bound_ms
+        }) {
+            return Err(ineligible());
+        }
+        match self.ops.record(self.op(), &self.attempt, &action)? {
+            Decision::Dispatch(n) | Decision::Reconcile(n) => self.settle(n, "eligible"),
+            Decision::Settled(_) => Ok(()),
+        }
+    }
+
+    /// ITEM-013: control-owned recovery of the reader-apply pins of one
+    /// replica proven stopped: only its own operation pins created no later
+    /// than the stop, never an operator pin or another replica's. Each
+    /// release is journaled before it is made and is idempotent. Needs the
+    /// held reader reservation and the pin-scope proof (ITEM-008).
+    pub(super) fn recover_pins(
+        &self,
+        objects: &Objects,
+        sets: &Sets,
+        scope: Option<&PinScope>,
+        stopped: Option<&ReplicaStopped>,
+        now: u64,
+    ) -> Result<usize, ApiError> {
+        let (snapshot, _) = objects.read()?;
+        if self.intent.kind() != Kind::SetReaders
+            || !matches!(
+                holds(&snapshot, self.intent),
+                Some(Slot::Reserved { receipt: None, .. })
+            )
+        {
+            return Err(conflict(
+                "operation_not_reserved",
+                "pin recovery runs only within a held reader reservation",
+            ));
+        }
+        if scope.is_none() {
+            return Err(pin_scope_unproven());
+        }
+        let stopped = stopped.ok_or_else(|| {
+            conflict(
+                "replica_stop_unproven",
+                "no platform proof that the replica stopped",
+            )
+        })?;
+        let release = |resource: &str, sequence: u64| {
+            let mut parts = resource.splitn(3, '/').skip(1);
+            let (Some(set_id), Some(pin_id)) = (parts.next(), parts.next()) else {
+                return Err(state_invalid());
+            };
+            sets.release(set_id, pin_id, now)?;
+            self.settle(sequence, "released")
+        };
+        for step in self.ops.journal(self.op())?.steps {
+            if step.action.operation == RELEASE_PIN && step.outcome == (StepOutcome::Uncertain {}) {
+                release(&step.action.resource, step.sequence)?;
+            }
+        }
+        let reason = crate::server::reader_apply::pin_reason(&stopped.replica);
+        let mut released = 0;
+        for record in sets.list()?.sets.into_iter().filter_map(|s| s.record) {
+            for pin in &record.pins {
+                if pin.reason != reason
+                    || pin.kind != PinKind::Operation
+                    || pin.created_unix_ms > stopped.stopped_unix_ms
+                {
+                    continue;
+                }
+                let resource = format!("pin/{}/{}", record.set_id, pin.id);
+                let action = self.action(&resource, RELEASE_PIN, &stopped.replica, true);
+                match self.ops.record(self.op(), &self.attempt, &action)? {
+                    Decision::Dispatch(n) | Decision::Reconcile(n) => {
+                        release(&resource, n)?;
+                        released += 1;
+                    }
+                    Decision::Settled(_) => {}
+                }
+            }
+        }
+        Ok(released)
+    }
+}
+
+fn routing_unqualified() -> ApiError {
+    conflict(
+        "reader_routing_unqualified",
+        "routing reads to readers is not qualified; the route stays writer-only",
+    )
+}
+
+fn readers_not_held() -> ApiError {
+    conflict(
+        "operation_not_provisionable",
+        "the operation does not hold its uncancelled reader reservation",
+    )
+}
+
 fn operation_cancelled() -> ApiError {
     conflict(
         "operation_cancelled",
@@ -1085,11 +1805,44 @@ fn plan(journal: &Journal) -> Option<&str> {
 }
 
 /// Called by the sealing journal CAS: a cancelled operation ends only once
-/// every app it created is deleted, and a retirement only once every
-/// planned app is proven stopped (or absent).
-pub(super) fn terminal_ready(journal: &Journal, outcome: &TerminalOutcome) -> Result<(), ApiError> {
+/// every app it created is deleted, a retirement only once every planned
+/// app is proven stopped (or absent), and a reader change (EPIC-005) only
+/// once its reader app is created or updated and its fleet proven eligible,
+/// or, for a removal, every reader app is proven stopped (or absent).
+pub(super) fn terminal_ready(
+    journal: &Journal,
+    payload: &Payload,
+    outcome: &TerminalOutcome,
+) -> Result<(), ApiError> {
     match outcome {
-        TerminalOutcome::Succeeded { .. } => Ok(()),
+        TerminalOutcome::Succeeded { .. } => {
+            let Payload::SetReaders { fleet, .. } = payload else {
+                return Ok(());
+            };
+            let ready = match fleet {
+                Fleet::Present { .. } => {
+                    (!apps(journal, CREATE_APP, &["created"]).is_empty()
+                        || !apps(journal, UPDATE_APP, &["updated"]).is_empty())
+                        && !apps(journal, ELIGIBLE, &["eligible"]).is_empty()
+                }
+                Fleet::Absent {} => {
+                    let stopped = apps(journal, STOP_APP, &["stopped", "absent"]);
+                    plan(journal)
+                        .and_then(ReaderPlan::parse)
+                        .is_some_and(|plan| {
+                            plan.readers().all(|app| stopped.iter().any(|s| s == app))
+                        })
+                }
+            };
+            if ready {
+                Ok(())
+            } else {
+                Err(conflict(
+                    "readers_incomplete",
+                    "the reader app is not proven updated and eligible, or a removed reader app is not proven stopped",
+                ))
+            }
+        }
         TerminalOutcome::Cancelled => {
             let deleted = apps(journal, DELETE_APP, &["deleted", "absent"]);
             let held = journal

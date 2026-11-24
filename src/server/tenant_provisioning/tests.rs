@@ -1353,6 +1353,20 @@ mod epic_004 {
                     };
                     resources.insert(call.resource.clone(), found);
                 }
+                // EPIC-005: an in-place update rolls a new active revision.
+                Verb::Update { config_digest } => {
+                    if let Some(found) = resources.get_mut(&call.resource)
+                        && let Revisions::Complete(revisions) = &mut found.revisions
+                    {
+                        revisions.iter_mut().for_each(|r| r.active = false);
+                        revisions.push(Revision {
+                            name: format!("r{}", revisions.len()),
+                            active: true,
+                            config_digest: config_digest.clone(),
+                        });
+                        found.config_digest = config_digest.clone();
+                    }
+                }
                 Verb::Delete => {
                     resources.remove(&call.resource);
                 }
@@ -2011,7 +2025,7 @@ mod epic_004 {
         d.reserve_retirement(&w.objects, NOW).unwrap();
         let journal = w.ops.journal(&intent.operation_id).unwrap();
         assert_eq!(
-            aca::terminal_ready(&journal, &TerminalOutcome::Retired)
+            aca::terminal_ready(&journal, &intent.payload, &TerminalOutcome::Retired)
                 .unwrap_err()
                 .code,
             "retirement_incomplete"
@@ -3312,6 +3326,700 @@ mod epic_004 {
                 (held.operation_id.as_str(), held.state),
                 (intent.operation_id.as_str(), guard::State::Held)
             );
+        }
+    }
+
+    // ----------------------------------------------------------- EPIC-005
+
+    mod epic_005 {
+        //! design-tenant-provisioning EPIC-005 (ITEM-012/013) over the same
+        //! scripted ARM port, local fixtures and test-only proofs.
+        use super::*;
+        use crate::server::authority::{Phase, Record as Authority};
+        use crate::server::cloud_backup::{MAX_PINS, PinKind};
+        use crate::server::control_state::ReadRouting;
+        use aca::{FleetObservation, PinScope, ReplicaStatus, ReplicaStopped};
+
+        const READER: &str =
+            "/subscriptions/s/resourceGroups/g/providers/Microsoft.App/containerApps/r1";
+        const ENDPOINT: &str = "https://reader-t.internal";
+        const RPROFILE: &[u8] = br#"{"reader":"profile"}"#;
+        const RULE: &[u8] = br#"{"scale":"rule"}"#;
+        const HEAD: &str = "20260101T000000Z-0123456789abcdef";
+        const BASE: &str = "20251231T000000Z-fedcba9876543210";
+
+        fn present(min_replicas: u32, max_replicas: u32) -> Fleet {
+            Fleet::Present {
+                min_replicas,
+                max_replicas,
+                reader_profile: sha(RPROFILE),
+                scaling_rule: sha(RULE),
+                read_routing: ReadRouting::WriterOnly,
+            }
+        }
+
+        fn readers_for(w: &World, tenant: &str, key: &str, fleet: Fleet) -> Intent {
+            let contents = match fleet {
+                Fleet::Present { .. } => vec![RPROFILE.to_vec(), RULE.to_vec()],
+                Fleet::Absent {} => Vec::new(),
+            };
+            let payload = Payload::SetReaders {
+                tenant_id: tenant.into(),
+                fleet,
+            };
+            w.ops
+                .accept(ADMIN, key, &payload, &contents, NOW)
+                .unwrap()
+                .intent
+        }
+
+        fn readers(w: &World, key: &str, fleet: Fleet) -> Intent {
+            readers_for(w, T, key, fleet)
+        }
+
+        fn reader_app(config: &str) -> Preflighted {
+            ready(vec![Desired {
+                resource: READER.into(),
+                config_digest: sha(config.as_bytes()),
+                app: true,
+                ownership: Ownership::Owned,
+            }])
+        }
+
+        fn authority(head: &str, epoch: u64) -> Authority {
+            Authority {
+                schema: "vlite.writer-authority/1".into(),
+                installation_id: "install".into(),
+                scope_id: "scope".into(),
+                lineage: format!("{:016x}", 0x1234u64),
+                writer_id: Some("a".repeat(32)),
+                epoch,
+                revision: "b".repeat(32),
+                phase: Phase::Serving,
+                base: None,
+                head: Some(HeadRef {
+                    epoch,
+                    set_id: head.into(),
+                    manifest_sha256: "c".repeat(64),
+                    index_sha256: None,
+                    sequence: 1,
+                    chain_sha256: "d".repeat(64),
+                }),
+                claimed_unix_ms: Some(NOW),
+            }
+        }
+
+        fn replica(name: &str) -> ReplicaStatus {
+            ReplicaStatus {
+                replica: name.into(),
+                set_id: HEAD.into(),
+                lineage: 0x1234,
+                binding_generation: 3,
+                epoch: 1,
+                age_ms: 100,
+                bound_ms: 1_000,
+                failed: false,
+            }
+        }
+
+        fn fleet(replicas: usize) -> FleetObservation {
+            FleetObservation::for_test(
+                authority(HEAD, 1),
+                (0..replicas)
+                    .map(|i| replica(&format!("replica-{i}")))
+                    .collect(),
+            )
+        }
+
+        fn route(w: &World) -> Route {
+            w.snapshot().record_for(T).unwrap().clone()
+        }
+
+        fn digest(w: &World) -> String {
+            crate::server::control_state::route_digest(&route(w))
+        }
+
+        fn held_receipt(w: &World) -> bool {
+            matches!(
+                w.snapshot().lifecycle(T).map(|e| &e.slot),
+                Some(Slot::Reserved {
+                    receipt: Some(_),
+                    ..
+                })
+            )
+        }
+
+        fn receipt_of(sealed: &Sealed) -> String {
+            match sealed.outcome() {
+                TerminalOutcome::Succeeded { receipt } => admin::receipt_digest(receipt),
+                other => panic!("not succeeded: {other:?}"),
+            }
+        }
+
+        fn add(
+            w: &World,
+            arm: &MockArm,
+            intent: &Intent,
+            config: &str,
+            observed: &FleetObservation,
+        ) -> Result<Sealed, ApiError> {
+            let d = driver(w, arm, intent);
+            d.reserve_readers(&w.objects, Some(ENDPOINT), NOW)?;
+            d.set_readers(
+                &w.objects,
+                Some(&reader_app(config)),
+                Some(&PinScope::for_test()),
+                Some(observed),
+                NOW,
+            )
+        }
+
+        /// The writer activated (EPIC-004), then a first reader fleet
+        /// (1..=2) added: the activation's and the readers' receipts.
+        fn with_reader(w: &World, arm: &MockArm) -> (String, String) {
+            let (_, activation) = activated(w, arm);
+            let intent = readers(w, "readers-1", present(1, 2));
+            let sealed = add(w, arm, &intent, "v1", &fleet(1)).unwrap();
+            (activation, receipt_of(&sealed))
+        }
+
+        /// The route keeps the writer's identity and stays writer-only.
+        fn assert_writer_unchanged(w: &World, reader: Option<&str>) {
+            let route = route(w);
+            let writer = writer_route(T);
+            assert_eq!(
+                (
+                    &route.writer,
+                    route.lineage,
+                    route.epoch,
+                    route.binding_generation
+                ),
+                (
+                    &writer.writer,
+                    writer.lineage,
+                    writer.epoch,
+                    writer.binding_generation
+                )
+            );
+            assert_eq!(route.reader.as_deref(), reader);
+            assert_eq!(route.read_routing, ReadRouting::WriterOnly);
+        }
+
+        fn writer_calls(arm: &MockArm) -> usize {
+            arm.calls().iter().filter(|c| c.resource == APP1).count()
+        }
+
+        // ----------------------------------------------------- ITEM-012
+
+        #[test]
+        fn a_first_reader_is_created_privately_and_its_endpoint_published_writer_only() {
+            let w = world();
+            let arm = MockArm::default();
+            let (_, activation) = activated(&w, &arm);
+            let before = digest(&w);
+            let intent = readers(&w, "readers-1", present(1, 2));
+            let sealed = add(&w, &arm, &intent, "v1", &fleet(2)).unwrap();
+            assert_ne!(receipt_of(&sealed), activation);
+            assert_writer_unchanged(&w, Some(ENDPOINT));
+            assert_ne!(digest(&w), before);
+            // Only the reader app was created; the writer app is untouched.
+            assert_eq!(writer_calls(&arm), 1);
+            let reader_puts: Vec<_> = arm
+                .calls()
+                .into_iter()
+                .filter(|c| c.resource == READER)
+                .collect();
+            assert_eq!(reader_puts.len(), 1);
+            assert!(matches!(reader_puts[0].verb, Verb::Put { .. }));
+            assert!(steps(&w, &intent).contains(&(
+                format!("fleet/{READER}"),
+                "eligible".into(),
+                settled("eligible")
+            )));
+            assert!(matches!(
+                w.snapshot().lifecycle(T).map(|e| &e.slot),
+                Some(Slot::Released { .. })
+            ));
+            // A retry returns the same sealed outcome with no new effect.
+            let calls = arm.calls().len();
+            let again = add(&w, &arm, &intent, "v1", &fleet(2)).unwrap_err();
+            assert_eq!(again.code, "operation_terminal");
+            assert_eq!(arm.calls().len(), calls);
+        }
+
+        #[test]
+        fn a_same_endpoint_scale_updates_the_reader_in_place_and_keeps_the_route() {
+            let w = world();
+            let arm = MockArm::default();
+            let (_, first) = with_reader(&w, &arm);
+            let before = digest(&w);
+            let intent = readers(&w, "readers-2", present(2, 4));
+            let sealed = add(&w, &arm, &intent, "v2", &fleet(3)).unwrap();
+            assert_ne!(receipt_of(&sealed), first);
+            assert_eq!(digest(&w), before);
+            assert_writer_unchanged(&w, Some(ENDPOINT));
+            let update = Verb::Update {
+                config_digest: sha(b"v2"),
+            };
+            assert_eq!(arm.count(&update), 1);
+            assert_eq!(
+                arm.calls()
+                    .iter()
+                    .filter(|c| matches!(c.verb, Verb::Put { .. }))
+                    .count(),
+                2,
+                "the writer and the first reader only"
+            );
+            assert_eq!(arm.get(READER).unwrap().config_digest, sha(b"v2"));
+            assert_eq!(writer_calls(&arm), 1);
+        }
+
+        #[test]
+        fn reader_routing_and_endpoint_changes_are_refused_before_any_effect() {
+            let w = world();
+            let arm = MockArm::default();
+            with_reader(&w, &arm);
+            let calls = arm.calls().len();
+            let routed = readers(
+                &w,
+                "routed",
+                Fleet::Present {
+                    min_replicas: 1,
+                    max_replicas: 2,
+                    reader_profile: sha(RPROFILE),
+                    scaling_rule: sha(RULE),
+                    read_routing: ReadRouting::Readers,
+                },
+            );
+            let refused = driver(&w, &arm, &routed)
+                .reserve_readers(&w.objects, Some(ENDPOINT), NOW)
+                .unwrap_err();
+            assert_eq!(refused.code, "reader_routing_unqualified");
+            let moved = readers(&w, "moved", present(1, 2));
+            let refused = driver(&w, &arm, &moved)
+                .reserve_readers(&w.objects, Some("https://elsewhere.internal"), NOW)
+                .unwrap_err();
+            assert_eq!(refused.code, "reader_endpoint_changed");
+            let unnamed = readers(&w, "unnamed", present(1, 2));
+            assert!(
+                driver(&w, &arm, &unnamed)
+                    .reserve_readers(&w.objects, None, NOW)
+                    .is_err()
+            );
+            let absent = readers(&w, "absent", Fleet::Absent {});
+            assert!(
+                driver(&w, &arm, &absent)
+                    .reserve_readers(&w.objects, Some(ENDPOINT), NOW)
+                    .is_err()
+            );
+            assert_eq!(arm.calls().len(), calls);
+            assert!(matches!(
+                w.snapshot().lifecycle(T).map(|e| &e.slot),
+                Some(Slot::Released { .. })
+            ));
+        }
+
+        #[test]
+        fn a_route_not_published_by_a_sealed_lifecycle_operation_is_unanchored() {
+            let w = world();
+            let intent = readers_for(&w, OTHER, "other", present(1, 2));
+            let arm = MockArm::default();
+            let refused = driver(&w, &arm, &intent)
+                .reserve_readers(&w.objects, Some(ENDPOINT), NOW)
+                .unwrap_err();
+            assert_eq!(refused.code, "readers_unanchored");
+            assert!(w.snapshot().lifecycle(OTHER).is_none());
+        }
+
+        #[test]
+        fn missing_pin_scope_profile_or_observation_is_refused_and_never_published() {
+            let w = world();
+            let arm = MockArm::default();
+            activated(&w, &arm);
+            let before = digest(&w);
+            let calls = arm.calls().len();
+            let intent = readers(&w, "readers-1", present(1, 2));
+            let d = driver(&w, &arm, &intent);
+            d.reserve_readers(&w.objects, Some(ENDPOINT), NOW).unwrap();
+            let profile = reader_app("v1");
+            let scope = PinScope::for_test();
+            let observed = fleet(1);
+            let refused = d
+                .set_readers(&w.objects, Some(&profile), None, Some(&observed), NOW)
+                .unwrap_err();
+            assert_eq!(refused.code, "pin_scope_unproven");
+            assert_eq!(refused.status, axum::http::StatusCode::CONFLICT);
+            assert_eq!(arm.calls().len(), calls, "no ARM call without pin scope");
+            let refused = d
+                .set_readers(&w.objects, None, Some(&scope), Some(&observed), NOW)
+                .unwrap_err();
+            assert_eq!(refused.code, "profile_unsupported");
+            assert_eq!(arm.calls().len(), calls);
+            let refused = d
+                .set_readers(&w.objects, Some(&profile), Some(&scope), None, NOW)
+                .unwrap_err();
+            assert_eq!(refused.code, "fleet_observation_unavailable");
+            assert_eq!(digest(&w), before);
+            assert!(!held_receipt(&w));
+            // The created reader stays this operation's; a later proof finishes.
+            d.set_readers(
+                &w.objects,
+                Some(&profile),
+                Some(&scope),
+                Some(&observed),
+                NOW,
+            )
+            .unwrap();
+            assert_writer_unchanged(&w, Some(ENDPOINT));
+        }
+
+        #[test]
+        fn ineligible_fleets_never_publish_the_endpoint_or_a_receipt() {
+            let w = world();
+            let arm = MockArm::default();
+            activated(&w, &arm);
+            let before = digest(&w);
+            let intent = readers(&w, "readers-1", present(1, 2));
+            let d = driver(&w, &arm, &intent);
+            d.reserve_readers(&w.objects, Some(ENDPOINT), NOW).unwrap();
+            let (profile, scope) = (reader_app("v1"), PinScope::for_test());
+            let with = |edit: &dyn Fn(&mut ReplicaStatus)| {
+                let mut one = replica("replica-0");
+                edit(&mut one);
+                FleetObservation::for_test(authority(HEAD, 1), vec![one])
+            };
+            let mut recovering = authority(HEAD, 1);
+            recovering.phase = Phase::Recovering;
+            recovering.head = None;
+            let cases = [
+                (
+                    FleetObservation::for_test(recovering, vec![replica("replica-0")]),
+                    "reader_base_transition",
+                ),
+                (
+                    FleetObservation::for_test(authority(HEAD, 2), vec![replica("replica-0")]),
+                    "replica_ineligible",
+                ),
+                // A replica still on a frozen base / replaced head.
+                (with(&|r| r.set_id = BASE.into()), "replica_ineligible"),
+                (with(&|r| r.lineage = 0x99), "replica_ineligible"),
+                (with(&|r| r.binding_generation = 4), "replica_ineligible"),
+                (with(&|r| r.epoch = 2), "replica_ineligible"),
+                (with(&|r| r.age_ms = 1_001), "replica_ineligible"),
+                (with(&|r| r.bound_ms = 0), "replica_ineligible"),
+                (with(&|r| r.failed = true), "replica_ineligible"),
+                (
+                    FleetObservation::for_test(
+                        authority(HEAD, 1),
+                        vec![replica("replica-0"), replica("replica-0")],
+                    ),
+                    "replica_identity_conflict",
+                ),
+                (fleet(0), "reader_fleet_below_min"),
+                (fleet(3), "reader_fleet_not_reduced"),
+            ];
+            for (observed, code) in cases {
+                let refused = d
+                    .set_readers(
+                        &w.objects,
+                        Some(&profile),
+                        Some(&scope),
+                        Some(&observed),
+                        NOW,
+                    )
+                    .unwrap_err();
+                assert_eq!(refused.code, code);
+                assert_eq!(digest(&w), before, "{code}");
+                assert!(!held_receipt(&w), "{code}");
+            }
+            d.set_readers(
+                &w.objects,
+                Some(&profile),
+                Some(&scope),
+                Some(&fleet(2)),
+                NOW,
+            )
+            .unwrap();
+            assert_writer_unchanged(&w, Some(ENDPOINT));
+        }
+
+        // ----------------------------------------------------- ITEM-013
+
+        #[test]
+        fn a_scale_in_stays_writer_only_until_the_reduced_fleet_is_verified() {
+            let w = world();
+            let arm = MockArm::default();
+            with_reader(&w, &arm);
+            let intent = readers(&w, "readers-2", present(1, 1));
+            let refused = add(&w, &arm, &intent, "v1", &fleet(2)).unwrap_err();
+            assert_eq!(refused.code, "reader_fleet_not_reduced");
+            assert_writer_unchanged(&w, Some(ENDPOINT));
+            assert!(!held_receipt(&w));
+            add(&w, &arm, &intent, "v1", &fleet(1)).unwrap();
+            assert_writer_unchanged(&w, Some(ENDPOINT));
+        }
+
+        #[test]
+        fn removing_readers_unpublishes_the_endpoint_before_stopping_and_cannot_be_cancelled() {
+            let w = world();
+            let arm = MockArm::default();
+            with_reader(&w, &arm);
+            let intent = readers(&w, "readers-off", Fleet::Absent {});
+            let d = driver(&w, &arm, &intent);
+            d.reserve_readers(&w.objects, None, NOW).unwrap();
+            arm.script(Begin::ApplyRunning("arm-op-stop"));
+            arm.polls(running(3));
+            let refused = d
+                .set_readers(&w.objects, None, None, None, NOW)
+                .unwrap_err();
+            assert_eq!(refused.code, "cloud_outcome_unknown");
+            // The endpoint left the route before the stop was dispatched.
+            assert_writer_unchanged(&w, None);
+            assert!(!held_receipt(&w));
+            assert_eq!(
+                request_cancel(&w.objects, &intent, NOW).unwrap_err().code,
+                "readers_in_progress"
+            );
+            assert_eq!(
+                w.ops.release(&w.objects, &intent, NOW).unwrap_err().code,
+                "operation_not_terminal"
+            );
+            let sealed = d.set_readers(&w.objects, None, None, None, NOW).unwrap();
+            receipt_of(&sealed);
+            assert_writer_unchanged(&w, None);
+            assert_eq!(arm.count(&Verb::Stop), 1);
+            assert_eq!(writer_calls(&arm), 1, "the writer is never stopped");
+            assert!(matches!(
+                arm.get(READER).unwrap().revisions,
+                Revisions::Complete(r) if r.iter().all(|r| !r.active)
+            ));
+        }
+
+        #[test]
+        fn a_cancelled_reader_add_deletes_only_its_reader_and_the_next_one_anchors() {
+            let w = world();
+            let arm = MockArm::default();
+            activated(&w, &arm);
+            let before = digest(&w);
+            let intent = readers(&w, "readers-1", present(1, 2));
+            let d = driver(&w, &arm, &intent);
+            d.reserve_readers(&w.objects, Some(ENDPOINT), NOW).unwrap();
+            let (profile, scope) = (reader_app("v1"), PinScope::for_test());
+            d.set_readers(&w.objects, Some(&profile), Some(&scope), None, NOW)
+                .unwrap_err();
+            request_cancel(&w.objects, &intent, NOW).unwrap();
+            let guards = Guards::new(w.memory.clone(), TARGET);
+            d.cleanup(&w.objects, &guards).unwrap();
+            let sealed = w.ops.release(&w.objects, &intent, NOW).unwrap();
+            assert_eq!(sealed.outcome(), &TerminalOutcome::Cancelled);
+            assert!(arm.get(READER).is_none());
+            assert_eq!(digest(&w), before);
+            assert_eq!(writer_calls(&arm), 1);
+            let next = readers(&w, "readers-2", present(1, 2));
+            add(&w, &arm, &next, "v1", &fleet(1)).unwrap();
+            assert_writer_unchanged(&w, Some(ENDPOINT));
+        }
+
+        fn retire_with(w: &World, key: &str, expected: &str) -> Intent {
+            w.ops
+                .accept(
+                    ADMIN,
+                    key,
+                    &Payload::Retire {
+                        tenant_id: T.into(),
+                        expected_receipt: expected.into(),
+                        reason: "offboarded".into(),
+                        data_disposition: DataDisposition::Retain,
+                    },
+                    &[],
+                    NOW,
+                )
+                .unwrap()
+                .intent
+        }
+
+        #[test]
+        fn retirement_after_readers_names_the_latest_receipt_and_stops_both_apps() {
+            let w = world();
+            let arm = MockArm::default();
+            let (activation, latest) = with_reader(&w, &arm);
+            let stale = retire_with(&w, "retire-stale", &activation);
+            assert_eq!(
+                driver(&w, &arm, &stale)
+                    .reserve_retirement(&w.objects, NOW)
+                    .unwrap_err()
+                    .code,
+                "retirement_receipt_mismatch"
+            );
+            let intent = retire_with(&w, "retire-t", &latest);
+            let d = driver(&w, &arm, &intent);
+            d.reserve_retirement(&w.objects, NOW).unwrap();
+            let guards = Guards::new(w.memory.clone(), TARGET);
+            let sealed = d.retire(&w.objects, &guards, NOW).unwrap();
+            assert_eq!(sealed.outcome(), &TerminalOutcome::Retired);
+            assert_eq!(arm.count(&Verb::Stop), 2);
+            for app in [APP1, READER] {
+                assert!(matches!(
+                    arm.get(app).unwrap().revisions,
+                    Revisions::Complete(r) if r.iter().all(|r| !r.active)
+                ));
+            }
+        }
+
+        #[test]
+        fn an_overlapping_same_attempt_removal_stops_the_reader_once() {
+            let w = Arc::new(world());
+            let arm = Arc::new(MockArm::default());
+            with_reader(&w, &arm);
+            let intent = readers(&w, "readers-off", Fleet::Absent {});
+            driver(&w, &arm, &intent)
+                .reserve_readers(&w.objects, None, NOW)
+                .unwrap();
+            let (bw, barm, bintent) = (w.clone(), arm.clone(), intent.clone());
+            arm.on_read(move || {
+                let sealed = driver(&bw, &barm, &bintent)
+                    .set_readers(&bw.objects, None, None, None, NOW)
+                    .unwrap();
+                receipt_of(&sealed);
+            });
+            let sealed = driver(&w, &arm, &intent)
+                .set_readers(&w.objects, None, None, None, NOW)
+                .unwrap();
+            receipt_of(&sealed);
+            assert_eq!(arm.count(&Verb::Stop), 1);
+            assert_writer_unchanged(&w, None);
+        }
+
+        // ------------------------------------------- abandoned reader pins
+
+        #[test]
+        fn abandoned_pins_are_released_only_for_the_proven_stopped_replica() {
+            let env = crate::server::cloud_recovery::tests::setup();
+            let w = world();
+            let arm = MockArm::default();
+            with_reader(&w, &arm);
+            let intent = readers(&w, "readers-off", Fleet::Absent {});
+            let d = driver(&w, &arm, &intent);
+            d.reserve_readers(&w.objects, None, NOW).unwrap();
+            let pin = |reason: &str, kind, at| env.sets.pin(&env.set_id, reason, kind, at).unwrap();
+            let gone = pin("reader-apply:replica-0", PinKind::Operation, NOW - 10);
+            let newer = pin("reader-apply:replica-0", PinKind::Operation, NOW + 10);
+            let other = pin("reader-apply:replica-1", PinKind::Operation, NOW - 10);
+            let operator = pin("reader-apply:replica-0", PinKind::Operator, NOW - 10);
+            let scope = PinScope::for_test();
+            let stopped = ReplicaStopped::for_test("replica-0", NOW);
+            assert_eq!(
+                d.recover_pins(&w.objects, &env.sets, None, Some(&stopped), NOW)
+                    .unwrap_err()
+                    .code,
+                "pin_scope_unproven"
+            );
+            assert_eq!(
+                d.recover_pins(&w.objects, &env.sets, Some(&scope), None, NOW)
+                    .unwrap_err()
+                    .code,
+                "replica_stop_unproven"
+            );
+            assert_eq!(
+                d.recover_pins(&w.objects, &env.sets, Some(&scope), Some(&stopped), NOW)
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                d.recover_pins(&w.objects, &env.sets, Some(&scope), Some(&stopped), NOW)
+                    .unwrap(),
+                0
+            );
+            let left: Vec<String> = env
+                .sets
+                .list()
+                .unwrap()
+                .sets
+                .into_iter()
+                .filter_map(|s| s.record)
+                .flat_map(|r| r.pins)
+                .map(|p| p.id)
+                .collect();
+            assert!(!left.contains(&gone.id));
+            for kept in [newer, other, operator] {
+                assert!(left.contains(&kept.id));
+            }
+        }
+
+        #[test]
+        fn full_reader_pins_are_freed_by_control_owned_recovery() {
+            let env = crate::server::cloud_recovery::tests::setup();
+            let w = world();
+            let arm = MockArm::default();
+            with_reader(&w, &arm);
+            let intent = readers(&w, "readers-2", present(1, 2));
+            let d = driver(&w, &arm, &intent);
+            d.reserve_readers(&w.objects, Some(ENDPOINT), NOW).unwrap();
+            let held = env.sets.list().unwrap().sets[0]
+                .record
+                .as_ref()
+                .unwrap()
+                .pins
+                .len();
+            for _ in held..MAX_PINS {
+                env.sets
+                    .pin(
+                        &env.set_id,
+                        "reader-apply:replica-0",
+                        PinKind::Operation,
+                        NOW - 1,
+                    )
+                    .unwrap();
+            }
+            assert_eq!(
+                env.sets
+                    .pin(
+                        &env.set_id,
+                        "reader-apply:replica-1",
+                        PinKind::Operation,
+                        NOW
+                    )
+                    .unwrap_err()
+                    .code,
+                "cloud_pins_full"
+            );
+            let freed = d
+                .recover_pins(
+                    &w.objects,
+                    &env.sets,
+                    Some(&PinScope::for_test()),
+                    Some(&ReplicaStopped::for_test("replica-0", NOW)),
+                    NOW,
+                )
+                .unwrap();
+            assert_eq!(freed, MAX_PINS - held);
+            env.sets
+                .pin(
+                    &env.set_id,
+                    "reader-apply:replica-1",
+                    PinKind::Operation,
+                    NOW,
+                )
+                .unwrap();
+        }
+
+        #[test]
+        fn pin_recovery_needs_a_held_reader_reservation() {
+            let env = crate::server::cloud_recovery::tests::setup();
+            let w = world();
+            let arm = MockArm::default();
+            with_reader(&w, &arm);
+            let intent = readers(&w, "readers-2", present(1, 2));
+            let refused = driver(&w, &arm, &intent)
+                .recover_pins(
+                    &w.objects,
+                    &env.sets,
+                    Some(&PinScope::for_test()),
+                    Some(&ReplicaStopped::for_test("replica-0", NOW)),
+                    NOW,
+                )
+                .unwrap_err();
+            assert_eq!(refused.code, "operation_not_reserved");
         }
     }
 }

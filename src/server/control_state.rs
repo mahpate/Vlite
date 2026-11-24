@@ -902,6 +902,15 @@ impl Snapshot {
                     "the retirement already removed the route; resume it to finish",
                 ));
             }
+            // design-tenant-provisioning EPIC-005: once a reader change
+            // republished the route (a removal unpublished the endpoint
+            // before stopping the reader), it can only finish.
+            if *kind == OperationKind::SetReaders && route != *expected_route {
+                return Err(lifecycle_error(
+                    "readers_in_progress",
+                    "the reader change already republished the route; resume it to finish",
+                ));
+            }
             *cancellation_requested = true;
         }
         Ok(next)
@@ -1009,6 +1018,90 @@ impl Snapshot {
         next.directory.push(route.clone());
         if let Slot::Reserved { receipt: slot, .. } = &mut next.lifecycle[index].slot {
             *slot = Some(receipt);
+        }
+        Ok(next)
+    }
+
+    /// design-tenant-provisioning EPIC-005 ITEM-012/013: a `set_readers`
+    /// reservation republishes its dedicated, writer-only route with the
+    /// reader endpoint `reader` (None: no reader). Only the reader changes:
+    /// writer, lineage, epoch, binding and audience stay, and the route
+    /// stays writer-only (reader routing is never published here). The
+    /// current route must be the reserved one (`planned`) or already the
+    /// result (`target`), the digest the operation verified. With
+    /// `proof_digest` the receipt is published in the same generation.
+    /// Refused after a cancellation request.
+    pub(super) fn readers_route(
+        &self,
+        tenant: &str,
+        operation_id: &str,
+        planned: &str,
+        target: &str,
+        reader: Option<&str>,
+        proof_digest: Option<&str>,
+    ) -> Result<Self, ApiError> {
+        let index = self.slot_index(tenant, operation_id)?;
+        let Slot::Reserved {
+            kind,
+            request_digest,
+            expected_route,
+            cancellation_requested,
+            receipt,
+            ..
+        } = &self.lifecycle[index].slot
+        else {
+            unreachable!("slot_index returns reserved slots");
+        };
+        if *cancellation_requested {
+            return Err(lifecycle_error(
+                "operation_cancelled",
+                "cancellation was requested before the reader change was published",
+            ));
+        }
+        let unavailable = || {
+            lifecycle_error(
+                "lifecycle_transition_unavailable",
+                "the route or slot does not allow this reader change",
+            )
+        };
+        let Some(current) = self.record_for(tenant) else {
+            return Err(unavailable());
+        };
+        let digest = route_digest(current);
+        if *kind != OperationKind::SetReaders
+            || receipt.is_some()
+            || expected_route.as_deref() != Some(planned)
+            || (digest != planned && digest != target)
+            || current.kind != Kind::Dedicated
+            || current.authority_mode.is_some()
+            || !current.epoch.is_some_and(|epoch| epoch > 0)
+            || current.read_routing != ReadRouting::WriterOnly
+            || proof_digest.is_some_and(|proof| !hex_id(proof, 64))
+        {
+            return Err(unavailable());
+        }
+        let mut route = current.clone();
+        route.reader = reader.map(str::to_owned);
+        if route_digest(&route) != target {
+            return Err(unavailable());
+        }
+        let mut next = self.clone();
+        if let Some(proof_digest) = proof_digest {
+            let receipt = Receipt {
+                operation_id: operation_id.to_owned(),
+                request_digest: request_digest.clone(),
+                generation: self.generation.checked_add(1).ok_or_else(Self::invalid)?,
+                route_digest: target.to_owned(),
+                lineage: route.lineage,
+                epoch: route.epoch.unwrap_or_default(),
+                proof_digest: proof_digest.to_owned(),
+            };
+            if let Slot::Reserved { receipt: slot, .. } = &mut next.lifecycle[index].slot {
+                *slot = Some(receipt);
+            }
+        }
+        for slot in next.directory.iter_mut().filter(|r| r.tenant == tenant) {
+            *slot = route.clone();
         }
         Ok(next)
     }

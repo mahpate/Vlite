@@ -154,6 +154,13 @@ fn replica() -> String {
         .collect()
 }
 
+/// The reason on every set pin a reader replica holds: control-owned
+/// recovery (design-tenant-provisioning ITEM-013) selects a stopped
+/// replica's pins by it.
+pub(in crate::server) fn pin_reason(replica: &str) -> String {
+    format!("reader-apply:{replica}")
+}
+
 fn slot_dirs(config: &ReaderApplyConfig) -> [PathBuf; 2] {
     [
         config.follower_dir.join("reader-a"),
@@ -228,7 +235,7 @@ impl ReaderApply {
                     "no published backup set is available",
                 )
             })?;
-        let reason = format!("reader-apply:{replica}");
+        let reason = pin_reason(replica);
         for record in listing.sets.iter().filter_map(|set| set.record.as_ref()) {
             for pin in record.pins.iter().filter(|pin| pin.reason == reason) {
                 sets.release(&record.set_id, &pin.id, now)?;

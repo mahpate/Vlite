@@ -16,6 +16,7 @@ use super::{ApiError, Service, log_stderr};
 use crate::Database;
 
 mod follower;
+pub(in crate::server) use follower::pin_reason;
 pub use follower::{ReaderApply, ReaderApplyConfig};
 
 /// Apply progress shared by every clone and generation of one reader.

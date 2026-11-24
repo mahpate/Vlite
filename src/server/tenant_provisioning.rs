@@ -947,7 +947,7 @@ impl Operations {
                     "a recorded side effect is unresolved; reconcile it before ending the operation",
                 ));
             }
-            aca::terminal_ready(journal, &outcome)?;
+            aca::terminal_ready(journal, &intent.payload, &outcome)?;
             if journal.closed {
                 return Ok((None, ()));
             }
@@ -1125,6 +1125,54 @@ pub(super) fn activate(
         |current| current.activate(&intent.tenant_id, &intent.operation_id, route, proof_digest),
     )?;
     receipt(&snapshot).ok_or_else(indeterminate)
+}
+
+/// EPIC-005 ITEM-012/013: republishes the reserved route (`planned`) with
+/// the reader endpoint `reader` as `target`, writer-only; with `proof`, the
+/// receipt in the same generation. Already done when the route is `target`
+/// (and, with `proof`, the held receipt is this one). A slot this operation
+/// already released is not done here: the caller returns the sealed outcome.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn publish_readers(
+    ops: &Operations,
+    objects: &Objects,
+    intent: &Intent,
+    planned: &str,
+    target: &str,
+    reader: Option<&str>,
+    proof: Option<&str>,
+    now: u64,
+) -> Result<(), ApiError> {
+    if ops.read_terminal(&intent.operation_id)?.is_some() {
+        return Err(ended());
+    }
+    let done = |snapshot: &Snapshot| match (holds(snapshot, intent), proof) {
+        (Some(Slot::Reserved { receipt, .. }), proof) => match (receipt, proof) {
+            (Some(receipt), Some(proof)) => {
+                receipt.route_digest == target && receipt.proof_digest == proof
+            }
+            (_, None) => {
+                snapshot
+                    .record_for(&intent.tenant_id)
+                    .map(control_state::route_digest)
+                    .as_deref()
+                    == Some(target)
+            }
+            (None, Some(_)) => false,
+        },
+        _ => false,
+    };
+    lifecycle_cas(objects, now, done, |current| {
+        current.readers_route(
+            &intent.tenant_id,
+            &intent.operation_id,
+            planned,
+            target,
+            reader,
+            proof,
+        )
+    })
+    .map(drop)
 }
 
 // ---------------------------------------------------- ITEM-010 create
