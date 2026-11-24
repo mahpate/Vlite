@@ -4004,6 +4004,69 @@ mod epic_004 {
         }
 
         #[test]
+        fn abandoned_reader_pin_objects_are_released_for_the_proven_stopped_replica() {
+            // design-tenant-provisioning ITEM-008: isolated reader pins are
+            // recovered with the same proofs as record pins.
+            let env = crate::server::cloud_recovery::tests::setup();
+            let w = world();
+            let arm = MockArm::default();
+            with_reader(&w, &arm);
+            let intent = readers(&w, "readers-off", Fleet::Absent {});
+            let d = driver(&w, &arm, &intent);
+            d.reserve_readers(&w.objects, None, NOW).unwrap();
+            let pin = |reason: &str, at| env.sets.pin_reader(&env.set_id, reason, at).unwrap();
+            let gone = pin("reader-apply:replica-0", NOW - 10);
+            let newer = pin("reader-apply:replica-0", NOW + 10);
+            let other = pin("reader-apply:replica-1", NOW - 10);
+            let legacy = env
+                .sets
+                .pin(
+                    &env.set_id,
+                    "reader-apply:replica-0",
+                    PinKind::Operation,
+                    NOW - 10,
+                )
+                .unwrap();
+            let scope = PinScope::for_test();
+            let stopped = stopped("replica-0");
+            assert_eq!(
+                d.recover_pins(&w.objects, &env.sets, None, Some(&stopped), NOW)
+                    .unwrap_err()
+                    .code,
+                "pin_scope_unproven"
+            );
+            assert_eq!(env.sets.reader_pins().unwrap().len(), 3);
+            assert_eq!(
+                d.recover_pins(&w.objects, &env.sets, Some(&scope), Some(&stopped), NOW)
+                    .unwrap(),
+                2
+            );
+            assert_eq!(
+                d.recover_pins(&w.objects, &env.sets, Some(&scope), Some(&stopped), NOW)
+                    .unwrap(),
+                0
+            );
+            let left: Vec<String> = env
+                .sets
+                .reader_pins()
+                .unwrap()
+                .into_iter()
+                .map(|(_, pin)| pin.id)
+                .collect();
+            assert!(!left.contains(&gone.id));
+            assert!(left.contains(&newer.id) && left.contains(&other.id));
+            assert!(
+                env.sets.list().unwrap().sets[0]
+                    .record
+                    .as_ref()
+                    .unwrap()
+                    .pins
+                    .iter()
+                    .all(|p| p.id != legacy.id)
+            );
+        }
+
+        #[test]
         fn full_reader_pins_are_freed_by_control_owned_recovery() {
             let env = crate::server::cloud_recovery::tests::setup();
             let w = world();

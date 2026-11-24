@@ -19,6 +19,13 @@
 //! the exclusion and a lease would only add liveness. A retention victim is
 //! condemned only while its record revision equals the one its decision saw,
 //! so a stale janitor never acts on outdated pins or verification.
+//!
+//! Reader pins (design-tenant-provisioning ITEM-008) are separate objects
+//! `{p}reader-pins/{id}/{pin}.json` in the coordination container, so a reader
+//! that pins needs no write to records, authority or other control objects.
+//! A reader creates its pin and then requires the record to still be
+//! `published`; deletion lists reader pins only after its `delete_pending`
+//! CAS and waits while any exist, so a missed pin is always withdrawn.
 use super::*;
 use crate::maintenance;
 use serde::{Serialize, de::DeserializeOwned};
@@ -982,6 +989,15 @@ fn not_found(code: &'static str, message: &str) -> ApiError {
     ApiError::new(StatusCode::NOT_FOUND, code, message)
 }
 
+fn check_reason(reason: &str) -> Result<(), ApiError> {
+    if reason.trim().is_empty() || reason.len() > 200 || reason.chars().any(char::is_control) {
+        return Err(unprocessable(
+            "pin reason must be 1-200 characters without control characters",
+        ));
+    }
+    Ok(())
+}
+
 fn unresolved(message: &str) -> ApiError {
     ApiError::new(
         StatusCode::SERVICE_UNAVAILABLE,
@@ -1148,6 +1164,14 @@ impl Sets {
 
     fn object_key(&self, id: &str, sha256: &str) -> String {
         format!("{}objects/{sha256}", self.set_dir(id))
+    }
+
+    fn reader_pin_root(&self) -> String {
+        format!("{}reader-pins/", self.prefix)
+    }
+
+    fn reader_pin_key(&self, id: &str, pin_id: &str) -> String {
+        format!("{}{id}/{pin_id}.json", self.reader_pin_root())
     }
 
     /// The installation that owns the prefix, if any.
@@ -1620,11 +1644,7 @@ impl Sets {
         kind: PinKind,
         now: u64,
     ) -> Result<Pin, ApiError> {
-        if reason.trim().is_empty() || reason.len() > 200 || reason.chars().any(char::is_control) {
-            return Err(unprocessable(
-                "pin reason must be 1-200 characters without control characters",
-            ));
-        }
+        check_reason(reason)?;
         let pin = Pin {
             id: format!("pin-{}", random_hex()?),
             reason: reason.into(),
@@ -1700,7 +1720,134 @@ impl Sets {
         .map(|_| ())
     }
 
-    /// Removes the drill's pin and records its result on a published set.
+    /// Pins a published set with its own object under `reader-pins/` instead
+    /// of a record write, so the pinning identity needs no write to set
+    /// records, authority or other coordination state (design-tenant-
+    /// provisioning ITEM-008). The pin exists first and the set must still be
+    /// published afterwards: a deletion that listed pins before this object
+    /// existed had already left `published`, so the pin is withdrawn.
+    pub(super) fn pin_reader(&self, id: &str, reason: &str, now: u64) -> Result<Pin, ApiError> {
+        check_reason(reason)?;
+        self.require_published(id)?;
+        if self.reader_pin_names(id)?.len() >= MAX_PINS {
+            return Err(conflict(
+                "cloud_pins_full",
+                format!("the backup set already has {MAX_PINS} reader pins; release one first"),
+            ));
+        }
+        let pin = Pin {
+            id: format!("pin-{}", random_hex()?),
+            reason: reason.into(),
+            created_unix_ms: now,
+            kind: PinKind::Operation,
+        };
+        let key = self.reader_pin_key(id, &pin.id);
+        let withdraw = |error: ApiError| {
+            let _ = self.meta.delete(&key);
+            Err(error)
+        };
+        if let Err(error) = self.meta.put(&key, &encode(&pin)?, Cond::Create) {
+            return withdraw(error.into());
+        }
+        match self.require_published(id) {
+            Ok(()) => Ok(pin),
+            Err(error) => withdraw(error),
+        }
+    }
+
+    fn require_published(&self, id: &str) -> Result<(), ApiError> {
+        if !valid_set_id(id) {
+            return Err(not_found(
+                "cloud_set_not_found",
+                "the backup set does not exist",
+            ));
+        }
+        let key = self.record_key(id);
+        let record = match self.meta.get(&key, META_MAX) {
+            Ok(blob) => decode_record(&key, &blob.bytes, id)?,
+            Err(StoreError::NotFound) => {
+                return Err(not_found(
+                    "cloud_set_not_found",
+                    "the backup set does not exist",
+                ));
+            }
+            Err(e) => return Err(e.into()),
+        };
+        if record.state != SetState::Published {
+            return Err(conflict(
+                "cloud_set_unavailable",
+                "only a published backup set can be pinned",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Releases a pin taken by [`Sets::pin_reader`]; idempotent.
+    pub(super) fn release_reader(&self, id: &str, pin_id: &str) -> Result<(), ApiError> {
+        if !valid_set_id(id) || !valid_pin_id(pin_id) {
+            return Err(not_found("cloud_pin_not_found", "the pin does not exist"));
+        }
+        match self.meta.delete(&self.reader_pin_key(id, pin_id)) {
+            Ok(()) | Err(StoreError::NotFound) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Object names of a set's reader pins. Every object counts, readable or
+    /// not, so an undecodable pin still blocks deletion.
+    fn reader_pin_names(&self, id: &str) -> Result<Vec<String>, ApiError> {
+        Ok(self
+            .meta
+            .list(&format!("{}{id}/", self.reader_pin_root()))?)
+    }
+
+    /// Sets that have at least one reader pin object.
+    fn reader_pinned_sets(&self) -> Result<std::collections::BTreeSet<String>, ApiError> {
+        let root = self.reader_pin_root();
+        Ok(self
+            .meta
+            .list(&root)?
+            .iter()
+            .filter_map(|name| name.strip_prefix(&root)?.split_once('/'))
+            .map(|(id, _)| id.to_owned())
+            .collect())
+    }
+
+    /// All readable reader pins as `(set ID, pin)`; unreadable or concurrently
+    /// released objects are skipped (they still block deletion).
+    pub(super) fn reader_pins(&self) -> Result<Vec<(String, Pin)>, ApiError> {
+        let root = self.reader_pin_root();
+        let mut pins = Vec::new();
+        for name in self.meta.list(&root)? {
+            let Some((id, _)) = name.strip_prefix(&root).and_then(|t| t.split_once('/')) else {
+                continue;
+            };
+            let blob = match self.meta.get(&name, META_MAX) {
+                Ok(blob) => blob,
+                Err(StoreError::NotFound) => continue,
+                Err(e) => return Err(e.into()),
+            };
+            if let Ok(pin) = decode::<Pin>(&name, &blob.bytes)
+                && name == self.reader_pin_key(id, &pin.id)
+            {
+                pins.push((id.to_owned(), pin));
+            }
+        }
+        Ok(pins)
+    }
+
+    /// Whether `pin_id` is a reader pin object of the set.
+    fn reader_pinned(&self, id: &str, pin_id: &str) -> Result<bool, ApiError> {
+        if !valid_pin_id(pin_id) {
+            return Ok(false);
+        }
+        let key = self.reader_pin_key(id, pin_id);
+        match self.meta.get(&key, META_MAX) {
+            Ok(blob) => Ok(decode::<Pin>(&key, &blob.bytes)?.id == pin_id),
+            Err(StoreError::NotFound) => Ok(false),
+            Err(e) => Err(e.into()),
+        }
+    }
     pub(super) fn record_drill(
         &self,
         id: &str,
@@ -1760,7 +1907,7 @@ impl Sets {
                 "the backup set is not published and cannot be restored",
             ));
         }
-        if !record.pins.iter().any(|p| p.id == pin_id) {
+        if !record.pins.iter().any(|p| p.id == pin_id) && !self.reader_pinned(id, pin_id)? {
             return Err(conflict(
                 "cloud_set_unavailable",
                 "the backup set is not pinned for this download",
@@ -1934,6 +2081,9 @@ impl Sets {
     /// Moves a set to `delete_pending` (if `why` still applies) and finishes
     /// the deletion. Returns false when the set no longer qualifies.
     fn delete_set(&self, id: &str, why: &Condemn, now: u64) -> Result<bool, ApiError> {
+        if matches!(why, Condemn::Retention(..)) && !self.reader_pin_names(id)?.is_empty() {
+            return Ok(false);
+        }
         let (record, step) = self.update(id, now, |record, _| {
             let condemn = match (record.state, why) {
                 (SetState::Published, Condemn::Retention(_, seen)) => {
@@ -1993,7 +2143,16 @@ impl Sets {
         }
     }
 
+    /// Sweeps a `delete_pending` set and tombstones it. Reader pin objects are
+    /// listed only after the set left `published`, so a reader pin this list
+    /// misses was created later and withdrawn by [`Sets::pin_reader`].
     fn finish_delete(&self, id: &str, now: u64) -> Result<(), ApiError> {
+        if !self.reader_pin_names(id)?.is_empty() {
+            return Err(conflict(
+                "cloud_set_pinned",
+                "a reader still pins the backup set; deletion resumes once it is released",
+            ));
+        }
         self.sweep(id)?;
         self.update(id, now, |record, _| match record.state {
             SetState::DeletePending => {
@@ -2115,6 +2274,13 @@ impl Sets {
         if !retention.enabled || !authority_readable {
             return Ok(out);
         }
+        let reader_pinned = match self.reader_pinned_sets() {
+            Ok(sets) => sets,
+            Err(error) => {
+                out.fail("", error);
+                return Ok(out);
+            }
+        };
         let published: Vec<(&String, &Record)> = listing
             .sets
             .iter()
@@ -2139,6 +2305,7 @@ impl Sets {
                 || index < retention.keep_sets
                 || now.saturating_sub(record.created_unix_ms) < keep_ms
                 || !record.pins.is_empty()
+                || reader_pinned.contains(*id)
                 || Some(*id) == newest_verified
                 || Some(*id) == newest_passing;
             if protected {
@@ -2399,6 +2566,72 @@ pub(super) mod fake {
                 .cloned()
                 .collect())
         }
+    }
+
+    /// design-tenant-provisioning ITEM-008: a view of `inner` that reads
+    /// everything but writes only names under `writable` (none when `None`),
+    /// modelling a path-scoped grant. It proves which writes the code needs,
+    /// not how Azure enforces a grant.
+    pub struct Scoped {
+        pub inner: Arc<Memory>,
+        pub writable: Option<String>,
+    }
+
+    impl Scoped {
+        fn write(&self, name: &str) -> Result<(), StoreError> {
+            match &self.writable {
+                Some(prefix) if name.starts_with(prefix.as_str()) => Ok(()),
+                _ => Err(StoreError::Failed(format!("write denied: {name}"))),
+            }
+        }
+    }
+
+    impl ObjectStore for Scoped {
+        fn get(&self, name: &str, max: u64) -> Result<Blob, StoreError> {
+            self.inner.get(name, max)
+        }
+
+        fn download(&self, name: &str, out: &mut dyn Write, max: u64) -> Result<u64, StoreError> {
+            self.inner.download(name, out, max)
+        }
+
+        fn put(&self, name: &str, bytes: &[u8], cond: Cond<'_>) -> Result<String, StoreError> {
+            self.write(name)?;
+            self.inner.put(name, bytes, cond)
+        }
+
+        fn put_file(
+            &self,
+            name: &str,
+            path: &FilePath,
+            cond: Cond<'_>,
+        ) -> Result<String, StoreError> {
+            self.write(name)?;
+            self.inner.put_file(name, path, cond)
+        }
+
+        fn delete(&self, name: &str) -> Result<(), StoreError> {
+            self.write(name)?;
+            self.inner.delete(name)
+        }
+
+        fn list(&self, prefix: &str) -> Result<Vec<String>, StoreError> {
+            self.inner.list(prefix)
+        }
+    }
+
+    /// `sets` as a reader sees it: coordination writes only under the
+    /// reader-pin path and no data writes.
+    pub fn reader_view(meta: &Arc<Memory>, data: &Arc<Memory>, prefix: &str) -> Sets {
+        let meta = Scoped {
+            inner: meta.clone(),
+            writable: Some(format!("{prefix}reader-pins/")),
+        };
+        let data = Scoped {
+            inner: data.clone(),
+            writable: None,
+        };
+        Sets::new(Arc::new(meta), Arc::new(data), false, prefix.into())
     }
 }
 
@@ -4107,6 +4340,183 @@ mod tests {
         let kind = env.sets.unpin(&id, &crashed.id, true, BASE).unwrap();
         assert_eq!(kind, Some(PinKind::Operation));
         assert!(record(&env, &id).pins.is_empty());
+    }
+
+    // ----------------------- design-tenant-provisioning ITEM-008 follow-up
+
+    /// Every coordination object except reader pins, byte for byte.
+    fn control_objects(env: &Env) -> Vec<(String, Vec<u8>)> {
+        env.meta
+            .names()
+            .into_iter()
+            .filter(|name| !name.starts_with("vlite/prod/reader-pins/"))
+            .map(|name| {
+                let bytes = env.meta.raw(&name).unwrap();
+                (name, bytes)
+            })
+            .collect()
+    }
+
+    fn reader_pin_names(env: &Env) -> Vec<String> {
+        env.meta
+            .names()
+            .into_iter()
+            .filter(|name| name.starts_with("vlite/prod/reader-pins/"))
+            .collect()
+    }
+
+    #[test]
+    fn reader_pin_objects_need_no_record_authority_or_data_write() {
+        let env = setup();
+        let (authority, claim) = setup_ha(&env);
+        let (manifest, uploads) = prepare_ha(&env, &authority, &claim, BASE);
+        env.sets
+            .publish_ha(&authority, &claim, &manifest, &uploads, BASE, &open)
+            .unwrap();
+        let id = &manifest.manifest.set_id;
+        let reader = fake::reader_view(&env.meta, &env.data, "vlite/prod/");
+        let before = control_objects(&env);
+        assert!(
+            before
+                .iter()
+                .any(|(name, _)| name.ends_with("authority.json"))
+        );
+        // The record-embedded pin needs a set record write, so a reader
+        // limited to its pin path cannot take one: the old layout's blocker.
+        assert_eq!(
+            reader
+                .pin(id, "reader-apply:r1", PinKind::Operation, BASE)
+                .unwrap_err()
+                .code,
+            "cloud_store_failed"
+        );
+        let pin = reader.pin_reader(id, "reader-apply:r1", BASE).unwrap();
+        assert_eq!(pin.kind, PinKind::Operation);
+        assert_eq!(reader_pin_names(&env).len(), 1);
+        let dir = tempfile::tempdir().unwrap();
+        let fetched = reader.fetch(id, &pin.id, dir.path()).unwrap();
+        assert_eq!(fetched.manifest, manifest.manifest);
+        assert_eq!(
+            reader.reader_pins().unwrap(),
+            vec![(id.clone(), pin.clone())]
+        );
+        reader.release_reader(id, &pin.id).unwrap();
+        reader.release_reader(id, &pin.id).unwrap();
+        assert!(reader_pin_names(&env).is_empty());
+        // Authority, set record, owner and catalog are untouched throughout.
+        assert_eq!(control_objects(&env), before);
+        assert!(record(&env, id).pins.is_empty());
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            reader.fetch(id, &pin.id, dir.path()).err().unwrap().code,
+            "cloud_set_unavailable"
+        );
+    }
+
+    #[test]
+    fn reader_pin_objects_are_validated_and_bounded() {
+        let env = setup();
+        let id = publish(&env, BASE);
+        let reader = fake::reader_view(&env.meta, &env.data, "vlite/prod/");
+        for reason in ["", "bad\nreason"] {
+            assert_eq!(
+                reader.pin_reader(&id, reason, BASE).unwrap_err().status,
+                StatusCode::UNPROCESSABLE_ENTITY
+            );
+        }
+        assert_eq!(
+            reader
+                .pin_reader("20231114T221320Z-0000000000000000", "r", BASE)
+                .unwrap_err()
+                .code,
+            "cloud_set_not_found"
+        );
+        for _ in 0..MAX_PINS {
+            reader.pin_reader(&id, "r", BASE).unwrap();
+        }
+        assert_eq!(
+            reader.pin_reader(&id, "r", BASE).unwrap_err().code,
+            "cloud_pins_full"
+        );
+        assert_eq!(reader_pin_names(&env).len(), MAX_PINS);
+        assert_eq!(
+            reader.release_reader(&id, "../record").unwrap_err().code,
+            "cloud_pin_not_found"
+        );
+        let staging = {
+            let mut record = record(&env, &id);
+            record.state = SetState::Staging;
+            record.set_id = new_set_id(BASE + 5_000).unwrap();
+            env.meta.set_raw(
+                &env.sets.record_key(&record.set_id),
+                &encode(&record).unwrap(),
+            );
+            record.set_id
+        };
+        assert_eq!(
+            reader.pin_reader(&staging, "r", BASE).unwrap_err().code,
+            "cloud_set_unavailable"
+        );
+    }
+
+    #[test]
+    fn retention_and_deletion_wait_for_reader_pin_objects() {
+        let env = setup();
+        let ids: Vec<String> = (0..3).map(|i| publish(&env, BASE + i * 1000)).collect();
+        let reader = fake::reader_view(&env.meta, &env.data, "vlite/prod/");
+        let pin = reader.pin_reader(&ids[0], "reader-apply:r1", BASE).unwrap();
+        let later = BASE + 3 * 86_400_000;
+        let out = env.sets.collect(INSTALL, &retention(true), later).unwrap();
+        assert!(out.deleted.is_empty() && out.decision.is_none());
+        assert_eq!(record(&env, &ids[0]).state, SetState::Published);
+        // A decision taken before the pin (or a stale janitor) still cannot
+        // sweep a reader-pinned set: deletion waits in delete_pending.
+        let seen = record(&env, &ids[0]).revision;
+        let why = Condemn::Retention("d", &seen);
+        assert!(!env.sets.delete_set(&ids[0], &why, later).unwrap());
+        env.sets
+            .update(&ids[0], later, |record, _| {
+                record.state = SetState::DeletePending;
+                Ok(Step::Write)
+            })
+            .unwrap();
+        let out = env.sets.collect(INSTALL, &retention(true), later).unwrap();
+        assert_eq!(out.failures.len(), 1, "{:?}", out.failures);
+        assert_eq!(data_objects(&env, &ids[0]), 3);
+        assert_eq!(record(&env, &ids[0]).state, SetState::DeletePending);
+        reader.release_reader(&ids[0], &pin.id).unwrap();
+        let out = env.sets.collect(INSTALL, &retention(true), later).unwrap();
+        assert_eq!(out.deleted, vec![ids[0].clone()]);
+        assert_eq!(record(&env, &ids[0]).state, SetState::Tombstoned);
+        assert_eq!(data_objects(&env, &ids[0]), 0);
+    }
+
+    #[test]
+    fn a_reader_pin_racing_a_deletion_withdraws() {
+        let env = setup();
+        let id = publish(&env, BASE);
+        let reader = fake::reader_view(&env.meta, &env.data, "vlite/prod/");
+        // The set leaves `published` after the reader's first read and
+        // before its pin object exists.
+        let sets = env.sets.clone();
+        let condemned = id.clone();
+        env.meta.hook(Op::Put, "reader-pins/", move || {
+            sets.update(&condemned, BASE, |record, _| {
+                record.state = SetState::DeletePending;
+                Ok(Step::Write)
+            })
+            .unwrap();
+        });
+        assert_eq!(
+            reader
+                .pin_reader(&id, "reader-apply:r1", BASE)
+                .unwrap_err()
+                .code,
+            "cloud_set_unavailable"
+        );
+        assert!(reader_pin_names(&env).is_empty());
+        env.sets.finish_delete(&id, BASE).unwrap();
+        assert_eq!(record(&env, &id).state, SetState::Tombstoned);
     }
 
     #[test]

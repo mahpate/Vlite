@@ -503,6 +503,19 @@ without dot components. `capacity_bytes` is 1..1073741824 (1 GiB);
 strictly below the staleness bound. These are implementation caps, not
 ACA-qualified capacities.
 
+`isolated_pins` is optional (default `false`). When `true` the reader pins
+with its own object `<prefix>reader-pins/<set>/<pin>.json` in the
+coordination container instead of rewriting the set record, so it writes no
+set record, authority or other control object and no data object
+(design-tenant-provisioning ITEM-008; tested offline only). Enable it only
+after every writer and janitor on the prefix runs a version that honours
+reader pin objects: an older janitor ignores them and could collect a
+non-head set the reader still follows. Azure RBAC/ABAC scoping of a grant to
+that path is **not qualified**; this setting narrows what the reader needs,
+not what a grant permits. Enrollment in this mode replaces only its own
+reader pin objects; a record pin from earlier legacy runs stays until
+removed. The forced-unpin route does not see reader pin objects.
+
 The positional served path must be exactly
 `<follower_dir>\reader-a\database.vlite`; the second private slot is
 `<follower_dir>\reader-b`. Enrollment replaces the two slot directories:

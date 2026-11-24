@@ -29,6 +29,12 @@ pub struct ReaderApplyConfig {
     pub capacity_bytes: u64,
     pub staleness_bound_ms: u64,
     pub poll_interval_ms: u64,
+    /// Pin sets with reader pin objects instead of set record writes, so the
+    /// reader needs no write to records or authority (design-tenant-
+    /// provisioning ITEM-008). Enable only once every writer and janitor on
+    /// the prefix honours reader pin objects.
+    #[serde(default)]
+    pub isolated_pins: bool,
 }
 
 fn invalid(detail: &str) -> String {
@@ -236,12 +242,25 @@ impl ReaderApply {
                 )
             })?;
         let reason = pin_reason(replica);
-        for record in listing.sets.iter().filter_map(|set| set.record.as_ref()) {
-            for pin in record.pins.iter().filter(|pin| pin.reason == reason) {
-                sets.release(&record.set_id, &pin.id, now)?;
+        let isolated = config.isolated_pins;
+        if isolated {
+            for (set, pin) in sets.reader_pins()? {
+                if pin.reason == reason {
+                    sets.release_reader(&set, &pin.id)?;
+                }
+            }
+        } else {
+            for record in listing.sets.iter().filter_map(|set| set.record.as_ref()) {
+                for pin in record.pins.iter().filter(|pin| pin.reason == reason) {
+                    sets.release(&record.set_id, &pin.id, now)?;
+                }
             }
         }
-        let pin = sets.pin(&chosen.set_id, &reason, PinKind::Operation, now)?;
+        let pin = if isolated {
+            sets.pin_reader(&chosen.set_id, &reason, now)?
+        } else {
+            sets.pin(&chosen.set_id, &reason, PinKind::Operation, now)?
+        };
         let dirs = slot_dirs(&config);
         let enrolled = (|| {
             for dir in &dirs {
@@ -325,7 +344,7 @@ impl ReaderApply {
             Ok(value) => value,
             Err(error) => {
                 clean_slots(&dirs);
-                release(&sets, &chosen.set_id, &pin.id, now);
+                release(&sets, isolated, &chosen.set_id, &pin.id, now);
                 return Err(error);
             }
         };
@@ -423,8 +442,13 @@ impl Drop for ReaderApply {
     }
 }
 
-fn release(sets: &Sets, set: &str, pin: &str, now: u64) -> bool {
-    match sets.release(set, pin, now) {
+fn release(sets: &Sets, isolated: bool, set: &str, pin: &str, now: u64) -> bool {
+    let released = if isolated {
+        sets.release_reader(set, pin)
+    } else {
+        sets.release(set, pin, now)
+    };
+    match released {
         Ok(_) => {
             log_stderr(
                 "info",
@@ -454,7 +478,13 @@ impl Follower {
     fn release(&self, now: u64) {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         if !state.released {
-            state.released = release(&self.sets, &self.record.set_id, &self.pin, now);
+            state.released = release(
+                &self.sets,
+                self.config.isolated_pins,
+                &self.record.set_id,
+                &self.pin,
+                now,
+            );
         }
     }
 
@@ -627,7 +657,13 @@ impl Follower {
                     } else {
                         error.code.into()
                     });
-                state.released = release(&self.sets, &self.record.set_id, &self.pin, now);
+                state.released = release(
+                    &self.sets,
+                    self.config.isolated_pins,
+                    &self.record.set_id,
+                    &self.pin,
+                    now,
+                );
                 Step::Failed
             }
         }

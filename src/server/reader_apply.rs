@@ -215,6 +215,7 @@ mod tests {
             capacity_bytes: cloud::MAX_DATABASE_BYTES,
             staleness_bound_ms: 30_000,
             poll_interval_ms: 10_000,
+            isolated_pins: false,
         }
     }
 
@@ -272,11 +273,20 @@ mod tests {
         });
         std::fs::write(&file, valid.to_string()).unwrap();
         ReaderApplyConfig::load(&file, &served).unwrap();
+        let mut isolated = valid.clone();
+        isolated["isolated_pins"] = json!(true);
+        std::fs::write(&file, isolated.to_string()).unwrap();
+        assert!(
+            ReaderApplyConfig::load(&file, &served)
+                .unwrap()
+                .isolated_pins
+        );
         let mut missing = valid.clone();
         missing.as_object_mut().unwrap().remove("poll_interval_ms");
         let mut cases = vec![missing];
         for (key, value) in [
             ("unknown", json!("never-echo")),
+            ("isolated_pins", json!("never-echo")),
             ("capacity_bytes", json!(0)),
             ("capacity_bytes", json!(1073741825u64)),
             ("staleness_bound_ms", json!(0)),
@@ -523,6 +533,87 @@ mod tests {
         assert_eq!(apply.step(&service, 2_000), Step::Confirmed);
         assert_eq!(apply.progress().applied(), (4, 2_000));
         assert_eq!(apply.progress().epoch(), None);
+    }
+
+    #[test]
+    fn ha_reader_with_isolated_pins_writes_only_its_reader_pin_objects() {
+        // design-tenant-provisioning ITEM-008: a reader whose coordination
+        // writes are limited to `reader-pins/` (and with no data writes)
+        // enrolls, follows and stops without touching authority, set records
+        // or any other control object.
+        use crate::server::cloud_recovery::tests::{checkpoint_ha, setup_ha};
+        let (env, authority, claim) = setup_ha();
+        checkpoint_ha(&env, &authority, &claim, 5..=6);
+        let reader_sets = || cloud::fake::reader_view(&env.meta, &env.data, "vlite/prod/");
+        let control = || -> Vec<(String, Vec<u8>)> {
+            env.meta
+                .names()
+                .into_iter()
+                .filter(|name| !name.starts_with("vlite/prod/reader-pins/"))
+                .map(|name| {
+                    let bytes = env.meta.raw(&name).unwrap();
+                    (name, bytes)
+                })
+                .collect()
+        };
+        let reader_pins = || {
+            let mut reasons: Vec<String> = env
+                .sets
+                .reader_pins()
+                .unwrap()
+                .into_iter()
+                .map(|(_, pin)| pin.reason)
+                .collect();
+            reasons.sort();
+            reasons
+        };
+        // The legacy record pin needs a set record write and is refused.
+        let error = ReaderApply::enroll_with(reader_sets(), config(&env), "replica", 1_000)
+            .err()
+            .unwrap();
+        assert_eq!(error.code, "cloud_store_failed");
+        // A stale pin of this replica is replaced; another replica's stays.
+        let stale = env
+            .sets
+            .pin_reader(&env.set_id, "reader-apply:replica", 1)
+            .unwrap();
+        env.sets
+            .pin_reader(&env.set_id, "reader-apply:other", 1)
+            .unwrap();
+        let before = control();
+        assert!(
+            before
+                .iter()
+                .any(|(name, _)| name.ends_with("authority.json"))
+        );
+        let mut config = config(&env);
+        config.isolated_pins = true;
+        let apply = ReaderApply::enroll_with(reader_sets(), config, "replica", 1_000)
+            .unwrap_or_else(|e| panic!("{}: {}", e.code, e.message));
+        assert_eq!(apply.progress().applied(), (6, 1_000));
+        assert_eq!(env.pins(), 0);
+        assert_eq!(
+            reader_pins(),
+            ["reader-apply:other", "reader-apply:replica"]
+        );
+        assert!(
+            env.sets
+                .reader_pins()
+                .unwrap()
+                .iter()
+                .all(|(_, pin)| pin.id != stale.id)
+        );
+        assert_eq!(control(), before);
+        let service = reader(&slot(&env, "reader-a")).with_reader_apply(&apply);
+        checkpoint_ha(&env, &authority, &claim, 7..=8);
+        let before = control();
+        assert_eq!(apply.step(&service, 2_000), Step::Swapped);
+        assert_eq!(apply.progress().applied(), (8, 2_000));
+        assert_eq!(apply.step(&service, 3_000), Step::Confirmed);
+        apply.stop();
+        assert_eq!(control(), before);
+        assert_eq!(env.pins(), 0);
+        assert_eq!(reader_pins(), ["reader-apply:other"]);
     }
 
     #[test]

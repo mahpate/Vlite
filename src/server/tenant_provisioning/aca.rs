@@ -36,7 +36,7 @@
 //!   exists only in tests: production refuses (ITEM-008, OD-002, OD-005).
 use super::guard::{self, Guards};
 use super::*;
-use crate::server::cloud_backup::{PinKind, Sets};
+use crate::server::cloud_backup::{Pin, PinKind, Sets};
 
 /// Owner tag value prefix on every resource this contract creates.
 pub(super) const OWNER_TAG: &str = "vlite-tenant";
@@ -1770,11 +1770,17 @@ impl Driver<'_> {
             ));
         }
         let release = |resource: &str, sequence: u64| {
-            let mut parts = resource.splitn(3, '/').skip(1);
-            let (Some(set_id), Some(pin_id)) = (parts.next(), parts.next()) else {
+            let mut parts = resource.splitn(3, '/');
+            let (Some(kind), Some(set_id), Some(pin_id)) =
+                (parts.next(), parts.next(), parts.next())
+            else {
                 return Err(state_invalid());
             };
-            sets.release(set_id, pin_id, now)?;
+            match kind {
+                "pin" => sets.release(set_id, pin_id, now)?,
+                "reader-pin" => sets.release_reader(set_id, pin_id)?,
+                _ => return Err(state_invalid()),
+            }
             self.settle(sequence, "released")
         };
         for step in journal.steps {
@@ -1783,24 +1789,32 @@ impl Driver<'_> {
             }
         }
         let reason = crate::server::reader_apply::pin_reason(&stopped.replica);
-        let mut released = 0;
+        let abandoned = |pin: &Pin| {
+            pin.reason == reason
+                && pin.kind == PinKind::Operation
+                && pin.created_unix_ms <= stopped.stopped_unix_ms
+        };
+        // Record pins, then isolated reader pin objects (ITEM-008).
+        let mut candidates = Vec::new();
         for record in sets.list()?.sets.into_iter().filter_map(|s| s.record) {
-            for pin in &record.pins {
-                if pin.reason != reason
-                    || pin.kind != PinKind::Operation
-                    || pin.created_unix_ms > stopped.stopped_unix_ms
-                {
-                    continue;
+            for pin in record.pins.iter().filter(|pin| abandoned(pin)) {
+                candidates.push(format!("pin/{}/{}", record.set_id, pin.id));
+            }
+        }
+        for (set_id, pin) in sets.reader_pins()? {
+            if abandoned(&pin) {
+                candidates.push(format!("reader-pin/{set_id}/{}", pin.id));
+            }
+        }
+        let mut released = 0;
+        for resource in candidates {
+            let action = self.action(&resource, RELEASE_PIN, &stopped.replica, true);
+            match self.ops.record(self.op(), &self.attempt, &action)? {
+                Decision::Dispatch(n) | Decision::Reconcile(n) => {
+                    release(&resource, n)?;
+                    released += 1;
                 }
-                let resource = format!("pin/{}/{}", record.set_id, pin.id);
-                let action = self.action(&resource, RELEASE_PIN, &stopped.replica, true);
-                match self.ops.record(self.op(), &self.attempt, &action)? {
-                    Decision::Dispatch(n) | Decision::Reconcile(n) => {
-                        release(&resource, n)?;
-                        released += 1;
-                    }
-                    Decision::Settled(_) => {}
-                }
+                Decision::Settled(_) => {}
             }
         }
         Ok(released)
