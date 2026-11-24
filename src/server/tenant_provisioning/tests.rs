@@ -3412,6 +3412,8 @@ mod epic_004 {
         fn replica(name: &str) -> ReplicaStatus {
             ReplicaStatus {
                 replica: name.into(),
+                app: READER.into(),
+                revision: "r0".into(),
                 set_id: HEAD.into(),
                 lineage: 0x1234,
                 binding_generation: 3,
@@ -3423,12 +3425,26 @@ mod epic_004 {
         }
 
         fn fleet(replicas: usize) -> FleetObservation {
+            fleet_at(replicas, "r0")
+        }
+
+        /// `replicas` replicas serving the reader app's revision `revision`
+        /// (r0 once created, r{n} after the n-th in-place update).
+        fn fleet_at(replicas: usize, revision: &str) -> FleetObservation {
             FleetObservation::for_test(
                 authority(HEAD, 1),
                 (0..replicas)
-                    .map(|i| replica(&format!("replica-{i}")))
+                    .map(|i| ReplicaStatus {
+                        revision: revision.into(),
+                        ..replica(&format!("replica-{i}"))
+                    })
                     .collect(),
             )
+        }
+
+        /// This tenant's reader replica `name`, proven stopped at NOW.
+        fn stopped(name: &str) -> ReplicaStopped {
+            ReplicaStopped::for_test(T, READER, name, NOW)
         }
 
         fn route(w: &World) -> Route {
@@ -3554,7 +3570,7 @@ mod epic_004 {
             let (_, first) = with_reader(&w, &arm);
             let before = digest(&w);
             let intent = readers(&w, "readers-2", present(2, 4));
-            let sealed = add(&w, &arm, &intent, "v2", &fleet(3)).unwrap();
+            let sealed = add(&w, &arm, &intent, "v2", &fleet_at(3, "r1")).unwrap();
             assert_ne!(receipt_of(&sealed), first);
             assert_eq!(digest(&w), before);
             assert_writer_unchanged(&w, Some(ENDPOINT));
@@ -3708,6 +3724,10 @@ mod epic_004 {
                 (with(&|r| r.age_ms = 1_001), "replica_ineligible"),
                 (with(&|r| r.bound_ms = 0), "replica_ineligible"),
                 (with(&|r| r.failed = true), "replica_ineligible"),
+                // A replica of another app (the writer's) or of a revision
+                // that is not the reader app's single active one.
+                (with(&|r| r.app = APP1.into()), "replica_ineligible"),
+                (with(&|r| r.revision = "r1".into()), "replica_ineligible"),
                 (
                     FleetObservation::for_test(
                         authority(HEAD, 1),
@@ -3745,17 +3765,42 @@ mod epic_004 {
 
         // ----------------------------------------------------- ITEM-013
 
+        /// After an in-place update, only replicas of the reader app's new
+        /// single active revision count.
         #[test]
-        fn a_scale_in_stays_writer_only_until_the_reduced_fleet_is_verified() {
+        fn replicas_still_on_the_replaced_revision_are_not_eligible() {
+            let w = world();
+            let arm = MockArm::default();
+            with_reader(&w, &arm);
+            let intent = readers(&w, "readers-2", present(1, 2));
+            // The update made r1 the single active revision; r0 replicas
+            // are the replaced configuration.
+            let refused = add(&w, &arm, &intent, "v2", &fleet_at(1, "r0")).unwrap_err();
+            assert_eq!(refused.code, "replica_ineligible");
+            assert!(!held_receipt(&w));
+            add(&w, &arm, &intent, "v2", &fleet_at(1, "r1")).unwrap();
+        }
+
+        /// A Present reduction updates the reader app in place while its
+        /// endpoint stays published (nothing is withdrawn first); it seals
+        /// only once the reduced fleet is observed. Reads stay on the writer
+        /// only because reader routing is disabled (`WriterOnly`), not
+        /// because the reduction is withdrawn: withdraw-before-reduction is
+        /// an ITEM-021 prerequisite.
+        #[test]
+        fn a_present_scale_in_updates_in_place_and_seals_only_once_reduced_while_routing_is_disabled()
+         {
             let w = world();
             let arm = MockArm::default();
             with_reader(&w, &arm);
             let intent = readers(&w, "readers-2", present(1, 1));
-            let refused = add(&w, &arm, &intent, "v1", &fleet(2)).unwrap_err();
+            let refused = add(&w, &arm, &intent, "v1", &fleet_at(2, "r1")).unwrap_err();
             assert_eq!(refused.code, "reader_fleet_not_reduced");
+            // The endpoint is still published while the app was updated.
             assert_writer_unchanged(&w, Some(ENDPOINT));
+            assert_eq!(route(&w).read_routing, ReadRouting::WriterOnly);
             assert!(!held_receipt(&w));
-            add(&w, &arm, &intent, "v1", &fleet(1)).unwrap();
+            add(&w, &arm, &intent, "v1", &fleet_at(1, "r1")).unwrap();
             assert_writer_unchanged(&w, Some(ENDPOINT));
         }
 
@@ -3907,7 +3952,19 @@ mod epic_004 {
             let other = pin("reader-apply:replica-1", PinKind::Operation, NOW - 10);
             let operator = pin("reader-apply:replica-0", PinKind::Operator, NOW - 10);
             let scope = PinScope::for_test();
-            let stopped = ReplicaStopped::for_test("replica-0", NOW);
+            let stopped = stopped("replica-0");
+            // A stop proof for another tenant or another app frees nothing.
+            for foreign in [
+                ReplicaStopped::for_test(OTHER, READER, "replica-0", NOW),
+                ReplicaStopped::for_test(T, APP1, "replica-0", NOW),
+            ] {
+                assert_eq!(
+                    d.recover_pins(&w.objects, &env.sets, Some(&scope), Some(&foreign), NOW)
+                        .unwrap_err()
+                        .code,
+                    "replica_stop_unproven"
+                );
+            }
             assert_eq!(
                 d.recover_pins(&w.objects, &env.sets, None, Some(&stopped), NOW)
                     .unwrap_err()
@@ -3988,7 +4045,7 @@ mod epic_004 {
                     &w.objects,
                     &env.sets,
                     Some(&PinScope::for_test()),
-                    Some(&ReplicaStopped::for_test("replica-0", NOW)),
+                    Some(&stopped("replica-0")),
                     NOW,
                 )
                 .unwrap();
@@ -4015,11 +4072,546 @@ mod epic_004 {
                     &w.objects,
                     &env.sets,
                     Some(&PinScope::for_test()),
-                    Some(&ReplicaStopped::for_test("replica-0", NOW)),
+                    Some(&stopped("replica-0")),
                     NOW,
                 )
                 .unwrap_err();
             assert_eq!(refused.code, "operation_not_reserved");
+        }
+
+        // ------------------------- 2e53839d review: stale settled plans (H1)
+
+        fn released_by(w: &World) -> Option<String> {
+            match w.snapshot().lifecycle(T).map(|e| e.slot.clone()) {
+                Some(Slot::Released { operation_id, .. }) => Some(operation_id),
+                _ => None,
+            }
+        }
+
+        /// Plans `intent` against the current anchor, but its reservation
+        /// write fails: a settled plan with no slot (a same-attempt
+        /// executor that may retry later).
+        fn plan_only(w: &World, arm: &MockArm, intent: &Intent, endpoint: Option<&str>) {
+            let released = released_by(w);
+            w.memory.fault(Op::Put, CONTROL, Fault::Before, 0, 1);
+            let d = driver(w, arm, intent);
+            match intent.kind() {
+                Kind::Retire => d.reserve_retirement(&w.objects, NOW).unwrap_err(),
+                _ => d.reserve_readers(&w.objects, endpoint, NOW).unwrap_err(),
+            };
+            assert_eq!(released_by(w), released, "no slot was taken");
+        }
+
+        /// A stale plan's retry is refused with no slot and no effect.
+        fn assert_stale_refused(
+            w: &World,
+            arm: &MockArm,
+            intent: &Intent,
+            endpoint: Option<&str>,
+            code: &str,
+        ) {
+            let (calls, released, route) = (arm.calls().len(), released_by(w), digest(w));
+            let d = driver(w, arm, intent);
+            let refused = match intent.kind() {
+                Kind::Retire => d.reserve_retirement(&w.objects, NOW).unwrap_err(),
+                _ => d.reserve_readers(&w.objects, endpoint, NOW).unwrap_err(),
+            };
+            assert_eq!(refused.code, code);
+            assert_eq!(released_by(w), released, "the stale plan took no slot");
+            assert_eq!(digest(w), route);
+            assert_eq!(arm.calls().len(), calls);
+            if intent.kind() == Kind::SetReaders {
+                d.set_readers(
+                    &w.objects,
+                    Some(&reader_app("v9")),
+                    Some(&PinScope::for_test()),
+                    Some(&fleet(1)),
+                    NOW,
+                )
+                .unwrap_err();
+                assert_eq!(arm.calls().len(), calls, "no reader app effect");
+            }
+        }
+
+        #[test]
+        fn a_stale_reader_plan_never_reserves_after_another_change_sealed() {
+            let w = world();
+            let arm = MockArm::default();
+            activated(&w, &arm);
+            let a = readers(&w, "readers-a", present(1, 2));
+            plan_only(&w, &arm, &a, Some(ENDPOINT));
+            let b = readers(&w, "readers-b", present(1, 2));
+            add(&w, &arm, &b, "v1", &fleet(1)).unwrap();
+            assert_stale_refused(&w, &arm, &a, Some(ENDPOINT), "readers_unanchored");
+            // A fresh change anchored at B's receipt still reserves and seals.
+            let c = readers(&w, "readers-c", present(1, 3));
+            add(&w, &arm, &c, "v2", &fleet_at(2, "r1")).unwrap();
+            assert_eq!(released_by(&w).as_deref(), Some(c.operation_id.as_str()));
+        }
+
+        #[test]
+        fn a_stale_reader_plan_is_refused_even_when_the_route_is_unchanged() {
+            let w = world();
+            let arm = MockArm::default();
+            with_reader(&w, &arm);
+            let a = readers(&w, "readers-a", present(2, 4));
+            plan_only(&w, &arm, &a, Some(ENDPOINT));
+            let route = digest(&w);
+            let b = readers(&w, "readers-b", present(1, 3));
+            let rb = receipt_of(&add(&w, &arm, &b, "v2", &fleet_at(2, "r1")).unwrap());
+            assert_eq!(digest(&w), route, "a same-endpoint change keeps the route");
+            assert_stale_refused(&w, &arm, &a, Some(ENDPOINT), "readers_unanchored");
+            let c = readers(&w, "readers-c", present(2, 4));
+            add(&w, &arm, &c, "v3", &fleet_at(2, "r2")).unwrap();
+            // And a retirement naming B's receipt is stale only after C.
+            let stale = retire_with(&w, "retire-b", &rb);
+            assert_stale_refused(&w, &arm, &stale, None, "retirement_receipt_mismatch");
+        }
+
+        #[test]
+        fn a_reader_reservation_racing_a_sealed_change_is_refused_atomically() {
+            let w = Arc::new(world());
+            let arm = Arc::new(MockArm::default());
+            activated(&w, &arm);
+            let a = readers(&w, "readers-a", present(1, 2));
+            let b = readers(&w, "readers-b", present(1, 2));
+            let (bw, barm) = (w.clone(), arm.clone());
+            // A's checks pass; B reserves and seals before A's slot write.
+            w.memory.hook(Op::Put, CONTROL, move || {
+                add(&bw, &barm, &b, "v1", &fleet(1)).unwrap();
+            });
+            let refused = driver(&w, &arm, &a)
+                .reserve_readers(&w.objects, Some(ENDPOINT), NOW)
+                .unwrap_err();
+            assert_eq!(refused.code, "readers_unanchored");
+            assert!(matches!(
+                w.snapshot().lifecycle(T).map(|e| &e.slot),
+                Some(Slot::Released { .. })
+            ));
+            assert_stale_refused(&w, &arm, &a, Some(ENDPOINT), "readers_unanchored");
+        }
+
+        #[test]
+        fn a_stale_retirement_plan_never_reserves_after_a_reader_change() {
+            for same_route in [false, true] {
+                let w = world();
+                let arm = MockArm::default();
+                let expected = if same_route {
+                    with_reader(&w, &arm).1
+                } else {
+                    activated(&w, &arm).1
+                };
+                let a = retire_with(&w, "retire-a", &expected);
+                plan_only(&w, &arm, &a, None);
+                let route = digest(&w);
+                let b = readers(&w, "readers-b", present(1, 3));
+                let (config, observed) = if same_route {
+                    ("v2", fleet_at(1, "r1"))
+                } else {
+                    ("v1", fleet(1))
+                };
+                let rb = receipt_of(&add(&w, &arm, &b, config, &observed).unwrap());
+                assert_eq!(digest(&w) == route, same_route);
+                assert_stale_refused(&w, &arm, &a, None, "retirement_receipt_mismatch");
+                // A retirement naming the latest receipt still retires.
+                let c = retire_with(&w, "retire-c", &rb);
+                let d = driver(&w, &arm, &c);
+                d.reserve_retirement(&w.objects, NOW).unwrap();
+                let guards = Guards::new(w.memory.clone(), TARGET);
+                let sealed = d.retire(&w.objects, &guards, NOW).unwrap();
+                assert_eq!(sealed.outcome(), &TerminalOutcome::Retired);
+            }
+        }
+
+        #[test]
+        fn a_retirement_reservation_racing_a_reader_change_is_refused_atomically() {
+            let w = Arc::new(world());
+            let arm = Arc::new(MockArm::default());
+            let (_, latest) = with_reader(&w, &arm);
+            let a = retire_with(&w, "retire-a", &latest);
+            let b = readers(&w, "readers-b", present(1, 3));
+            let (bw, barm) = (w.clone(), arm.clone());
+            w.memory.hook(Op::Put, CONTROL, move || {
+                add(&bw, &barm, &b, "v2", &fleet_at(1, "r1")).unwrap();
+            });
+            let refused = driver(&w, &arm, &a)
+                .reserve_retirement(&w.objects, NOW)
+                .unwrap_err();
+            assert_eq!(refused.code, "retirement_receipt_mismatch");
+            assert!(matches!(
+                w.snapshot().lifecycle(T).map(|e| &e.slot),
+                Some(Slot::Released { .. })
+            ));
+        }
+
+        // ----------------- 2e53839d review: fresh eligibility on retry (M1)
+
+        #[test]
+        fn a_retried_publication_needs_a_fresh_eligible_observation() {
+            let w = world();
+            let arm = MockArm::default();
+            activated(&w, &arm);
+            let before = digest(&w);
+            let intent = readers(&w, "readers-1", present(1, 2));
+            let d = driver(&w, &arm, &intent);
+            d.reserve_readers(&w.objects, Some(ENDPOINT), NOW).unwrap();
+            let (profile, scope) = (reader_app("v1"), PinScope::for_test());
+            // Eligibility settles; the publication write then fails.
+            w.memory.fault(Op::Put, CONTROL, Fault::Before, 0, 1);
+            d.set_readers(
+                &w.objects,
+                Some(&profile),
+                Some(&scope),
+                Some(&fleet(1)),
+                NOW,
+            )
+            .unwrap_err();
+            assert!(steps(&w, &intent).contains(&(
+                format!("fleet/{READER}"),
+                "eligible".into(),
+                settled("eligible")
+            )));
+            let mut stale = replica("replica-0");
+            stale.set_id = BASE.into();
+            let cases = [
+                (None, "fleet_observation_unavailable"),
+                (Some(fleet(3)), "reader_fleet_not_reduced"),
+                (
+                    Some(FleetObservation::for_test(authority(HEAD, 1), vec![stale])),
+                    "replica_ineligible",
+                ),
+            ];
+            for (observed, code) in cases {
+                let refused = d
+                    .set_readers(
+                        &w.objects,
+                        Some(&profile),
+                        Some(&scope),
+                        observed.as_ref(),
+                        NOW,
+                    )
+                    .unwrap_err();
+                assert_eq!(refused.code, code);
+                assert_eq!(digest(&w), before, "{code}");
+                assert!(!held_receipt(&w), "{code}");
+            }
+            d.set_readers(
+                &w.objects,
+                Some(&profile),
+                Some(&scope),
+                Some(&fleet(1)),
+                NOW,
+            )
+            .unwrap();
+            assert_writer_unchanged(&w, Some(ENDPOINT));
+        }
+
+        #[test]
+        fn a_committed_publication_is_recovered_without_a_fresh_observation() {
+            let w = world();
+            let arm = MockArm::default();
+            activated(&w, &arm);
+            let intent = readers(&w, "readers-1", present(1, 2));
+            let d = driver(&w, &arm, &intent);
+            d.reserve_readers(&w.objects, Some(ENDPOINT), NOW).unwrap();
+            let (profile, scope) = (reader_app("v1"), PinScope::for_test());
+            // The endpoint and receipt commit; the seal is lost.
+            w.memory
+                .fault(Op::Put, "terminal.json", Fault::Before, 0, 1);
+            d.set_readers(
+                &w.objects,
+                Some(&profile),
+                Some(&scope),
+                Some(&fleet(1)),
+                NOW,
+            )
+            .unwrap_err();
+            assert!(held_receipt(&w));
+            let route = digest(&w);
+            let calls = arm.calls().len();
+            let sealed = d.set_readers(&w.objects, None, None, None, NOW).unwrap();
+            receipt_of(&sealed);
+            assert_eq!(digest(&w), route);
+            assert_eq!(arm.calls().len(), calls);
+            assert_writer_unchanged(&w, Some(ENDPOINT));
+        }
+
+        // ------------------------ 2e53839d review: path regressions (M5)
+
+        #[test]
+        fn a_cancelled_in_place_update_keeps_the_route_and_is_not_rolled_back() {
+            let w = world();
+            let arm = MockArm::default();
+            with_reader(&w, &arm);
+            let route = digest(&w);
+            let intent = readers(&w, "readers-2", present(2, 4));
+            let d = driver(&w, &arm, &intent);
+            d.reserve_readers(&w.objects, Some(ENDPOINT), NOW).unwrap();
+            let (profile, scope) = (reader_app("v2"), PinScope::for_test());
+            let refused = d
+                .set_readers(&w.objects, Some(&profile), Some(&scope), None, NOW)
+                .unwrap_err();
+            assert_eq!(refused.code, "fleet_observation_unavailable");
+            request_cancel(&w.objects, &intent, NOW).unwrap();
+            let guards = Guards::new(w.memory.clone(), TARGET);
+            d.cleanup(&w.objects, &guards).unwrap();
+            let sealed = w.ops.release(&w.objects, &intent, NOW).unwrap();
+            assert_eq!(sealed.outcome(), &TerminalOutcome::Cancelled);
+            assert_eq!(digest(&w), route);
+            assert_writer_unchanged(&w, Some(ENDPOINT));
+            // The tenant's reader app is kept, not deleted, and the update
+            // is NOT rolled back (an ITEM-021 routing prerequisite).
+            assert_eq!(arm.count(&Verb::Delete), 0);
+            assert_eq!(arm.get(READER).unwrap().config_digest, sha(b"v2"));
+            // The next change anchors through the cancellation and restores.
+            let next = readers(&w, "readers-3", present(1, 2));
+            add(&w, &arm, &next, "v1", &fleet_at(1, "r2")).unwrap();
+            assert_eq!(arm.get(READER).unwrap().config_digest, sha(b"v1"));
+            assert_eq!(digest(&w), route);
+        }
+
+        #[test]
+        fn an_unknown_reader_update_stays_unknown_and_is_never_resent() {
+            let w = world();
+            let arm = MockArm::default();
+            with_reader(&w, &arm);
+            let route = digest(&w);
+            let intent = readers(&w, "readers-2", present(2, 4));
+            let d = driver(&w, &arm, &intent);
+            d.reserve_readers(&w.objects, Some(ENDPOINT), NOW).unwrap();
+            let (profile, scope) = (reader_app("v2"), PinScope::for_test());
+            let update = Verb::Update {
+                config_digest: sha(b"v2"),
+            };
+            arm.script(Begin::Unknown);
+            for _ in 0..3 {
+                let refused = d
+                    .set_readers(
+                        &w.objects,
+                        Some(&profile),
+                        Some(&scope),
+                        Some(&fleet_at(2, "r1")),
+                        NOW,
+                    )
+                    .unwrap_err();
+                assert_eq!(refused.code, "cloud_outcome_unknown");
+                assert_eq!(arm.count(&update), 1, "never resent");
+                assert_eq!(digest(&w), route);
+                assert!(!held_receipt(&w));
+            }
+        }
+
+        #[test]
+        fn a_running_reader_update_is_polled_never_resent() {
+            let w = world();
+            let arm = MockArm::default();
+            with_reader(&w, &arm);
+            let intent = readers(&w, "readers-2", present(2, 4));
+            let d = driver(&w, &arm, &intent);
+            d.reserve_readers(&w.objects, Some(ENDPOINT), NOW).unwrap();
+            let (profile, scope) = (reader_app("v2"), PinScope::for_test());
+            let update = Verb::Update {
+                config_digest: sha(b"v2"),
+            };
+            arm.script(Begin::ApplyRunning("arm-op-update"));
+            arm.polls(running(3));
+            let observed = fleet_at(2, "r1");
+            let refused = d
+                .set_readers(
+                    &w.objects,
+                    Some(&profile),
+                    Some(&scope),
+                    Some(&observed),
+                    NOW,
+                )
+                .unwrap_err();
+            assert_eq!(refused.code, "cloud_outcome_unknown");
+            assert!(!held_receipt(&w));
+            let sealed = d
+                .set_readers(
+                    &w.objects,
+                    Some(&profile),
+                    Some(&scope),
+                    Some(&observed),
+                    NOW,
+                )
+                .unwrap();
+            receipt_of(&sealed);
+            assert_eq!(arm.count(&update), 1);
+        }
+
+        #[test]
+        fn an_overlapping_same_attempt_update_dispatches_once() {
+            let w = Arc::new(world());
+            let arm = Arc::new(MockArm::default());
+            with_reader(&w, &arm);
+            let intent = readers(&w, "readers-2", present(2, 4));
+            driver(&w, &arm, &intent)
+                .reserve_readers(&w.objects, Some(ENDPOINT), NOW)
+                .unwrap();
+            let (bw, barm, bintent) = (w.clone(), arm.clone(), intent.clone());
+            // B runs the whole change while A is about to dispatch.
+            arm.on_read(move || {
+                let sealed = driver(&bw, &barm, &bintent)
+                    .set_readers(
+                        &bw.objects,
+                        Some(&reader_app("v2")),
+                        Some(&PinScope::for_test()),
+                        Some(&fleet_at(2, "r1")),
+                        NOW,
+                    )
+                    .unwrap();
+                receipt_of(&sealed);
+            });
+            let sealed = driver(&w, &arm, &intent)
+                .set_readers(
+                    &w.objects,
+                    Some(&reader_app("v2")),
+                    Some(&PinScope::for_test()),
+                    Some(&fleet_at(2, "r1")),
+                    NOW,
+                )
+                .unwrap();
+            receipt_of(&sealed);
+            let update = Verb::Update {
+                config_digest: sha(b"v2"),
+            };
+            assert_eq!(arm.count(&update), 1);
+            assert_writer_unchanged(&w, Some(ENDPOINT));
+        }
+
+        #[test]
+        fn re_adding_readers_after_removal_reuses_the_stopped_reader_app() {
+            let w = world();
+            let arm = MockArm::default();
+            with_reader(&w, &arm);
+            let off = readers(&w, "readers-off", Fleet::Absent {});
+            let d = driver(&w, &arm, &off);
+            d.reserve_readers(&w.objects, None, NOW).unwrap();
+            d.set_readers(&w.objects, None, None, None, NOW).unwrap();
+            assert_writer_unchanged(&w, None);
+            let again = readers(&w, "readers-again", present(1, 2));
+            add(&w, &arm, &again, "v1", &fleet_at(1, "r1")).unwrap();
+            assert_writer_unchanged(&w, Some(ENDPOINT));
+            let reader_puts = arm
+                .calls()
+                .iter()
+                .filter(|c| c.resource == READER && matches!(c.verb, Verb::Put { .. }))
+                .count();
+            assert_eq!(reader_puts, 1, "the stopped app is reused, not recreated");
+            assert_eq!(
+                arm.count(&Verb::Update {
+                    config_digest: sha(b"v1")
+                }),
+                1
+            );
+            assert!(matches!(
+                arm.get(READER).unwrap().revisions,
+                Revisions::Complete(r) if r.iter().filter(|r| r.active).count() == 1
+            ));
+        }
+
+        #[test]
+        fn pin_recovery_refuses_while_another_action_is_unknown() {
+            let env = crate::server::cloud_recovery::tests::setup();
+            let w = world();
+            let arm = MockArm::default();
+            with_reader(&w, &arm);
+            let intent = readers(&w, "readers-off", Fleet::Absent {});
+            let d = driver(&w, &arm, &intent);
+            d.reserve_readers(&w.objects, None, NOW).unwrap();
+            arm.script(Begin::ApplyRunning("arm-op-stop"));
+            arm.polls(running(3));
+            d.set_readers(&w.objects, None, None, None, NOW)
+                .unwrap_err();
+            let pin = env
+                .sets
+                .pin(
+                    &env.set_id,
+                    "reader-apply:replica-0",
+                    PinKind::Operation,
+                    NOW - 1,
+                )
+                .unwrap();
+            let refused = d
+                .recover_pins(
+                    &w.objects,
+                    &env.sets,
+                    Some(&PinScope::for_test()),
+                    Some(&stopped("replica-0")),
+                    NOW,
+                )
+                .unwrap_err();
+            assert_eq!(refused.code, "prior_action_unknown");
+            assert!(pins(&env).contains(&pin.id));
+        }
+
+        #[test]
+        fn an_uncertain_pin_release_is_replayed_before_anything_else() {
+            let env = crate::server::cloud_recovery::tests::setup();
+            let w = world();
+            let arm = MockArm::default();
+            with_reader(&w, &arm);
+            let intent = readers(&w, "readers-off", Fleet::Absent {});
+            let d = driver(&w, &arm, &intent);
+            d.reserve_readers(&w.objects, None, NOW).unwrap();
+            let pin = env
+                .sets
+                .pin(
+                    &env.set_id,
+                    "reader-apply:replica-0",
+                    PinKind::Operation,
+                    NOW - 1,
+                )
+                .unwrap();
+            let scope = PinScope::for_test();
+            // Every bounded attempt of the release write is lost.
+            env.meta.fault(Op::Put, "record.json", Fault::Before, 0, 4);
+            d.recover_pins(
+                &w.objects,
+                &env.sets,
+                Some(&scope),
+                Some(&stopped("replica-0")),
+                NOW,
+            )
+            .unwrap_err();
+            assert!(pins(&env).contains(&pin.id));
+            let resource = format!("pin/{}/{}", env.set_id, pin.id);
+            assert!(steps(&w, &intent).contains(&(
+                resource.clone(),
+                "release-pin".into(),
+                StepOutcome::Uncertain {}
+            )));
+            // The replay settles it, then nothing is left to release.
+            assert_eq!(
+                d.recover_pins(
+                    &w.objects,
+                    &env.sets,
+                    Some(&scope),
+                    Some(&stopped("replica-0")),
+                    NOW,
+                )
+                .unwrap(),
+                0
+            );
+            assert!(!pins(&env).contains(&pin.id));
+            assert!(steps(&w, &intent).contains(&(
+                resource,
+                "release-pin".into(),
+                settled("released")
+            )));
+        }
+
+        fn pins(env: &crate::server::cloud_recovery::tests::Env) -> Vec<String> {
+            env.sets
+                .list()
+                .unwrap()
+                .sets
+                .into_iter()
+                .filter_map(|s| s.record)
+                .flat_map(|r| r.pins)
+                .map(|p| p.id)
+                .collect()
         }
     }
 }

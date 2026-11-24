@@ -1056,6 +1056,47 @@ pub(super) fn reserve(
     intent: &Intent,
     now: u64,
 ) -> Result<(), ApiError> {
+    reserve_with(ops, objects, intent, now, |current| {
+        current.reserve(
+            &intent.tenant_id,
+            &intent.operation_id,
+            intent.kind(),
+            &intent.request_digest,
+        )
+    })
+}
+
+/// EPIC-005: [`reserve`] bound, in the same CAS, to the released operation
+/// (`released`: its ID and terminal digest) and route digest the
+/// operation's plan was verified against. A stale plan takes no slot:
+/// `lifecycle_anchor_changed`.
+pub(super) fn reserve_after(
+    ops: &Operations,
+    objects: &Objects,
+    intent: &Intent,
+    released: (&str, &str),
+    route: &str,
+    now: u64,
+) -> Result<(), ApiError> {
+    reserve_with(ops, objects, intent, now, |current| {
+        current.reserve_after(
+            &intent.tenant_id,
+            &intent.operation_id,
+            intent.kind(),
+            &intent.request_digest,
+            released,
+            route,
+        )
+    })
+}
+
+fn reserve_with(
+    ops: &Operations,
+    objects: &Objects,
+    intent: &Intent,
+    now: u64,
+    change: impl FnMut(&Snapshot) -> Result<Snapshot, ApiError>,
+) -> Result<(), ApiError> {
     if ops.read_terminal(&intent.operation_id)?.is_some() {
         return Err(ended());
     }
@@ -1063,14 +1104,7 @@ pub(super) fn reserve(
         objects,
         now,
         |snapshot| holds(snapshot, intent).is_some(),
-        |current| {
-            current.reserve(
-                &intent.tenant_id,
-                &intent.operation_id,
-                intent.kind(),
-                &intent.request_digest,
-            )
-        },
+        change,
     )
     .map(drop)
 }

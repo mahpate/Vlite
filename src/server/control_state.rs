@@ -870,6 +870,38 @@ impl Snapshot {
         Ok(next)
     }
 
+    /// [`Self::reserve`] bound to what the operation was planned against:
+    /// the slot must still be released by exactly `released` (operation and
+    /// terminal digest) and the published route must digest to `route`.
+    /// Anything else (another operation sealed or cancelled meanwhile, even
+    /// one that kept the route) refuses `lifecycle_anchor_changed`, so a
+    /// stale plan never takes the slot.
+    pub(super) fn reserve_after(
+        &self,
+        tenant: &str,
+        operation_id: &str,
+        kind: OperationKind,
+        request_digest: &str,
+        released: (&str, &str),
+        route: &str,
+    ) -> Result<Self, ApiError> {
+        let next = self.reserve(tenant, operation_id, kind, request_digest)?;
+        match self.lifecycle(tenant).map(|e| &e.slot) {
+            Some(Slot::Released {
+                operation_id,
+                terminal_digest,
+            }) if (operation_id.as_str(), terminal_digest.as_str()) == released
+                && self.record_for(tenant).map(route_digest).as_deref() == Some(route) =>
+            {
+                Ok(next)
+            }
+            _ => Err(lifecycle_error(
+                "lifecycle_anchor_changed",
+                "the tenant's lifecycle changed since the operation was planned",
+            )),
+        }
+    }
+
     /// Records a cancellation request. After activation a cancel cannot
     /// unpublish the route: 409 `retirement_required`.
     pub(super) fn request_cancel(

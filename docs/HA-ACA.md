@@ -590,40 +590,72 @@ future qualified path must keep.
   endpoint are fixed per operation in its durable plan. Observed state is the
   ACA app readback plus a fleet observation of each replica. A reader becomes
   eligible only when the writer authority is valid and serving with a head
-  (otherwise `reader_base_transition`), and every replica follows the
-  same set, lineage, binding and epoch, is not failed, and is fresh within its
-  bound (`replica_ineligible`). Missing observations return
+  (otherwise `reader_base_transition`), the tenant's reader app is owned and
+  runs the desired configuration in one active revision
+  (`reader_revision_unproven`), and every replica runs in that app and
+  revision, follows the same set, lineage, binding and epoch, is not failed,
+  and is fresh within its bound (`replica_ineligible`). Eligibility is proven
+  again from a current observation on every attempt before an endpoint is
+  published, so a retry never publishes on an earlier attempt's proof. Only
+  a publication that already committed is recovered from its receipt without
+  a new observation. Missing observations return
   `fleet_observation_unavailable` and duplicate replica names return
   `replica_identity_conflict`. More replicas than the maximum gives
   `reader_fleet_not_reduced`, fewer than the minimum `reader_fleet_below_min`.
   The maximum is a cost limit, not an availability or latency objective.
 - **Anchoring:** every reader change names the tenant's latest succeeded
-  receipt and current route (`readers_unanchored` otherwise). The first
+  receipt and current route (`readers_unanchored` otherwise). The
+  reservation itself is taken only if the lifecycle slot is still released by
+  the same operation and the route is unchanged, checked in the same
+  compare-and-swap. A plan made before another change sealed or was
+  cancelled is refused without taking the slot, even if the route is the
+  same. Retirement is bound the same way (`retirement_receipt_mismatch`).
+  REST/CLI `reserve` of a reader change or retirement does not use this
+  binding yet (composition blocker). The first
   endpoint is published by compare-and-swap. A later operation must keep the
   same endpoint (`reader_endpoint_changed`). Reader apps are private copies
   owned by the plan. A writer app or a different reader gives
   `reader_app_mismatch`. A deleted planned reader gives `reader_app_missing`.
-  The writer's identity and intent are never changed.
-- **Scale-in/removal:** the reader endpoint is unpublished first, so routing is
-  writer-only before any replica is stopped. Once unpublished, the removal
-  cannot be cancelled (`readers_in_progress`). The operation completes only after the
-  reduced fleet is verified (`readers_incomplete` otherwise). An uncertain
-  stop or update stays unknown and is never reported as success.
+  The writer's identity and intent are never changed. **Not enforced:** a
+  reader profile must never mount the writer's storage. The check above only
+  compares app names, and the profile schema that would expose mounts
+  (OD-006) does not exist, so this is blocked, not implemented.
+- **Removal (`absent`):** the reader endpoint is unpublished first, before any
+  reader app is stopped. Once unpublished, the removal cannot be cancelled
+  (`readers_in_progress`). It completes only after every reader app is proven
+  stopped (`readers_incomplete` otherwise).
+- **Scale-in (smaller `present` fleet):** the reader app is updated in place
+  while its endpoint stays published. Nothing is withdrawn first. The change
+  seals only once the reduced fleet is observed eligible
+  (`reader_fleet_not_reduced` until then). Reads stay on the writer only
+  because reader routing is disabled (`writer_only`), not because of the
+  reduction. Before reader routing can be qualified (ITEM-021), a present
+  reduction must withdraw the endpoint first and a cancelled update must be
+  rolled back. Neither exists. An uncertain stop or update stays unknown and
+  is never resent or reported as success.
 - **Abandoned pins:** control may release only `reader-apply:<replica>`
   operation pins created before a proven stop of that replica
   (`replica_stop_unproven` without proof). Each release is journaled first and
   repeated runs are idempotent. This also frees a full set (16 pins) left by
   crashed replicas. Unknown termination stays refused. Never release a pin
-  of a replica that may be running.
+  of a replica that may be running. The stop proof must name this tenant and
+  one of its planned reader apps. The pins themselves carry only the replica
+  name: no tenant, app or lineage. Recovery therefore scans every set, and
+  replica names can collide (the follower falls back to the host name or
+  `pid-<pid>`). Scoping pins to a tenant needs ITEM-008, and a production
+  observation and stop-proof source does not exist.
 - **Cleanup debt:** cancelling a reader add deletes only the reader it
-  created. A cancelled reader update cannot be rolled back. A stopped
+  created. A cancelled reader update is not rolled back: the app keeps the
+  new configuration while the route is unchanged. A stopped
   reader app is retained and reused by the next scale-out. An uncertain pin
   release is resolved only by rerunning recovery. Retirement must name the
   latest receipt and also stops owned readers.
 - **Missing production proof (all refuse):** reader pin scope (ITEM-008),
   a real ARM adapter and stop/update proof, a replica observation source,
-  replica clock proof, reader qualification, profile/quota/budget, reader
-  credentials and the control-worker/REST composition.
+  replica clock proof, reader qualification, profile/quota/budget (including
+  the writer-storage mount check, OD-006), reader credentials and the
+  control-worker/REST composition. Fixtures for replacement-only changes and
+  policy lag do not exist yet.
 
 ## Recover control-state availability or publish a refresh
 
