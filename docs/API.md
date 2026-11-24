@@ -1451,3 +1451,57 @@ replicas, let a credential exceed its limit in proportion, and this overshoot
 is not qualified. A request body is held in memory up to `max_request_bytes`.
 In trusted mode, `/v1/auth/config` and the capabilities still describe the
 local token configuration.
+
+## Managed tenant deployments (intent only, opt-in, off by default)
+
+These admin routes record durable, idempotent tenant lifecycle intents in the
+control-state store. They do **not** provision, deploy, route or stop any
+Azure resource. There is no production ARM adapter or control worker, and no
+ACA-qualified behavior. The operator runbook and its local test evidence are
+in [HA-ACA](HA-ACA.md#managed-tenant-deployments-local-intent-only-not-aca-qualified).
+
+The routes are off by default. Without
+`vlite-server <db> --tenant-deployments-file <json>`
+(`{"target_file", "object", "shared_key_file"?}`, the `control-state` source
+above) they answer 409 `tenant_deployments_not_configured`. Enabling them
+needs `VLITE_ADMIN_DIR` and an admin token, and refuses `--insecure-local` and
+`--durability none`. The server then holds the admin directory's lock, and
+`vlite-server tenant-deployment ...` (same contracts, offline) answers
+`admin_dir_busy`. Requests without admin credentials get
+`admin_auth_required`.
+
+| Route | Effect today |
+|-------|--------------|
+| `POST /v1/admin/tenant-deployments` | `create`: records the intent, creates unrouted tenant metadata and reserves the tenant (202, phase `reserved`). Cloud execution refuses (OD-002). |
+| `POST /v1/admin/tenant-deployments/{tenant}/readers` | Records a reader change (202, phase `accepted`, `observed.reserved: false`). Nothing runs it. |
+| `POST /v1/admin/tenant-deployments/{tenant}/retire` | Records a retirement naming `expected_receipt` (`data_disposition: "retain"` only). Nothing runs it. |
+| `POST /v1/admin/tenant-deployments/{tenant}/migrations` | **Excluded.** Records an unreserved intent that nothing runs. Migration is not implemented. Do not use it. |
+| `GET /v1/admin/tenant-deployment-operations/{operation}` | Status: `phase`, `next_step`, generation tokens, `desired` and `observed` from the records (not live Azure state). |
+| `POST /v1/admin/tenant-deployment-operations/{operation}/{action}` | `resume` (no-op, never cloud execution) and `cancel`. Every other action is refused (below). |
+
+**Submission body:** `{"idempotency_key", "request": {"kind": ...},
+"contents": [...]}`, where `contents` holds the exact text of every
+referenced profile. A duplicate returns the same operation. The same key with
+different content answers 409 `operation_request_conflict`. A path/body
+mismatch answers 422 `operation_request_invalid`.
+
+**Action body:** `{"idempotency_key", "expected_operation_generation",
+"expected_lifecycle_generation", "expected_receipt"?, "ack_irreversible"?}`,
+using tokens from the latest status. Results:
+
+* Stale tokens: 409 `operation_generation_stale`. The same key with another
+  request: 409 `action_request_conflict`. Unknown action: 404
+  `tenant_deployment_action_unknown`. Unknown operation: 404
+  `operation_not_found`.
+* `resume` of a `present` reader change: 409 `pin_scope_unproven` (ITEM-008).
+* `cancel`: seals and releases a reserved, unactivated operation. It answers
+  409 `retirement_required` once activated, `operation_terminal` once ended,
+  and `transition_unavailable` while unreserved. An accepted, unreserved
+  reader change or retirement therefore cannot be withdrawn yet.
+* `acknowledge-delivery`, `replace-credentials`, `rollback` and `release`:
+  409 `transition_unavailable`. `release` without `ack_irreversible: true`
+  answers 422 `irreversible_ack_required` first.
+
+Responses never include the idempotency key, profile contents, secrets or
+tokens. Audit events are `tenant_deployment_accepted` and
+`tenant_deployment_action`.

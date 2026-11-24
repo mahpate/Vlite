@@ -259,3 +259,26 @@ Its fixtures describe the intended contract:
 - Both refusals here are unchanged pending protocol acceptance: the blocked HA
   verifier, and the managed paths (`profile_unsupported`,
   `projection_freshness_unproven`, `credential_view_unpublished`).
+- The `vlite-server tenant-deployment` CLI and the opt-in
+  `--tenant-deployments-file` routes only record intents. `create` reserves an
+  unrouted tenant. Reader changes and retirement are recorded without a
+  reservation. A `migrate` request is recorded as an unreserved intent that
+  nothing runs; migration is not implemented, and `rollback` and `release`
+  answer `transition_unavailable`. Nothing here calls Azure. See the
+  [operator runbook](../../../docs/HA-ACA.md#managed-tenant-deployments-local-intent-only-not-aca-qualified).
+
+Local checks for this contract (no Azure access; fake ARM and test-only
+proofs):
+
+```powershell
+cargo test --features server --lib tenant_provisioning
+cargo test --features server --test server_cli tenant_deployment
+python tests/openapi_contract.py
+python tests/admin_route_coverage.py
+```
+
+They exercise the contract against fakes, including the refusals of every
+unproven step. They do not prove real ARM/ACA
+behavior, effective RBAC, mount isolation (OD-006), replica clocks (OD-005),
+stop proofs (OD-002), reader routing (ITEM-021), MEAS-005/006 or GATE-005,
+and they are not qualification evidence.

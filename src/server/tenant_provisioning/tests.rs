@@ -4511,6 +4511,96 @@ mod epic_004 {
             ));
         }
 
+        // ------------- EPIC-007 ITEM-018: local runbook regression gaps
+
+        /// Replacing a failed replica with an unchanged desired configuration
+        /// is the same guarded in-place update (it rolls a new revision);
+        /// there is no targeted replica replacement and failed replicas are
+        /// not filtered out: one failed replica keeps the change unsealed
+        /// until a replacement is observed. Writer and endpoint never change
+        /// and the update is dispatched once.
+        #[test]
+        fn a_failed_replica_is_replaced_only_by_a_revision_rolling_update() {
+            let w = world();
+            let arm = MockArm::default();
+            with_reader(&w, &arm);
+            let before = digest(&w);
+            let intent = readers(&w, "replace-1", present(1, 2));
+            let observed = |replicas: &[(&str, bool)]| {
+                FleetObservation::for_test(
+                    authority(HEAD, 1),
+                    replicas
+                        .iter()
+                        .map(|(name, failed)| ReplicaStatus {
+                            revision: "r1".into(),
+                            failed: *failed,
+                            ..replica(name)
+                        })
+                        .collect(),
+                )
+            };
+            for fleet in [
+                observed(&[("replica-0", true)]),
+                observed(&[("replica-0", true), ("replica-1", false)]),
+            ] {
+                let refused = add(&w, &arm, &intent, "v1", &fleet).unwrap_err();
+                assert_eq!(refused.code, "replica_ineligible");
+                assert!(!held_receipt(&w));
+                assert_eq!(digest(&w), before);
+            }
+            add(&w, &arm, &intent, "v1", &observed(&[("replica-9", false)])).unwrap();
+            assert_eq!(digest(&w), before);
+            assert_writer_unchanged(&w, Some(ENDPOINT));
+            assert_eq!(
+                arm.count(&Verb::Update {
+                    config_digest: sha(b"v1")
+                }),
+                1,
+                "one revision-rolling update, never resent"
+            );
+            assert_eq!(writer_calls(&arm), 1);
+            assert_eq!(arm.count(&Verb::Stop) + arm.count(&Verb::Delete), 0);
+        }
+
+        /// Control-side policy lag: a route change published outside the
+        /// lifecycle (a binding-generation advance through a legacy directory
+        /// edit once the slot is released) matches no receipt, so later reader
+        /// changes and retirement are refused with no slot and no effect.
+        /// Replica-side lag is `replica_ineligible` (above). Only a route equal
+        /// to the latest receipt's re-anchors; nothing repairs it implicitly.
+        #[test]
+        fn a_route_change_outside_the_lifecycle_refuses_reader_changes_and_retirement() {
+            let w = world();
+            let arm = MockArm::default();
+            let (_, latest) = with_reader(&w, &arm);
+            let published = route(&w);
+            let publish = |route: Route| {
+                w.objects
+                    .apply(
+                        NOW,
+                        &Edit::Directory,
+                        Some(&[Route::shared_for_test(OTHER), route]),
+                        None,
+                    )
+                    .unwrap();
+            };
+            publish(Route {
+                binding_generation: published.binding_generation + 1,
+                ..published.clone()
+            });
+            let change = readers(&w, "after-drift", present(1, 2));
+            assert_stale_refused(&w, &arm, &change, Some(ENDPOINT), "readers_unanchored");
+            let stale = retire_with(&w, "retire-after-drift", &latest);
+            assert_stale_refused(&w, &arm, &stale, None, "retirement_receipt_mismatch");
+            publish(published);
+            let intent = retire_with(&w, "retire-restored", &latest);
+            let d = driver(&w, &arm, &intent);
+            d.reserve_retirement(&w.objects, NOW).unwrap();
+            let guards = Guards::new(w.memory.clone(), TARGET);
+            let sealed = d.retire(&w.objects, &guards, NOW).unwrap();
+            assert_eq!(sealed.outcome(), &TerminalOutcome::Retired);
+        }
+
         #[test]
         fn pin_recovery_refuses_while_another_action_is_unknown() {
             let env = crate::server::cloud_recovery::tests::setup();

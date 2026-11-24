@@ -668,8 +668,157 @@ future qualified path must keep.
   a real ARM adapter and stop/update proof, a replica observation source,
   replica clock proof, reader qualification, profile/quota/budget (including
   the writer-storage mount check, OD-006), reader credentials and the
-  control-worker/REST composition. Fixtures for replacement-only changes and
-  policy lag do not exist yet.
+  control-worker/REST composition.
+- **Replica replacement and policy lag:** there is no targeted replica
+  replacement. A replacement is the same guarded in-place update (a new
+  revision), and eligibility is all-or-nothing: one failed replica keeps the
+  change unsealed until a healthy replacement is observed. Replica-side lag
+  (stale age, older binding or epoch, replaced revision) is
+  `replica_ineligible`. Control-side lag, meaning a route changed outside the
+  lifecycle (for example a binding-generation advance through
+  `control-state update --directory-file`), matches no receipt. Later reader
+  changes then refuse `readers_unanchored` and retirement refuses
+  `retirement_receipt_mismatch`, with no slot or effect. Nothing repairs this
+  implicitly: only republishing the route recorded by the latest receipt
+  re-anchors.
+
+## Managed tenant deployments (local intent only, not ACA-qualified)
+
+The `tenant-deployment` admin surface records durable, idempotent lifecycle
+**intents** in the control-state store. It does not provision, start, stop,
+deploy or route any Azure resource. There is no production ARM adapter, no
+control worker that runs accepted operations, and no qualified ACA behavior.
+For managed tenants today, use the manual procedures in this guide.
+
+| Request | What runs locally today | Qualified on ACA |
+|---------|-------------------------|------------------|
+| `create` | Records the intent, creates **unrouted** tenant metadata from the persisted ID and reserves the tenant (phase `reserved`). Cloud execution refuses (OD-002). | No |
+| `status` | Read-only view of the records (below). | No |
+| `resume` | Records the action as an idempotent no-op; it never runs a cloud step. A `present` reader change answers 409 `pin_scope_unproven`. | No |
+| `cancel` | Seals and releases a reserved operation that has not activated (`retirement_required` once activated, `transition_unavailable` while unreserved). | No |
+| `readers`, `retire` | Recorded as intent only (`accepted`, `observed.reserved: false`). The actuators exist only in offline fixtures. | No |
+| `migrate`, `rollback`, `release`, `acknowledge-delivery`, `replace-credentials` | Excluded (see below). | No |
+
+**Before you start.** REST is off by default. Without the flag every route
+answers 409 `tenant_deployments_not_configured`. Start with
+`vlite-server <db> --tenant-deployments-file <json>`, where the JSON is
+`{"target_file", "object", "shared_key_file"?}` (the same control-state
+source as `control-state`). This also needs `VLITE_ADMIN_DIR` and an admin
+token, and refuses `--insecure-local` and `--durability none`. While it runs,
+the server holds the admin directory's lock, so the CLI answers
+`admin_dir_busy`. Use either the server or the CLI:
+
+```sh
+vlite-server tenant-deployment <create|readers|retire> --request-file req.json [--tenant <id>] \
+  --target-file target.json --object gateway/control-state.json --admin-dir /data/admin
+vlite-server tenant-deployment status --operation <id> --target-file ... --object ... --admin-dir ...
+vlite-server tenant-deployment <resume|cancel> --operation <id> --request-file action.json \
+  --target-file ... --object ... --admin-dir ...
+```
+
+Operation records live under `<prefix>tenant-operations/` beside the
+control-state object. Routes, bodies and errors are listed in the
+[API reference](API.md#managed-tenant-deployments-intent-only-opt-in-off-by-default).
+
+**Create.** Submit `{"idempotency_key", "request": {"kind": "create", ...},
+"contents": [...]}`. `contents` holds the exact text of every profile it
+names by SHA-256. Resubmitting the same key and content returns the same
+operation (and reserves it if an earlier attempt stopped before that). The
+same key with different content answers `operation_request_conflict`. The
+tenant stays unrouted, and status keeps `next_step` at "cloud execution is
+blocked (OD-002)". Profiles, quota and budget have no approved schema
+(OD-006), and no credential view is delivered (OD-004).
+
+**Status.** `GET /v1/admin/tenant-deployment-operations/{operation}` (or
+`status`) shows `phase` (`accepted`, `reserved`, `cancelling`, `activated`,
+`succeeded`, `cancelled`, `retired`), `next_step`, the generation tokens
+(`operation_generation`, `lifecycle_generation`, `receipt_digest`),
+`desired`, and `observed` (`reserved`, `routed`, `cancellation_requested`,
+`journal_steps`, `uncertain_steps`, `terminal`). It never shows the
+idempotency key, profile contents, secrets or tokens. `observed` reports the
+operation records, not live Azure state.
+
+**Resume and cancel.** Each action is
+`{"idempotency_key", "expected_operation_generation",
+"expected_lifecycle_generation", "expected_receipt"?}` with the tokens from
+the latest status. Stale tokens answer 409 `operation_generation_stale` (read
+the status again). The same key with a different request answers
+`action_request_conflict`. A refused action writes no record. `resume` is not
+cloud execution. Cancelling a reserved `create` seals the operation and
+releases the reservation. If status shows `cancelling`, repeat the same
+request. A cancelled create keeps its non-routable tenant metadata. An
+accepted, unreserved reader change or retirement **cannot be withdrawn**
+(`transition_unavailable`), but it holds no slot and never blocks later
+changes. Atomic withdrawal is a prerequisite for any worker.
+
+**Readers and retirement.** Submissions only record intent. Present fleets
+stay denied (`pin_scope_unproven`, ITEM-008) and reader routing stays
+`writer_only`. The offline contract that a future qualified actuator must keep
+is in [provisioned reader fleets](#provisioned-reader-fleets-offline-contract-not-available).
+It covers removal (unpublish before stop), present scale-in (in place, with
+the endpoint still published), anchoring and cleanup debt. The retirement
+contract removes the route and stops apps. It never deletes data
+(`data_disposition` accepts only `retain`).
+
+**Migration and release: excluded.** Existing-tenant migration (EPIC-006) is
+not implemented and is outside this runbook. Do not submit `migrate`: the
+route only records an unreserved intent and nothing runs it. `rollback`,
+`release` (which first needs `ack_irreversible: true`, otherwise 422
+`irreversible_ack_required`), `acknowledge-delivery` and
+`replace-credentials` answer 409 `transition_unavailable`. There is no data
+barrier, cutover, credential delivery or source release. Move tenants only
+with the reviewed manual procedures.
+
+**Retained data.** Cancellation and retirement keep databases, archives,
+writer authority, credentials and control records. In the offline contract,
+cancellation deletes only apps that the operation itself created, and
+retirement stops apps and removes the route. A resource that existed before
+the first dispatch is refused, never adopted, even with the owner tag. Today
+no app is created, so an admin cancel deletes nothing. Do not delete
+operation records, edit lifecycle entries by hand or remove control state to
+"unstick" an operation.
+
+**Uncertain outcomes.** `uncertain_steps > 0` means a cloud step's outcome is
+unknown. Today only offline fixtures can produce one, because no adapter
+runs. The contract reconciles through the persisted ARM operation and
+readback. It never resends an unknown action, never adopts a foreign
+resource and never retries destructively to clear debt. A cancel cannot seal
+while an action or guard is unresolved. Slots reserved without a plan by
+local builds from EPIC-002 (1d8000b9) through e36403e1 lack provenance and
+have no automated repair. A differing route refuses. A same-route slot with
+a newer receipt may be accepted by a same-operation retry. After it is
+cancelled, later changes refuse (fail closed). Leave such state in place and
+escalate.
+
+**Schema upgrade and rollback.** The control-state object gains a
+`lifecycle` field only once an operation reserves; until then its bytes are
+unchanged for older readers. Older binaries that refuse unknown fields fail
+closed on an object that carries lifecycle state. They do not ignore it.
+Locally this is shown with a strict pre-lifecycle field set, not by running
+an old binary. Rolling back therefore means rolling the binary forward again
+or keeping the new version. Never strip `lifecycle`, reservations, receipts
+or operation records to make an older binary start.
+
+**Effective permissions are not proven.** Fixtures prove neither Azure RBAC
+nor mount isolation. Reader pins rewrite the writer's set record, so no
+tenant-scoped grant exists (ITEM-008). The writer-storage mount exclusion is
+not enforced (OD-006). Treat every permission statement here as a design
+requirement, not a verified property.
+
+**Local fault suites.** These run without Azure and are the only evidence for
+this surface:
+
+| Command | Shows | Does not show |
+|---------|-------|---------------|
+| `cargo test --features server --lib tenant_provisioning` | Durable intents and idempotency, reservation/route CAS, guards, fake-ARM create/update/delete/stop, unknown-outcome reconciliation, no adoption, retention on cancel/retire, reader anchoring/eligibility, schema compatibility, admin REST/CLI refusals and redaction | Real ARM/ACA behavior, Azure RBAC or mounts, clock/freshness, stop proofs, timing or storage measurements |
+| `cargo test --features server --lib epic_005` | The reader/retirement subset, including stale plans, races, replacement and route lag | Reader routing or reader qualification (ITEM-021) |
+| `cargo test --features server --test server_cli tenant_deployment` | Routes are opt-in and refused before a database is created | Any served lifecycle |
+| `python tests/openapi_contract.py`, `python tests/admin_route_coverage.py` | Routes are registered with their OpenAPI contracts and are admin-only | Behavior |
+
+Every test should pass. A refusal listed above is the expected result, not a
+failure to work around. Passing suites do not complete the epic or any gate:
+OD-002/004/005/006, ITEM-008, ITEM-021, MEAS-005/006 and GATE-005 stay open,
+and auto-failover stays off by default.
 
 ## Recover control-state availability or publish a refresh
 
@@ -819,3 +968,6 @@ test recovery or reuse old credentials on the new lineage.
 - ACA gateway load and staleness measurements, or a completed ACA run of the
   Blob fencing measurement.
 - Query routing of writes to readers, position tokens or read-your-writes overrides.
+- Managed tenant provisioning, reader fleets, retirement or migration on ACA:
+  the `tenant-deployment` surface records intent only (see
+  [managed tenant deployments](#managed-tenant-deployments-local-intent-only-not-aca-qualified)).
