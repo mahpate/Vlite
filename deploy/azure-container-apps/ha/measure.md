@@ -508,10 +508,31 @@ Tokio's millisecond timer wakes too late for many high-rate slots even with no
 HTTP work. Pacing now uses the dedicated caller's OS thread sleep, leaving
 async HTTP on runtime workers and preserving the one-period late-drop policy.
 The corrected driver improved dispatch in a bounded mock-HTTP comparison,
-but that is generator evidence only, not a repeat Azure run or capacity proof.
+but that comparison is generator evidence only, not Azure or capacity proof.
 The original campaign remains unchanged and cannot qualify the corrected code.
 
-**No MEAS-005 evidence exists. Neither the pilot, the full-profile collection
+Corrected full-profile run `m4fix24b` (clean `75a86dca`, unchanged profile)
+then collected all 25 windows. Of 2,076,000 scheduled requests, 2,017,242
+started, 2,017,215 succeeded, 58,697 were skipped as late and 61 for the
+in-flight cap. Gateway measurement-window dispatch at offered 1600 RPS
+improved from 296.581 to 1537.325 RPS, but still did not reach the offered
+rate. These are separate Azure campaigns, not a controlled same-host comparison.
+There were 27 HTTP 503 responses at offered 1600 RPS (7 direct measurement,
+19 gateway measurement, 1 gateway warmup). They also incremented
+`semantic_mismatches`; they do not establish corruption of successful HTTP 200
+responses. Empty transport/body `errors` does not mean every request succeeded.
+The saved aggregate counters cannot identify the 503 origin or cause; a
+run-scoped Log Analytics lookup during cleanup returned `WorkspaceNotFoundError`.
+Do not silently reclassify these responses or repeat the campaign without a
+diagnostic purpose.
+
+The corrected run's publisher and driver succeeded, but the wrapper again
+failed `WaitDeleted`. A read-only follow-up at `2026-11-24T12:42:19Z` found
+the group still deleting with only its managed environment remaining; local
+fixture cleanup was verified. Separate hash-bound follow-up records preserve
+the original summary/postflight failure rather than rewriting it.
+
+**No MEAS-005 evidence exists. Neither the pilot, either full-profile collection
 nor the local generator check qualifies serving, SLOs or gates.**
 
 ## Outputs, cost, and cleanup
