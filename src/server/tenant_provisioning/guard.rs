@@ -169,45 +169,70 @@ impl Guards {
         self.move_to(tenant, operation_id, State::Released)
     }
 
-    /// Ends an operation whose hold may still be in flight: writes this
-    /// operation's `released` guard with a conditional transition over
-    /// whatever revision is current (create over absence, compare-and-swap
-    /// over a released or this operation's guard). A delayed hold was
-    /// conditioned on a revision that preceded this write, so it can no
-    /// longer land. Refused while another operation holds the guard; a
-    /// write whose outcome is unknown fences nothing (retry it).
+    /// Ends an operation whose hold may still be in flight. The hold was
+    /// durably bound to one guard version, `bound` (`None`: absence), and
+    /// every hold write is conditioned on exactly that version
+    /// ([`Self::hold_bound`]). This releases the operation's own guard if
+    /// the hold landed; supersedes the bound version with this operation's
+    /// `released` guard if it is still current; and otherwise writes
+    /// nothing, since the bound version is gone for good (the guard object
+    /// is never deleted and versions are never reused), so the hold can no
+    /// longer land. Never touches another operation's guard. A write whose
+    /// outcome is unknown fences nothing (retry it).
     pub(in crate::server) fn fence(
         &self,
         tenant: &str,
         operation_id: &str,
-    ) -> Result<Guard, ApiError> {
-        if !is_hex(tenant, 32) || !is_hex(operation_id, 32) {
-            return Err(invalid("tenant and operation IDs must be 32 lowercase hex"));
-        }
-        let next = Guard {
-            schema: SCHEMA.to_owned(),
-            tenant: tenant.to_owned(),
-            operation_id: operation_id.to_owned(),
-            state: State::Released,
-        };
-        let current = self.read().map_err(Refusal::error)?;
-        let cond = match &current {
-            None => Cond::Create,
-            // Only a write of this operation's own release can have
-            // produced this revision, and it postdates every hold attempt.
-            Some((guard, _)) if guard == &next => return Ok(next),
-            Some((guard, etag))
-                if guard.state == State::Released
-                    || (guard.tenant == tenant && guard.operation_id == operation_id) =>
+        bound: Option<&str>,
+    ) -> Result<(), ApiError> {
+        let next = guard(tenant, operation_id, State::Released)?;
+        match self.read().map_err(Refusal::error)? {
+            Some((current, _)) if current == next => Ok(()),
+            // The hold landed: release it.
+            Some((current, etag))
+                if current.tenant == tenant && current.operation_id == operation_id =>
             {
-                Cond::Match(etag)
+                self.write(&next, Cond::Match(&etag)).map(drop)
             }
-            Some(_) => {
-                return Err(conflict(
-                    "lifecycle_guard_held",
-                    "another operation holds this target's lifecycle guard",
-                ));
+            // The bound version is still current: supersede it.
+            None if bound.is_none() => self.write(&next, Cond::Create).map(drop),
+            Some((_, etag)) if bound == Some(etag.as_str()) => {
+                self.write(&next, Cond::Match(&etag)).map(drop)
             }
+            // Superseded already: a hold conditioned on it cannot land.
+            _ => Ok(()),
+        }
+    }
+
+    /// The current guard and its version, to bind a hold to (`None`:
+    /// absent).
+    pub(in crate::server) fn version(&self) -> Result<Option<(Guard, String)>, ApiError> {
+        self.read().map_err(Refusal::error)
+    }
+
+    /// Holds the target for `operation_id` over exactly the `bound` version
+    /// (`None`: absence) and never a later one, so a hold resumed after its
+    /// operation was fenced cannot acquire a successor's guard. Idempotent
+    /// for the holder; the bound version must be absent or released.
+    pub(in crate::server) fn hold_bound(
+        &self,
+        tenant: &str,
+        operation_id: &str,
+        bound: Option<&str>,
+    ) -> Result<Guard, ApiError> {
+        let next = guard(tenant, operation_id, State::Held)?;
+        if let Some((current, _)) = self.read().map_err(Refusal::error)?
+            && current.tenant == tenant
+            && current.operation_id == operation_id
+        {
+            return match current.state {
+                State::Released => Err(ended()),
+                _ => Ok(current),
+            };
+        }
+        let cond = match bound {
+            None => Cond::Create,
+            Some(etag) => Cond::Match(etag),
         };
         self.write(&next, cond)
     }
@@ -230,15 +255,7 @@ impl Guards {
     }
 
     fn move_to(&self, tenant: &str, operation_id: &str, to: State) -> Result<Guard, ApiError> {
-        if !is_hex(tenant, 32) || !is_hex(operation_id, 32) {
-            return Err(invalid("tenant and operation IDs must be 32 lowercase hex"));
-        }
-        let next = Guard {
-            schema: SCHEMA.to_owned(),
-            tenant: tenant.to_owned(),
-            operation_id: operation_id.to_owned(),
-            state: to,
-        };
+        let next = guard(tenant, operation_id, to)?;
         let current = self.read().map_err(Refusal::error)?;
         let cond = match &current {
             None if to == State::Held => Cond::Create,
@@ -277,6 +294,18 @@ impl Guards {
         };
         self.write(&next, cond)
     }
+}
+
+fn guard(tenant: &str, operation_id: &str, state: State) -> Result<Guard, ApiError> {
+    if !is_hex(tenant, 32) || !is_hex(operation_id, 32) {
+        return Err(invalid("tenant and operation IDs must be 32 lowercase hex"));
+    }
+    Ok(Guard {
+        schema: SCHEMA.to_owned(),
+        tenant: tenant.to_owned(),
+        operation_id: operation_id.to_owned(),
+        state,
+    })
 }
 
 fn not_held() -> ApiError {
@@ -410,61 +439,83 @@ pub(in crate::server) mod tests {
     }
 
     #[test]
-    fn a_fence_invalidates_every_earlier_conditional_hold() {
+    fn a_bound_hold_never_acquires_a_later_version_and_its_fence_proves_it() {
         let memory = Arc::new(Memory::default());
         let guards = guards(&memory);
-        let bytes = |op: &str| {
-            serde_json::to_vec(&Guard {
-                schema: SCHEMA.into(),
-                tenant: TENANT.into(),
-                operation_id: op.into(),
-                state: State::Held,
-            })
-            .unwrap()
-        };
-        // Over absence: a delayed create-only hold conflicts afterwards.
+        let version = |g: &Guards| g.version().unwrap().map(|(_, etag)| etag);
+        // Over absence: the fence supersedes it, so a delayed create-only
+        // hold conflicts afterwards; idempotent over its own release.
+        guards.fence(TENANT, OPERATION, None).unwrap();
+        assert_eq!(guards.current().unwrap().unwrap().state, State::Released);
         assert_eq!(
-            guards.fence(TENANT, OPERATION).unwrap().state,
-            State::Released
+            guards.hold_bound(TENANT, OPERATION, None).unwrap_err().code,
+            "operation_terminal"
         );
-        assert_eq!(
-            memory.put(NAME, &bytes(OPERATION), Cond::Create),
-            Err(StoreError::Conflict)
-        );
-        // Idempotent over its own release, which postdates every hold.
-        guards.fence(TENANT, OPERATION).unwrap();
-        // Over a predecessor's release: a delayed hold matched on that
-        // revision conflicts afterwards.
+        guards.fence(TENANT, OPERATION, None).unwrap();
+        // A hold bound to a predecessor's released version: a later
+        // version (here another operation's released guard) is never
+        // acquired, and fencing a superseded binding writes nothing.
         guards.hold(TENANT, OTHER).unwrap();
         guards.release(TENANT, OTHER).unwrap();
-        let old = memory.get(NAME, MAX_GUARD_BYTES).unwrap().etag;
-        guards.fence(TENANT, OPERATION).unwrap();
-        assert_eq!(
-            memory.put(NAME, &bytes(OPERATION), Cond::Match(&old)),
-            Err(StoreError::Conflict)
-        );
-        // Its own hold is released by the fence.
+        let old = version(&guards).unwrap();
         let fresh = Arc::new(Memory::default());
-        let own = Guards::new(fresh.clone(), "test/");
-        own.hold(TENANT, OPERATION).unwrap();
-        own.fence(TENANT, OPERATION).unwrap();
-        assert_eq!(own.current().unwrap().unwrap().state, State::Released);
-        // Never over another operation's hold; an unknown write fences
-        // nothing and is retried.
-        guards.hold(TENANT, OTHER).unwrap();
+        let late = Guards::new(fresh.clone(), "test/");
+        late.hold(TENANT, OTHER).unwrap();
+        late.release(TENANT, OTHER).unwrap();
+        let bound = version(&late).unwrap();
+        late.hold(TENANT, "11111111111111111111111111111111")
+            .unwrap();
+        late.release(TENANT, "11111111111111111111111111111111")
+            .unwrap();
+        let successor = late.current().unwrap();
         assert_eq!(
-            guards.fence(TENANT, OPERATION).unwrap_err().code,
-            "lifecycle_guard_held"
+            late.hold_bound(TENANT, OPERATION, Some(&bound))
+                .unwrap_err()
+                .code,
+            "lifecycle_guard_conflict"
         );
-        guards.release(TENANT, OTHER).unwrap();
-        memory.fault(Op::Put, NAME, Fault::Before, 0, 1);
+        late.fence(TENANT, OPERATION, Some(&bound)).unwrap();
+        assert_eq!(late.current().unwrap(), successor);
+        // Over its still-current bound version, the fence supersedes it.
+        guards.fence(TENANT, OPERATION, Some(&old)).unwrap();
+        assert_eq!(guards.current().unwrap().unwrap().operation_id, OPERATION);
         assert_eq!(
-            guards.fence(TENANT, OPERATION).unwrap_err().code,
+            guards
+                .hold_bound(TENANT, OPERATION, Some(&old))
+                .unwrap_err()
+                .code,
+            "operation_terminal"
+        );
+        // Its own landed hold is released by the fence, idempotently.
+        let own = Guards::new(Arc::new(Memory::default()), "test/");
+        own.hold_bound(TENANT, OPERATION, None).unwrap();
+        assert_eq!(
+            own.hold_bound(TENANT, OPERATION, None).unwrap().state,
+            State::Held
+        );
+        own.fence(TENANT, OPERATION, None).unwrap();
+        own.fence(TENANT, OPERATION, None).unwrap();
+        assert_eq!(own.current().unwrap().unwrap().state, State::Released);
+        // Never another operation's guard: fencing over it writes nothing.
+        let other = Guards::new(Arc::new(Memory::default()), "test/");
+        other.hold(TENANT, OTHER).unwrap();
+        other.fence(TENANT, OPERATION, None).unwrap();
+        assert_eq!(other.current().unwrap().unwrap().operation_id, OTHER);
+        assert_eq!(other.check_transfer(), Err(Refusal::Reserved));
+        // An unknown fencing write proves nothing and is retried.
+        let unknown = Arc::new(Memory::default());
+        let retried = Guards::new(unknown.clone(), "test/");
+        unknown.fault(Op::Put, NAME, Fault::Before, 0, 1);
+        assert_eq!(
+            retried.fence(TENANT, OPERATION, None).unwrap_err().code,
             "lifecycle_guard_indeterminate"
         );
-        assert_eq!(guards.current().unwrap().unwrap().operation_id, OTHER);
-        guards.fence(TENANT, OPERATION).unwrap();
-        assert_eq!(guards.current().unwrap().unwrap().operation_id, OPERATION);
+        assert!(retried.current().unwrap().is_none());
+        retried.fence(TENANT, OPERATION, None).unwrap();
+        assert_eq!(
+            unknown.put(NAME, b"{}", Cond::Create),
+            Err(StoreError::Conflict)
+        );
     }
 
     #[test]

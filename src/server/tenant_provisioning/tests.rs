@@ -1330,9 +1330,18 @@ mod epic_004 {
         polls: Mutex<VecDeque<Result<Poll, ArmError>>>,
         polled: Mutex<Vec<String>>,
         read_fails: Mutex<bool>,
+        on_read: Mutex<Option<ReadHook>>,
     }
 
+    /// Runs once, just before the next resource readback (a deterministic
+    /// interleaving point for another executor).
+    type ReadHook = Box<dyn FnOnce() + Send>;
+
     impl MockArm {
+        fn on_read(&self, f: impl FnOnce() + Send + 'static) {
+            *self.on_read.lock().unwrap() = Some(Box::new(f));
+        }
+
         fn effect(&self, call: &Call) {
             let mut resources = self.resources.lock().unwrap();
             match &call.verb {
@@ -1427,6 +1436,10 @@ mod epic_004 {
         }
 
         fn read(&self, resource: &str) -> Result<Option<Observed>, ArmError> {
+            let hook = self.on_read.lock().unwrap().take();
+            if let Some(f) = hook {
+                f();
+            }
             if *self.read_fails.lock().unwrap() {
                 return Err(ArmError::Unknown);
             }
@@ -3021,5 +3034,284 @@ mod epic_004 {
     #[test]
     fn a_delayed_hold_cannot_land_after_cleanup_over_a_released_predecessor() {
         delayed_hold_after_cancel(Some("fedcba9876543210fedcba9876543210"));
+    }
+
+    // ------------------------------- review corrections, round 3 (277c6f77)
+
+    #[test]
+    fn an_overlapping_cleanup_cannot_settle_a_running_delete_as_absent() {
+        // A: cleanup A finds no delete step and pauses before its readback;
+        // cleanup B of the same attempt records and dispatches the delete,
+        // whose effect is visible while it still runs. A's later record
+        // reconciles B's step: absence is no proof, only a terminal poll is.
+        let w = Arc::new(world());
+        let arm = Arc::new(arm_with_env());
+        let intent = reserved(&w);
+        let guards = Guards::new(w.memory.clone(), TARGET);
+        driver(&w, &arm, &intent)
+            .provision(&w.objects, &app_only())
+            .unwrap();
+        request_cancel(&w.objects, &intent, NOW).unwrap();
+        let (bw, barm, bintent) = (w.clone(), arm.clone(), intent.clone());
+        arm.on_read(move || {
+            let guards = Guards::new(bw.memory.clone(), TARGET);
+            barm.script(Begin::ApplyRunning("arm-op-delete"));
+            barm.polls(running(3));
+            assert_eq!(
+                driver(&bw, &barm, &bintent)
+                    .cleanup(&bw.objects, &guards)
+                    .unwrap_err()
+                    .code,
+                "cloud_outcome_unknown"
+            );
+            assert!(barm.get(APP1).is_none());
+        });
+        arm.polls(running(3));
+        assert_eq!(
+            driver(&w, &arm, &intent)
+                .cleanup(&w.objects, &guards)
+                .unwrap_err()
+                .code,
+            "cloud_outcome_unknown"
+        );
+        assert_eq!(steps(&w, &intent)[1].2, StepOutcome::Uncertain {});
+        assert_eq!(
+            w.ops.release(&w.objects, &intent, NOW).unwrap_err().code,
+            "cleanup_pending"
+        );
+        // Only the terminal poll of B's recorded operation settles it.
+        driver(&w, &arm, &intent)
+            .cleanup(&w.objects, &guards)
+            .unwrap();
+        assert_eq!(steps(&w, &intent)[1].2, settled("deleted"));
+        assert_eq!(arm.count(&Verb::Delete), 1);
+        assert_eq!(
+            w.ops.release(&w.objects, &intent, NOW).unwrap().outcome(),
+            &TerminalOutcome::Cancelled
+        );
+    }
+
+    #[test]
+    fn an_overlapping_cleanup_accepts_a_delete_another_executor_settled() {
+        // A: when B settles its delete in between, A's record finds it
+        // settled and reports B's outcome (never a separate absence).
+        let w = Arc::new(world());
+        let arm = Arc::new(arm_with_env());
+        let intent = reserved(&w);
+        let guards = Guards::new(w.memory.clone(), TARGET);
+        driver(&w, &arm, &intent)
+            .provision(&w.objects, &app_only())
+            .unwrap();
+        request_cancel(&w.objects, &intent, NOW).unwrap();
+        let (bw, barm, bintent) = (w.clone(), arm.clone(), intent.clone());
+        arm.on_read(move || {
+            let guards = Guards::new(bw.memory.clone(), TARGET);
+            driver(&bw, &barm, &bintent)
+                .cleanup(&bw.objects, &guards)
+                .unwrap();
+        });
+        driver(&w, &arm, &intent)
+            .cleanup(&w.objects, &guards)
+            .unwrap();
+        assert_eq!(steps(&w, &intent)[1].2, settled("deleted"));
+        assert_eq!(arm.count(&Verb::Delete), 1);
+        assert_eq!(
+            w.ops.release(&w.objects, &intent, NOW).unwrap().outcome(),
+            &TerminalOutcome::Cancelled
+        );
+    }
+
+    #[test]
+    fn an_overlapping_create_never_adopts_or_settles_another_executors_create() {
+        // A (audit): provision A finds no create step and pauses before its
+        // pre-dispatch readback; B dispatches the create, still running. A
+        // refuses without settling anything, and the cancelled seal waits
+        // for B's recorded operation.
+        let w = Arc::new(world());
+        let arm = Arc::new(arm_with_env());
+        let intent = reserved(&w);
+        let guards = Guards::new(w.memory.clone(), TARGET);
+        let (bw, barm, bintent) = (w.clone(), arm.clone(), intent.clone());
+        arm.on_read(move || {
+            barm.script(Begin::ApplyRunning("arm-op-create"));
+            barm.polls(running(3));
+            assert_eq!(
+                driver(&bw, &barm, &bintent)
+                    .provision(&bw.objects, &app_only())
+                    .unwrap_err()
+                    .code,
+                "cloud_outcome_unknown"
+            );
+        });
+        assert!(
+            driver(&w, &arm, &intent)
+                .provision(&w.objects, &app_only())
+                .is_err()
+        );
+        assert_eq!(steps(&w, &intent)[0].2, StepOutcome::Uncertain {});
+        assert_eq!(
+            arm.count(&Verb::Put {
+                config_digest: sha(APP1.as_bytes())
+            }),
+            1
+        );
+        request_cancel(&w.objects, &intent, NOW).unwrap();
+        arm.polls(running(3));
+        assert_eq!(
+            driver(&w, &arm, &intent)
+                .cleanup(&w.objects, &guards)
+                .unwrap_err()
+                .code,
+            "cloud_outcome_unknown"
+        );
+        assert_eq!(
+            w.ops.release(&w.objects, &intent, NOW).unwrap_err().code,
+            "cleanup_pending"
+        );
+        driver(&w, &arm, &intent)
+            .cleanup(&w.objects, &guards)
+            .unwrap();
+        assert_eq!(steps(&w, &intent)[0].2, settled("created"));
+        assert!(arm.get(APP1).is_none());
+        w.ops.release(&w.objects, &intent, NOW).unwrap();
+    }
+
+    /// Cancels, cleans up and seals retirement `a` as a second executor of
+    /// the same attempt, then runs successor retirement B through a hold,
+    /// a cancellation and its cleanup. Returns B's operation ID.
+    fn cancel_a_then_cycle_b(w: &World, arm: &MockArm, a: &Intent, receipt: &str) -> String {
+        let guards = Guards::new(w.memory.clone(), TARGET);
+        request_cancel(&w.objects, a, NOW).unwrap();
+        driver(w, arm, a).cleanup(&w.objects, &guards).unwrap();
+        assert_eq!(
+            w.ops.release(&w.objects, a, NOW).unwrap().outcome(),
+            &TerminalOutcome::Cancelled
+        );
+        let b = retirement_keyed(w, "retire-b", receipt);
+        let db = driver(w, arm, &b);
+        db.reserve_retirement(&w.objects, NOW).unwrap();
+        w.memory.fault(Op::Put, CONTROL, Fault::Before, 0, 1);
+        db.retire(&w.objects, &guards, NOW).unwrap_err();
+        let held = guards.current().unwrap().unwrap();
+        assert_eq!(
+            (held.operation_id.as_str(), held.state),
+            (b.operation_id.as_str(), guard::State::Held)
+        );
+        request_cancel(&w.objects, &b, NOW).unwrap();
+        db.cleanup(&w.objects, &guards).unwrap();
+        assert_eq!(
+            w.ops.release(&w.objects, &b, NOW).unwrap().outcome(),
+            &TerminalOutcome::Cancelled
+        );
+        b.operation_id
+    }
+
+    /// B: retirement A journals its hold and pauses at `pause` (just before
+    /// its guard read, or just before its conditional guard write). A
+    /// second executor of A cancels, fences and seals it; successor B holds
+    /// and is cancelled and cleaned up. When A resumes it must not acquire
+    /// B's (or any later) guard version.
+    fn late_hold_after_successor(pause: Op) {
+        let w = Arc::new(world());
+        let arm = Arc::new(MockArm::default());
+        let (_, receipt) = activated(&w, &arm);
+        let a = retirement_keyed(&w, "retire-a", &receipt);
+        let guards = Guards::new(w.memory.clone(), TARGET);
+        driver(&w, &arm, &a)
+            .reserve_retirement(&w.objects, NOW)
+            .unwrap();
+        let route = w.snapshot().record_for(T).cloned();
+        let b = Arc::new(Mutex::new(String::new()));
+        let (hw, harm, ha, hb) = (w.clone(), arm.clone(), a.clone(), b.clone());
+        w.memory.hook(pause, guard::OBJECT, move || {
+            *hb.lock().unwrap() = cancel_a_then_cycle_b(&hw, &harm, &ha, &receipt);
+        });
+        assert!(
+            driver(&w, &arm, &a)
+                .retire(&w.objects, &guards, NOW)
+                .is_err()
+        );
+        let after = guards.current().unwrap().unwrap();
+        assert_eq!(
+            (after.operation_id.as_str(), after.state),
+            (b.lock().unwrap().as_str(), guard::State::Released)
+        );
+        assert!(guards.check_transfer().is_ok());
+        assert_eq!(w.snapshot().record_for(T).cloned(), route);
+        // A stays terminal: a rerun cannot hold either.
+        let _ = driver(&w, &arm, &a).retire(&w.objects, &guards, NOW);
+        assert_eq!(guards.current().unwrap().unwrap(), after);
+        assert!(guards.check_transfer().is_ok());
+        assert_eq!(arm.count(&Verb::Stop), 0);
+    }
+
+    #[test]
+    fn a_hold_paused_before_its_guard_read_cannot_acquire_a_successor_version() {
+        late_hold_after_successor(Op::Get);
+    }
+
+    #[test]
+    fn a_hold_paused_before_its_guard_write_cannot_acquire_a_successor_version() {
+        late_hold_after_successor(Op::Put);
+    }
+
+    #[test]
+    fn a_hold_interrupted_before_binding_resumes_or_is_fenced() {
+        // B: a crash after the hold was journaled but before its version
+        // was bound; a retry binds and holds, a cancellation fences it.
+        for cancel in [false, true] {
+            let w = world();
+            let arm = MockArm::default();
+            let (_, receipt) = activated(&w, &arm);
+            let intent = retirement(&w, &receipt);
+            let d = driver(&w, &arm, &intent);
+            let guards = Guards::new(w.memory.clone(), TARGET);
+            d.reserve_retirement(&w.objects, NOW).unwrap();
+            w.memory.fault(Op::Get, guard::OBJECT, Fault::Refuse, 0, 1);
+            assert_eq!(
+                d.retire(&w.objects, &guards, NOW).unwrap_err().code,
+                "lifecycle_guard_unavailable"
+            );
+            assert!(guards.current().unwrap().is_none());
+            if cancel {
+                request_cancel(&w.objects, &intent, NOW).unwrap();
+                d.cleanup(&w.objects, &guards).unwrap();
+                w.ops.release(&w.objects, &intent, NOW).unwrap();
+                assert!(guards.check_transfer().is_ok());
+                assert!(w.snapshot().record_for(T).is_some());
+            } else {
+                let sealed = d.retire(&w.objects, &guards, NOW).unwrap();
+                assert_eq!(sealed.outcome(), &TerminalOutcome::Retired);
+                assert_eq!(guards.current().unwrap().unwrap().state, guard::State::Held);
+            }
+        }
+    }
+
+    #[test]
+    fn an_unknown_hold_write_is_retried_against_its_bound_version() {
+        // B: the hold landed but its acknowledgement was lost; a retry
+        // recognises its own hold, and a retry of an unapplied write reuses
+        // the bound version (never a refreshed one).
+        for fault in [Fault::After, Fault::Before] {
+            let w = world();
+            let arm = MockArm::default();
+            let (_, receipt) = activated(&w, &arm);
+            let intent = retirement(&w, &receipt);
+            let d = driver(&w, &arm, &intent);
+            let guards = Guards::new(w.memory.clone(), TARGET);
+            d.reserve_retirement(&w.objects, NOW).unwrap();
+            w.memory.fault(Op::Put, guard::OBJECT, fault, 0, 1);
+            assert_eq!(
+                d.retire(&w.objects, &guards, NOW).unwrap_err().code,
+                "lifecycle_guard_indeterminate"
+            );
+            let sealed = d.retire(&w.objects, &guards, NOW).unwrap();
+            assert_eq!(sealed.outcome(), &TerminalOutcome::Retired);
+            let held = guards.current().unwrap().unwrap();
+            assert_eq!(
+                (held.operation_id.as_str(), held.state),
+                (intent.operation_id.as_str(), guard::State::Held)
+            );
+        }
     }
 }

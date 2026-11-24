@@ -25,7 +25,7 @@
 //!   verified route, stops the apps and seals `retired`. Data, archive and
 //!   every pre-existing or non-app resource are always retained. No reader
 //!   is ever started (EPIC-005), so no reader pin exists to clean up.
-use super::guard::Guards;
+use super::guard::{self, Guards};
 use super::*;
 
 /// Owner tag value prefix on every resource this contract creates.
@@ -42,6 +42,12 @@ const PLAN: &str = "control/receipt";
 const GUARD: &str = "control/guard";
 const HOLD: &str = "hold";
 const RELEASE: &str = "release";
+/// A hold step's durable binding: the one guard version its writes may
+/// replace (absence, or `GUARD_VERSION` + etag), or the cancellation's
+/// fence, after which no hold write may be issued.
+const GUARD_ABSENT: &str = "guard:absent";
+const GUARD_VERSION: &str = "guard:version:";
+const GUARD_FENCED: &str = "guard:fenced";
 
 // ------------------------------------------------------------------ port
 
@@ -664,12 +670,14 @@ impl<'a> Driver<'a> {
             }
             Some(_) => {}
             None => match self.read(resource)? {
-                None => {
-                    return match self.ops.record(self.op(), &self.attempt, &action)? {
-                        Decision::Dispatch(n) | Decision::Reconcile(n) => self.settle(n, "absent"),
-                        Decision::Settled(_) => Ok(()),
-                    };
-                }
+                // Only a newly recorded step proves no executor dispatched
+                // this action before the absence was read. A reconciled
+                // step was recorded (and may be running) meanwhile: it
+                // needs its own terminal poll below.
+                None => match self.ops.record(self.op(), &self.attempt, &action)? {
+                    Decision::Dispatch(n) => return self.settle(n, "absent"),
+                    Decision::Reconcile(_) | Decision::Settled(_) => {}
+                },
                 Some(found) if found.owner.as_deref() != Some(self.owner().as_str()) => {
                     return Err(ownership_conflict());
                 }
@@ -682,7 +690,19 @@ impl<'a> Driver<'a> {
             verb,
         };
         let (sequence, outcome, refused) = match self.dispatch(&action, call)? {
-            Dispatched::Settled => return Err(state_invalid()),
+            // Settled by another executor in between: its outcome stands.
+            Dispatched::Settled => {
+                let step = self.step(&action)?.ok_or_else(state_invalid)?;
+                return match step.outcome {
+                    StepOutcome::Settled { observed }
+                        if observed == done || observed == "absent" =>
+                    {
+                        Ok(())
+                    }
+                    StepOutcome::Settled { .. } => Err(failed()),
+                    StepOutcome::Uncertain {} => Err(unknown()),
+                };
+            }
             Dispatched::Refused(sequence, code) => (sequence, Outcome::Failed(code), true),
             Dispatched::Pending(sequence, outcome) => (sequence, outcome, false),
         };
@@ -877,42 +897,95 @@ impl<'a> Driver<'a> {
     }
 
     /// Holds the lifecycle guard, journaled first so that a cancel always
-    /// knows to reconcile it.
+    /// knows to reconcile it. Before any guard write, the hold step durably
+    /// binds (first writer wins, [`Operations::observe`]) the one guard
+    /// version it may replace: absence or a released guard. Every executor
+    /// and retry reuses that binding and never refreshes it, so a hold
+    /// paused across a cancellation cannot acquire a successor's version;
+    /// a cancellation that finds the hold unbound binds [`GUARD_FENCED`]
+    /// instead, so that no guard write can ever follow.
     fn hold_guard(&self, guards: &Guards) -> Result<(), ApiError> {
         let action = self.guard_action(HOLD);
-        if let Some(Step {
-            outcome: StepOutcome::Settled { .. },
-            ..
-        }) = self.step(&action)?
-        {
-            return Ok(());
-        }
-        match self.ops.record(self.op(), &self.attempt, &action)? {
-            Decision::Settled(_) => Ok(()),
-            Decision::Dispatch(n) | Decision::Reconcile(n) => {
-                guards.hold(&self.intent.tenant_id, self.op())?;
-                self.settle(n, "held")
+        let sequence = match self.step(&action)? {
+            Some(Step {
+                outcome: StepOutcome::Settled { observed },
+                ..
+            }) => return held(&observed),
+            _ => match self.ops.record(self.op(), &self.attempt, &action)? {
+                Decision::Dispatch(n) | Decision::Reconcile(n) => n,
+                Decision::Settled(_) => {
+                    return match self.step(&action)?.map(|step| step.outcome) {
+                        Some(StepOutcome::Settled { observed }) => held(&observed),
+                        _ => Err(state_invalid()),
+                    };
+                }
+            },
+        };
+        let bound = match self.step(&action)?.and_then(|step| step.arm_operation) {
+            Some(bound) => bound,
+            None => {
+                let bound = match guards.version()? {
+                    None => GUARD_ABSENT.to_owned(),
+                    Some((current, _))
+                        if current.state != guard::State::Released
+                            && current.operation_id != self.op() =>
+                    {
+                        return Err(conflict(
+                            "lifecycle_guard_held",
+                            "another operation holds this target's lifecycle guard",
+                        ));
+                    }
+                    Some((_, etag)) => format!("{GUARD_VERSION}{etag}"),
+                };
+                // A different binding (another executor's, or the fence)
+                // refuses `step_conflict`; a retry then reads it.
+                self.ops
+                    .observe(self.op(), &self.attempt, sequence, &bound)?;
+                bound
             }
-        }
+        };
+        let version = match bound.as_str() {
+            GUARD_FENCED => return Err(operation_cancelled()),
+            GUARD_ABSENT => None,
+            bound => Some(
+                bound
+                    .strip_prefix(GUARD_VERSION)
+                    .ok_or_else(state_invalid)?,
+            ),
+        };
+        guards.hold_bound(&self.intent.tenant_id, self.op(), version)?;
+        self.settle(sequence, "held")
     }
 
     /// After a cancellation won: fences this operation's guard and journals
-    /// the release the seal requires ([`terminal_ready`]). The fence is a
-    /// conditional `released` write ([`Guards::fence`]), so a hold whose
-    /// outcome is still unknown can no longer land afterwards; absence or a
-    /// predecessor's guard is never taken as proof. Until that write is
-    /// acknowledged the hold stays unresolved and the seal is refused.
-    /// Idempotent; a no-op without a journaled hold.
+    /// the release the seal requires ([`terminal_ready`]). An unbound hold
+    /// is bound to [`GUARD_FENCED`] first, so no executor can write it any
+    /// more; a bound one is fenced over its bound version
+    /// ([`Guards::fence`]), so a hold whose outcome is still unknown can no
+    /// longer land afterwards. Until that is proven the hold stays
+    /// unresolved and the seal is refused. Idempotent; a no-op without a
+    /// journaled hold.
     fn release_guard(&self, guards: &Guards) -> Result<(), ApiError> {
-        let journal = self.ops.journal(self.op())?;
-        let Some(hold) = journal
-            .steps
-            .iter()
-            .find(|step| step.action == self.guard_action(HOLD))
-        else {
+        let action = self.guard_action(HOLD);
+        let Some(mut hold) = self.step(&action)? else {
             return Ok(());
         };
-        guards.fence(&self.intent.tenant_id, self.op())?;
+        if hold.arm_operation.is_none() {
+            self.ops
+                .observe(self.op(), &self.attempt, hold.sequence, GUARD_FENCED)?;
+            hold = self.step(&action)?.ok_or_else(state_invalid)?;
+        }
+        let tenant = &self.intent.tenant_id;
+        match hold.arm_operation.as_deref().ok_or_else(state_invalid)? {
+            GUARD_FENCED => {}
+            GUARD_ABSENT => guards.fence(tenant, self.op(), None)?,
+            bound => {
+                let version = bound
+                    .strip_prefix(GUARD_VERSION)
+                    .ok_or_else(state_invalid)?;
+                guards.fence(tenant, self.op(), Some(version))?;
+            }
+        }
         if hold.outcome == (StepOutcome::Uncertain {}) {
             self.settle(hold.sequence, "released")?;
         }
@@ -954,6 +1027,15 @@ enum Outcome {
     Failed(String),
     /// Not known to be terminal: it may still act.
     Open,
+}
+
+/// A settled hold step: held, or released after a cancellation.
+fn held(observed: &str) -> Result<(), ApiError> {
+    if observed == "held" {
+        Ok(())
+    } else {
+        Err(operation_cancelled())
+    }
 }
 
 fn created(observed: &str) -> Result<(), ApiError> {
