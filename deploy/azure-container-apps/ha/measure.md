@@ -531,6 +531,9 @@ failed `WaitDeleted`. A read-only follow-up at `2026-11-24T12:42:19Z` found
 the group still deleting with only its managed environment remaining; local
 fixture cleanup was verified. Separate hash-bound follow-up records preserve
 the original summary/postflight failure rather than rewriting it.
+The bounded read-only monitor confirmed the exact group absent at
+`2026-11-24T12:57:02.7974840Z` without another delete. Collection and cleanup
+for this attempt are complete; the load and qualification limitations remain.
 
 **No MEAS-005 evidence exists. Neither the pilot, either full-profile collection
 nor the local generator check qualifies serving, SLOs or gates.**
