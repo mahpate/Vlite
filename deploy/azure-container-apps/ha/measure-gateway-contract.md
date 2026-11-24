@@ -297,7 +297,12 @@ bodies are explicit errors. No request is retried.
 
 Absolute monotonic open-loop slots do not wait for responses. A slot one period
 late is counted `unsent_late`, not caught up in a burst; a full semaphore is
-`unsent_capacity`. Every scheduled slot is started or in exactly one unsent
+`unsent_capacity`. The dedicated `Runtime::block_on` caller uses an OS thread
+sleep for request pacing while HTTP tasks run on runtime workers. Tokio's
+millisecond-granularity timer is unsuitable for the 625-microsecond slots at
+1600 RPS. OS scheduling can still wake late: this change does not guarantee
+offered load, relax the late-drop rule or turn collected evidence into a pass.
+Every scheduled slot is started or in exactly one unsent
 bucket. Every started task is joined and counted; all response statuses,
 transport/body errors, semantic mismatches and schedule lateness are retained.
 Schedule lateness is measured when the async request task actually begins, not

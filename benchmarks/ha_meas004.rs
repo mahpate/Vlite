@@ -144,6 +144,15 @@ struct Window<'a> {
     expected: Arc<Value>,
     config: &'a Config,
 }
+
+fn wait_for_request(deadline: Instant, period: Duration) -> bool {
+    // The load loop runs on Runtime::block_on's caller, not a runtime worker.
+    // Tokio timers round to milliseconds, exceeding the 1600-rps slot (625us).
+    // Sleep this dedicated caller instead; HTTP tasks keep running on workers.
+    std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+    Instant::now().saturating_duration_since(deadline) < period
+}
+
 impl Window<'_> {
     async fn run(&self, path: &str, phase: &str, rate: u64, seconds: u64) -> Result<Value> {
         let mut envelope = self.issuer.issue()?;
@@ -168,14 +177,13 @@ impl Window<'_> {
         let mut lateness = Vec::new();
         let start = Instant::now();
         let scheduled = rate * seconds;
+        let period = Duration::from_nanos(1_000_000_000 / rate);
         for ordinal in 0..scheduled {
             while let Some(result) = jobs.try_join_next() {
                 outcomes.push(result.map_err(|_| "load_task_failed")?);
             }
             let deadline = start + Duration::from_nanos(ordinal * 1_000_000_000 / rate);
-            tokio::time::sleep_until(deadline).await;
-            let late = Instant::now().saturating_duration_since(deadline);
-            if late >= Duration::from_nanos(1_000_000_000 / rate) {
+            if !wait_for_request(deadline, period) {
                 unsent_late += 1;
                 continue;
             }
@@ -333,6 +341,18 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn late_slots_are_not_replayed_as_catch_up_requests() {
+        let rate = 1600;
+        let start = Instant::now() - Duration::from_secs(2);
+        let period = Duration::from_nanos(1_000_000_000 / rate);
+        for ordinal in 0..rate {
+            let deadline = start + Duration::from_nanos(ordinal * 1_000_000_000 / rate);
+            assert!(!wait_for_request(deadline, period));
+        }
+    }
+
     #[test]
     fn bounded_pilot_and_proposed_defaults() {
         let mut value = json!({"gateway_config":"g","token_file":"t","expected_body_file":"e",

@@ -494,8 +494,25 @@ at `WaitDeleted` because Azure was still deleting the group; a separate
 hash-bound follow-up later confirmed it absent with the original summary and
 postflight unchanged and no deletion resubmitted.
 
-**No MEAS-005 evidence exists, and the only MEAS-004 evidence is this tiny
-pilot. Nothing here qualifies serving, SLOs or gates.**
+The later full-profile run `m4full24a` (clean `c37e39f6`) collected all
+25 windows; publisher and driver succeeded. Of 2,076,000 scheduled requests,
+868,672 started and succeeded; 1,207,328 were skipped as late, none for capacity.
+The 800/1600-RPS loads were therefore not achieved. Cleanup again exceeded the
+harness wait; a separate hash-bound read-only lookup confirmed the group absent
+at `2026-11-24T10:14:03.7890066Z`, preserving the original failure records.
+Full provenance and immutable hashes are recorded in the
+[tenant-provisioning PRD](../../../docs/projects/feature-aca-ha/design-tenant-provisioning/design-tenant-provisioning.prd.md#isolated-azure-qualification-preflight-2026-11-24).
+
+A subsequent Linux-only local reproduction exposed a driver limitation:
+Tokio's millisecond timer wakes too late for many high-rate slots even with no
+HTTP work. Pacing now uses the dedicated caller's OS thread sleep, leaving
+async HTTP on runtime workers and preserving the one-period late-drop policy.
+The corrected driver improved dispatch in a bounded mock-HTTP comparison,
+but that is generator evidence only, not a repeat Azure run or capacity proof.
+The original campaign remains unchanged and cannot qualify the corrected code.
+
+**No MEAS-005 evidence exists. Neither the pilot, the full-profile collection
+nor the local generator check qualifies serving, SLOs or gates.**
 
 ## Outputs, cost, and cleanup
 
