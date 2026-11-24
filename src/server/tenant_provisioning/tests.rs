@@ -4786,7 +4786,7 @@ mod epic_004 {
         }
 
         /// A slot held without plan binding (only a test fixture or state
-        /// persisted by 2e53839d/e36403e1 admin submissions can hold one)
+        /// persisted by EPIC-002 through e36403e1 admin submissions can hold one)
         /// never passes as this operation's planned reservation. Its cancel
         /// leaves no plan to hop through, so later changes stay refused:
         /// fail closed, never repaired.

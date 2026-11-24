@@ -616,10 +616,16 @@ future qualified path must keep.
   (phase `accepted`, `observed.reserved` false) but reserves nothing: only the
   plan-anchored actuator reserves, so cancel returns
   `transition_unavailable` until then and a submission never blocks or
-  poisons later anchoring. Only `create` is reserved on submission. Slots
-  reserved without a plan by earlier local builds are refused, not adopted;
-  once cancelled they leave no plan to anchor on, so later changes stay
-  refused (fail closed, not repaired). The first
+  poisons later anchoring. Only `create` is reserved on submission. An
+  accepted, unreserved reader change or retirement cannot currently be
+  withdrawn; before a control worker drives these operations, withdrawal must
+  be made atomic with the plan-bound reservation. Slots reserved without a
+  plan by builds from EPIC-002 through e36403e1 are refused when their route
+  differs from the plan. One reserved at the same route after a newer receipt
+  is indistinguishable (a reserved slot records no predecessor) and can be
+  accepted by the same-operation retry path. Once cancelled, such a slot
+  leaves no plan to anchor on, so later changes stay refused (fail closed).
+  The missing history is not repaired. The first
   endpoint is published by compare-and-swap. A later operation must keep the
   same endpoint (`reader_endpoint_changed`). Reader apps are private copies
   owned by the plan. A writer app or a different reader gives
