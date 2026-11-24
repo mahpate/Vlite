@@ -998,6 +998,14 @@ fn check_reason(reason: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// Record pins and reader pin objects share the per-set bound.
+fn pins_full() -> ApiError {
+    conflict(
+        "cloud_pins_full",
+        format!("the backup set already has {MAX_PINS} pins; remove one first"),
+    )
+}
+
 fn unresolved(message: &str) -> ApiError {
     ApiError::new(
         StatusCode::SERVICE_UNAVAILABLE,
@@ -1645,13 +1653,14 @@ impl Sets {
         now: u64,
     ) -> Result<Pin, ApiError> {
         check_reason(reason)?;
+        let readers = self.reader_pin_names(id)?.len();
         let pin = Pin {
             id: format!("pin-{}", random_hex()?),
             reason: reason.into(),
             created_unix_ms: now,
             kind,
         };
-        self.update(id, now, |record, _| {
+        let (record, _) = self.update(id, now, |record, _| {
             if record.pins.iter().any(|p| p.id == pin.id) {
                 return Ok(Step::Done);
             }
@@ -1661,15 +1670,31 @@ impl Sets {
                     "only a published backup set can be pinned",
                 ));
             }
-            if record.pins.len() >= MAX_PINS {
-                return Err(conflict(
-                    "cloud_pins_full",
-                    format!("the backup set already has {MAX_PINS} pins; remove one first"),
-                ));
+            if record.pins.len() + readers >= MAX_PINS {
+                return Err(pins_full());
             }
             record.pins.push(pin.clone());
             Ok(Step::Write)
         })?;
+        // Reader pin objects are counted again after the write (see
+        // `pin_reader`); an over-cap pin is reverted, a failed revert logged.
+        let recheck = self.reader_pin_names(id);
+        let over = match &recheck {
+            Ok(names) => record.pins.len() + names.len() > MAX_PINS,
+            Err(_) => true,
+        };
+        if over {
+            if let Err(e) = self.release(id, &pin.id, now) {
+                super::logs::stderr(
+                    "error",
+                    "cloud_backup",
+                    serde_json::json!({"event": "cloud_pin_revert_failed",
+                        "set": id, "pin": pin.id, "code": e.code})
+                    .to_string(),
+                );
+            }
+            return Err(recheck.err().unwrap_or_else(pins_full));
+        }
         Ok(pin)
     }
 
@@ -1728,12 +1753,9 @@ impl Sets {
     /// existed had already left `published`, so the pin is withdrawn.
     pub(super) fn pin_reader(&self, id: &str, reason: &str, now: u64) -> Result<Pin, ApiError> {
         check_reason(reason)?;
-        self.require_published(id)?;
-        if self.reader_pin_names(id)?.len() >= MAX_PINS {
-            return Err(conflict(
-                "cloud_pins_full",
-                format!("the backup set already has {MAX_PINS} reader pins; release one first"),
-            ));
+        let record = self.published_record(id)?;
+        if record.pins.len() + self.reader_pin_names(id)?.len() >= MAX_PINS {
+            return Err(pins_full());
         }
         let pin = Pin {
             id: format!("pin-{}", random_hex()?),
@@ -1742,20 +1764,42 @@ impl Sets {
             kind: PinKind::Operation,
         };
         let key = self.reader_pin_key(id, &pin.id);
-        let withdraw = |error: ApiError| {
-            let _ = self.meta.delete(&key);
-            Err(error)
+        // Retained cleanup debt is logged; the caller keeps the original
+        // failure. Recovery or a later release can still find the object.
+        let withdraw = |cause: ApiError| {
+            if let Err(e) = self.meta.delete(&key)
+                && e != StoreError::NotFound
+            {
+                let e = ApiError::from(e);
+                super::logs::stderr(
+                    "error",
+                    "cloud_backup",
+                    serde_json::json!({"event": "cloud_reader_pin_withdraw_failed",
+                        "set": id, "pin": pin.id, "cause": cause.code, "code": e.code})
+                    .to_string(),
+                );
+            }
+            Err(cause)
         };
         if let Err(error) = self.meta.put(&key, &encode(&pin)?, Cond::Create) {
             return withdraw(error.into());
         }
-        match self.require_published(id) {
-            Ok(()) => Ok(pin),
-            Err(error) => withdraw(error),
+        // Count after the object exists: of two overlapping pins (reader or
+        // record, see `pin`) at least one sees the other and withdraws.
+        let total = match self.published_record(id) {
+            Ok(record) => match self.reader_pin_names(id) {
+                Ok(names) => record.pins.len() + names.len(),
+                Err(error) => return withdraw(error),
+            },
+            Err(error) => return withdraw(error),
+        };
+        if total > MAX_PINS {
+            return withdraw(pins_full());
         }
+        Ok(pin)
     }
 
-    fn require_published(&self, id: &str) -> Result<(), ApiError> {
+    fn published_record(&self, id: &str) -> Result<Record, ApiError> {
         if !valid_set_id(id) {
             return Err(not_found(
                 "cloud_set_not_found",
@@ -1779,7 +1823,7 @@ impl Sets {
                 "only a published backup set can be pinned",
             ));
         }
-        Ok(())
+        Ok(record)
     }
 
     /// Releases a pin taken by [`Sets::pin_reader`]; idempotent.
@@ -4517,6 +4561,173 @@ mod tests {
         assert!(reader_pin_names(&env).is_empty());
         env.sets.finish_delete(&id, BASE).unwrap();
         assert_eq!(record(&env, &id).state, SetState::Tombstoned);
+    }
+
+    #[test]
+    fn overlapping_reader_pins_never_exceed_the_cap() {
+        let env = setup();
+        let id = publish(&env, BASE);
+        let reader = fake::reader_view(&env.meta, &env.data, "vlite/prod/");
+        for _ in 0..MAX_PINS - 1 {
+            reader.pin_reader(&id, "r", BASE).unwrap();
+        }
+        // A second reader pins the last slot after the first reader counted
+        // and before its object exists.
+        let (meta, data, inner_id) = (env.meta.clone(), env.data.clone(), id.clone());
+        env.meta.hook(Op::Put, "reader-pins/", move || {
+            fake::reader_view(&meta, &data, "vlite/prod/")
+                .pin_reader(&inner_id, "r2", BASE)
+                .unwrap();
+        });
+        assert_eq!(
+            reader.pin_reader(&id, "r1", BASE).unwrap_err().code,
+            "cloud_pins_full"
+        );
+        assert_eq!(reader_pin_names(&env).len(), MAX_PINS);
+        assert!(record(&env, &id).pins.is_empty());
+    }
+
+    #[test]
+    fn reader_and_record_pins_share_one_cap_even_when_they_overlap() {
+        let env = setup();
+        let id = publish(&env, BASE);
+        let reader = fake::reader_view(&env.meta, &env.data, "vlite/prod/");
+        let total = |env: &Env| record(env, &id).pins.len() + reader_pin_names(env).len();
+        for _ in 0..MAX_PINS - 1 {
+            env.sets.pin(&id, "op", PinKind::Operation, BASE).unwrap();
+        }
+        let reader_pin = reader.pin_reader(&id, "r", BASE).unwrap();
+        assert_eq!(
+            reader.pin_reader(&id, "r", BASE).unwrap_err().code,
+            "cloud_pins_full"
+        );
+        assert_eq!(
+            env.sets
+                .pin(&id, "op", PinKind::Operation, BASE)
+                .unwrap_err()
+                .code,
+            "cloud_pins_full"
+        );
+        assert_eq!(total(&env), MAX_PINS);
+
+        // A record pin lands between the reader's count and its object.
+        reader.release_reader(&id, &reader_pin.id).unwrap();
+        let (sets, inner_id) = (env.sets.clone(), id.clone());
+        env.meta.hook(Op::Put, "reader-pins/", move || {
+            sets.pin(&inner_id, "op", PinKind::Operation, BASE).unwrap();
+        });
+        assert_eq!(
+            reader.pin_reader(&id, "r", BASE).unwrap_err().code,
+            "cloud_pins_full"
+        );
+        assert_eq!(record(&env, &id).pins.len(), MAX_PINS);
+        assert!(reader_pin_names(&env).is_empty());
+
+        // A reader pin lands between the record pin's count and its write.
+        let record_pins = record(&env, &id).pins;
+        env.sets.release(&id, &record_pins[0].id, BASE).unwrap();
+        let (meta, data, inner_id) = (env.meta.clone(), env.data.clone(), id.clone());
+        env.meta.hook(Op::Put, "record.json", move || {
+            fake::reader_view(&meta, &data, "vlite/prod/")
+                .pin_reader(&inner_id, "r", BASE)
+                .unwrap();
+        });
+        assert_eq!(
+            env.sets
+                .pin(&id, "op", PinKind::Operation, BASE)
+                .unwrap_err()
+                .code,
+            "cloud_pins_full"
+        );
+        assert_eq!(record(&env, &id).pins.len(), MAX_PINS - 1);
+        assert_eq!(reader_pin_names(&env).len(), 1);
+        assert_eq!(total(&env), MAX_PINS);
+    }
+
+    /// Log entries of `event` recorded after `since` that name `set`.
+    fn logged(event: &str, since: u64, set: &str) -> Vec<serde_json::Value> {
+        let (entries, ..) = super::super::logs::buffer().snapshot();
+        entries
+            .into_iter()
+            .filter(|e| e.seq > since && e.fields["event"] == event && e.fields["set"] == set)
+            .map(|e| e.fields)
+            .collect()
+    }
+
+    #[test]
+    fn a_failed_withdrawal_is_logged_as_retained_pin_cleanup_debt() {
+        let env = setup();
+        let id = publish(&env, BASE);
+        let reader = fake::reader_view(&env.meta, &env.data, "vlite/prod/");
+        let (_, _, _, since) = super::super::logs::buffer().snapshot();
+        // The create is applied but unconfirmed, and the withdrawal fails:
+        // the caller gets the original failure and the pin is reported.
+        env.meta.fault(Op::Put, "reader-pins/", Fault::After, 0, 1);
+        env.meta
+            .fault(Op::Delete, "reader-pins/", Fault::Refuse, 0, 1);
+        assert_eq!(
+            reader.pin_reader(&id, "r1", BASE).unwrap_err().code,
+            "cloud_store_unavailable"
+        );
+        let names = reader_pin_names(&env);
+        assert_eq!(names.len(), 1);
+        let debt = logged("cloud_reader_pin_withdraw_failed", since, &id);
+        assert_eq!(debt.len(), 1, "{debt:?}");
+        assert_eq!(debt[0]["cause"], "cloud_store_unavailable");
+        assert_eq!(debt[0]["code"], "cloud_store_failed");
+        let pin = debt[0]["pin"].as_str().unwrap();
+        assert!(names[0].ends_with(&format!("/{pin}.json")), "{names:?}");
+
+        // The set leaves `published` before the object exists and the
+        // withdrawal fails: the original refusal is kept.
+        let sets = env.sets.clone();
+        let condemned = id.clone();
+        env.meta.hook(Op::Put, "reader-pins/", move || {
+            sets.update(&condemned, BASE, |record, _| {
+                record.state = SetState::DeletePending;
+                Ok(Step::Write)
+            })
+            .unwrap();
+        });
+        env.meta
+            .fault(Op::Delete, "reader-pins/", Fault::Refuse, 0, 1);
+        assert_eq!(
+            reader.pin_reader(&id, "r2", BASE).unwrap_err().code,
+            "cloud_set_unavailable"
+        );
+        assert_eq!(reader_pin_names(&env).len(), 2);
+        let debt = logged("cloud_reader_pin_withdraw_failed", since, &id);
+        assert_eq!(debt.len(), 2, "{debt:?}");
+        assert_eq!(debt[1]["cause"], "cloud_set_unavailable");
+    }
+
+    #[test]
+    fn a_failed_record_pin_revert_is_logged_as_retained_pin_cleanup_debt() {
+        let env = setup();
+        let id = publish(&env, BASE);
+        for _ in 0..MAX_PINS - 1 {
+            env.sets.pin(&id, "op", PinKind::Operation, BASE).unwrap();
+        }
+        let (_, _, _, since) = super::super::logs::buffer().snapshot();
+        let (meta, data, inner_id) = (env.meta.clone(), env.data.clone(), id.clone());
+        env.meta.hook(Op::Put, "record.json", move || {
+            fake::reader_view(&meta, &data, "vlite/prod/")
+                .pin_reader(&inner_id, "r", BASE)
+                .unwrap();
+        });
+        // The pin write lands; the revert of the over-cap pin is refused.
+        env.meta.fault(Op::Put, "record.json", Fault::Refuse, 1, 1);
+        assert_eq!(
+            env.sets
+                .pin(&id, "op", PinKind::Operation, BASE)
+                .unwrap_err()
+                .code,
+            "cloud_pins_full"
+        );
+        assert_eq!(record(&env, &id).pins.len(), MAX_PINS);
+        let debt = logged("cloud_pin_revert_failed", since, &id);
+        assert_eq!(debt.len(), 1, "{debt:?}");
+        assert_eq!(debt[0]["code"], "cloud_store_failed");
     }
 
     #[test]
