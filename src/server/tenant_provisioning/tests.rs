@@ -1317,6 +1317,9 @@ mod epic_004 {
         RefuseAfter(&'static str, Observed),
         /// Someone else's resource appears at the name.
         Collide(Observed),
+        /// Takes effect at once, but its operation keeps running (it may
+        /// still act afterwards).
+        ApplyRunning(&'static str),
     }
 
     #[derive(Default)]
@@ -1406,6 +1409,10 @@ mod epic_004 {
                 Begin::Collide(found) => {
                     self.put(&call.resource, found);
                     Ok(id)
+                }
+                Begin::ApplyRunning(id) => {
+                    self.effect(call);
+                    Ok(id.into())
                 }
             }
         }
@@ -2737,5 +2744,282 @@ mod epic_004 {
         let sealed = d.retire(&w.objects, &guards, NOW).unwrap();
         assert_eq!(sealed.outcome(), &TerminalOutcome::Retired);
         assert!(w.snapshot().record_for(T).is_none());
+    }
+
+    // ------------------------------- review corrections, round 2 (f047bb9a)
+
+    #[test]
+    fn a_running_create_is_not_settled_by_a_foreign_owner_readback() {
+        // A: a foreign resource at the name is no proof the recorded create
+        // can no longer act; the cancelled seal waits for a terminal poll.
+        let w = world();
+        let arm = arm_with_env();
+        let intent = reserved(&w);
+        let d = driver(&w, &arm, &intent);
+        arm.script(Begin::Collide(app(&ours(OTHER), "x", &[true])));
+        arm.polls(running(3));
+        assert_eq!(
+            d.provision(&w.objects, &app_only()).unwrap_err().code,
+            "cloud_outcome_unknown"
+        );
+        assert_eq!(steps(&w, &intent)[0].2, StepOutcome::Uncertain {});
+        request_cancel(&w.objects, &intent, NOW).unwrap();
+        let guards = Guards::new(w.memory.clone(), TARGET);
+        arm.polls(running(3));
+        assert_eq!(
+            d.cleanup(&w.objects, &guards).unwrap_err().code,
+            "cloud_outcome_unknown"
+        );
+        assert_eq!(
+            w.ops.release(&w.objects, &intent, NOW).unwrap_err().code,
+            "cleanup_pending"
+        );
+        // A terminal failure settles the conflict (never `created`).
+        arm.polls([Ok(Poll::Failed("Conflict".into()))]);
+        d.cleanup(&w.objects, &guards).unwrap();
+        assert_eq!(steps(&w, &intent)[0].2, settled("conflict"));
+        assert_eq!(arm.count(&Verb::Delete), 0);
+        assert_eq!(
+            w.ops.release(&w.objects, &intent, NOW).unwrap().outcome(),
+            &TerminalOutcome::Cancelled
+        );
+    }
+
+    #[test]
+    fn a_running_delete_is_not_settled_by_an_absent_readback() {
+        // A: the delete's effect is visible, but its operation still runs.
+        let w = world();
+        let arm = arm_with_env();
+        let intent = reserved(&w);
+        let d = driver(&w, &arm, &intent);
+        let guards = Guards::new(w.memory.clone(), TARGET);
+        d.provision(&w.objects, &app_only()).unwrap();
+        request_cancel(&w.objects, &intent, NOW).unwrap();
+        arm.script(Begin::ApplyRunning("arm-op-delete"));
+        arm.polls(running(3));
+        assert_eq!(
+            d.cleanup(&w.objects, &guards).unwrap_err().code,
+            "cloud_outcome_unknown"
+        );
+        assert!(arm.get(APP1).is_none());
+        assert_eq!(
+            w.ops.release(&w.objects, &intent, NOW).unwrap_err().code,
+            "cleanup_pending"
+        );
+        d.cleanup(&w.objects, &guards).unwrap();
+        assert_eq!(steps(&w, &intent)[1].2, settled("deleted"));
+        assert_eq!(arm.count(&Verb::Delete), 1);
+        assert_eq!(
+            w.ops.release(&w.objects, &intent, NOW).unwrap().outcome(),
+            &TerminalOutcome::Cancelled
+        );
+    }
+
+    #[test]
+    fn a_failed_delete_is_never_success_even_when_the_app_is_gone() {
+        let w = world();
+        let arm = arm_with_env();
+        let intent = reserved(&w);
+        let d = driver(&w, &arm, &intent);
+        let guards = Guards::new(w.memory.clone(), TARGET);
+        d.provision(&w.objects, &app_only()).unwrap();
+        request_cancel(&w.objects, &intent, NOW).unwrap();
+        arm.script(Begin::ApplyRunning("arm-op-delete"));
+        arm.polls([Ok(Poll::Failed("InternalError".into()))]);
+        assert_eq!(
+            d.cleanup(&w.objects, &guards).unwrap_err().code,
+            "cloud_action_failed"
+        );
+        assert_eq!(steps(&w, &intent)[1].2, settled("failed:InternalError"));
+        assert_eq!(
+            w.ops.release(&w.objects, &intent, NOW).unwrap_err().code,
+            "cleanup_pending"
+        );
+    }
+
+    #[test]
+    fn a_running_stop_is_not_settled_by_an_inactive_readback() {
+        // A: the reservation is not released while the stop can still act.
+        let w = world();
+        let arm = MockArm::default();
+        let (_, receipt) = activated(&w, &arm);
+        let intent = retirement(&w, &receipt);
+        let d = driver(&w, &arm, &intent);
+        let guards = Guards::new(w.memory.clone(), TARGET);
+        d.reserve_retirement(&w.objects, NOW).unwrap();
+        arm.script(Begin::ApplyRunning("arm-op-stop"));
+        arm.polls(running(3));
+        assert_eq!(
+            d.retire(&w.objects, &guards, NOW).unwrap_err().code,
+            "cloud_outcome_unknown"
+        );
+        assert_eq!(
+            arm.get(APP1).unwrap(),
+            app(&ours(T), &sha(APP1.as_bytes()), &[false])
+        );
+        assert_eq!(
+            w.ops.release(&w.objects, &intent, NOW).unwrap_err().code,
+            "cleanup_pending"
+        );
+        assert!(matches!(
+            w.snapshot().lifecycle(T).unwrap().slot,
+            Slot::Reserved { .. }
+        ));
+        let sealed = d.retire(&w.objects, &guards, NOW).unwrap();
+        assert_eq!(sealed.outcome(), &TerminalOutcome::Retired);
+        assert_eq!(arm.count(&Verb::Stop), 1);
+    }
+
+    /// A parked guard write: name, bytes and its condition's etag (`None` for
+    /// create-only).
+    type Parked = (String, Vec<u8>, Option<String>);
+
+    /// Delegates to `Memory`, except that guard writes can be parked: the
+    /// caller sees an unknown outcome and the conditional write lands only
+    /// when the test calls [`Delayed::land`].
+    struct Delayed {
+        inner: Arc<Memory>,
+        park: Mutex<usize>,
+        parked: Mutex<Vec<Parked>>,
+    }
+
+    impl Delayed {
+        fn new(inner: Arc<Memory>) -> Arc<Self> {
+            Arc::new(Self {
+                inner,
+                park: Mutex::new(0),
+                parked: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn park_next(&self, writes: usize) {
+            *self.park.lock().unwrap() = writes;
+        }
+
+        /// Lands every parked write, in order, with its original condition.
+        fn land(&self) -> Vec<Result<String, StoreError>> {
+            let parked = std::mem::take(&mut *self.parked.lock().unwrap());
+            parked
+                .into_iter()
+                .map(|(name, bytes, etag)| {
+                    let cond = match &etag {
+                        Some(etag) => Cond::Match(etag),
+                        None => Cond::Create,
+                    };
+                    self.inner.put(&name, &bytes, cond)
+                })
+                .collect()
+        }
+    }
+
+    impl ObjectStore for Delayed {
+        fn get(
+            &self,
+            name: &str,
+            max: u64,
+        ) -> Result<crate::server::cloud_backup::Blob, StoreError> {
+            self.inner.get(name, max)
+        }
+
+        fn download(
+            &self,
+            name: &str,
+            out: &mut dyn std::io::Write,
+            max: u64,
+        ) -> Result<u64, StoreError> {
+            self.inner.download(name, out, max)
+        }
+
+        fn put(&self, name: &str, bytes: &[u8], cond: Cond<'_>) -> Result<String, StoreError> {
+            let mut park = self.park.lock().unwrap();
+            if *park > 0 && name.ends_with(guard::OBJECT) {
+                *park -= 1;
+                let etag = match cond {
+                    Cond::Match(etag) => Some(etag.to_owned()),
+                    Cond::Create => None,
+                };
+                self.parked
+                    .lock()
+                    .unwrap()
+                    .push((name.into(), bytes.to_vec(), etag));
+                return Err(StoreError::Unknown("parked".into()));
+            }
+            drop(park);
+            self.inner.put(name, bytes, cond)
+        }
+
+        fn put_file(
+            &self,
+            name: &str,
+            path: &std::path::Path,
+            cond: Cond<'_>,
+        ) -> Result<String, StoreError> {
+            self.inner.put_file(name, path, cond)
+        }
+
+        fn delete(&self, name: &str) -> Result<(), StoreError> {
+            self.inner.delete(name)
+        }
+
+        fn list(&self, prefix: &str) -> Result<Vec<String>, StoreError> {
+            self.inner.list(prefix)
+        }
+    }
+
+    /// Parks the retirement's conditional hold, cancels it, and runs the
+    /// cleanup; then lands the delayed hold. No late `held` may survive.
+    fn delayed_hold_after_cancel(predecessor: Option<&str>) {
+        let w = world();
+        let arm = MockArm::default();
+        let (_, receipt) = activated(&w, &arm);
+        let store = Delayed::new(w.memory.clone());
+        let guards = Guards::new(store.clone(), TARGET);
+        if let Some(predecessor) = predecessor {
+            guards.hold(T, predecessor).unwrap();
+            guards.release(T, predecessor).unwrap();
+        }
+        let before = guards.current().unwrap();
+        let intent = retirement(&w, &receipt);
+        let d = driver(&w, &arm, &intent);
+        d.reserve_retirement(&w.objects, NOW).unwrap();
+        store.park_next(1);
+        assert_eq!(
+            d.retire(&w.objects, &guards, NOW).unwrap_err().code,
+            "lifecycle_guard_indeterminate"
+        );
+        // The hold has not landed yet: the guard reads as before.
+        assert_eq!(guards.current().unwrap(), before);
+        request_cancel(&w.objects, &intent, NOW).unwrap();
+        // A fencing write whose own outcome is unknown proves nothing: the
+        // seal stays blocked.
+        store.park_next(1);
+        assert!(d.cleanup(&w.objects, &guards).is_err());
+        assert_eq!(
+            w.ops.release(&w.objects, &intent, NOW).unwrap_err().code,
+            "cleanup_pending"
+        );
+        d.cleanup(&w.objects, &guards).unwrap();
+        assert_eq!(
+            w.ops.release(&w.objects, &intent, NOW).unwrap().outcome(),
+            &TerminalOutcome::Cancelled
+        );
+        // The delayed conditional writes land only now; each is fenced.
+        for landed in store.land() {
+            assert_eq!(landed, Err(StoreError::Conflict));
+        }
+        let after = guards.current().unwrap().unwrap();
+        assert_eq!(after.state, guard::State::Released);
+        assert!(guards.check_transfer().is_ok());
+        assert!(w.snapshot().record_for(T).is_some());
+    }
+
+    #[test]
+    fn a_delayed_hold_cannot_land_after_cleanup_when_no_guard_existed() {
+        delayed_hold_after_cancel(None);
+    }
+
+    #[test]
+    fn a_delayed_hold_cannot_land_after_cleanup_over_a_released_predecessor() {
+        delayed_hold_after_cancel(Some("fedcba9876543210fedcba9876543210"));
     }
 }

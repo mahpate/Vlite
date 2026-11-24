@@ -516,6 +516,14 @@ impl<'a> Driver<'a> {
         };
         let found = self.read(&desired.resource)?;
         match &found {
+            // Someone else's resource is no proof this dispatch is over:
+            // while its operation may still act, the step stays unknown.
+            Some(found)
+                if found.owner.as_deref() != Some(self.owner().as_str())
+                    && outcome == Outcome::Open =>
+            {
+                Err(unknown())
+            }
             Some(found) if found.owner.as_deref() != Some(self.owner().as_str()) => {
                 self.settle(sequence, "conflict")?;
                 Err(ownership_conflict())
@@ -629,8 +637,11 @@ impl<'a> Driver<'a> {
     }
 
     /// One destructive action on an owned resource, settled as `done` only
-    /// when the readback satisfies `proven`. An absent resource needs no
-    /// action; one owned by anyone else is never touched.
+    /// when its cloud operation succeeded (or the port refused it with no
+    /// effect) and the readback satisfies `proven`: an apparently finished
+    /// effect is no proof while the operation may still act, and a failed
+    /// operation is never success. An absent resource needs no action; one
+    /// owned by anyone else is never touched.
     fn destructive(
         &self,
         resource: &str,
@@ -670,10 +681,10 @@ impl<'a> Driver<'a> {
             owner: self.owner(),
             verb,
         };
-        let (sequence, outcome) = match self.dispatch(&action, call)? {
+        let (sequence, outcome, refused) = match self.dispatch(&action, call)? {
             Dispatched::Settled => return Err(state_invalid()),
-            Dispatched::Refused(sequence, code) => (sequence, Outcome::Failed(code)),
-            Dispatched::Pending(sequence, outcome) => (sequence, outcome),
+            Dispatched::Refused(sequence, code) => (sequence, Outcome::Failed(code), true),
+            Dispatched::Pending(sequence, outcome) => (sequence, outcome, false),
         };
         let found = self.read(resource)?;
         if found
@@ -682,7 +693,7 @@ impl<'a> Driver<'a> {
         {
             return Err(ownership_conflict());
         }
-        if proven(found.as_ref()) {
+        if (refused || outcome == Outcome::Succeeded) && proven(found.as_ref()) {
             return self.settle(sequence, done);
         }
         match outcome {
@@ -885,10 +896,13 @@ impl<'a> Driver<'a> {
         }
     }
 
-    /// After a cancellation won: releases this operation's guard if it
-    /// holds it (never another operation's), and journals the release the
-    /// seal requires ([`terminal_ready`]). Idempotent; a no-op without a
-    /// journaled hold.
+    /// After a cancellation won: fences this operation's guard and journals
+    /// the release the seal requires ([`terminal_ready`]). The fence is a
+    /// conditional `released` write ([`Guards::fence`]), so a hold whose
+    /// outcome is still unknown can no longer land afterwards; absence or a
+    /// predecessor's guard is never taken as proof. Until that write is
+    /// acknowledged the hold stays unresolved and the seal is refused.
+    /// Idempotent; a no-op without a journaled hold.
     fn release_guard(&self, guards: &Guards) -> Result<(), ApiError> {
         let journal = self.ops.journal(self.op())?;
         let Some(hold) = journal
@@ -898,12 +912,7 @@ impl<'a> Driver<'a> {
         else {
             return Ok(());
         };
-        if let Some(guard) = guards.current()?
-            && guard.operation_id == *self.op()
-            && guard.state != super::guard::State::Released
-        {
-            guards.release(&self.intent.tenant_id, self.op())?;
-        }
+        guards.fence(&self.intent.tenant_id, self.op())?;
         if hold.outcome == (StepOutcome::Uncertain {}) {
             self.settle(hold.sequence, "released")?;
         }

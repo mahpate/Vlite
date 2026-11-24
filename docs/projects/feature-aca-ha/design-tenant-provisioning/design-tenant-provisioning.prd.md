@@ -936,3 +936,31 @@ These corrections follow the review of a913ebbe. Each finding was reproduced by 
   - `cargo test --features server --lib tenant_provisioning`: 103 passed. This is 94 earlier tests plus 9 new reproductions, and the existing `cancelled_retirement_keeps_the_route` test now asserts the guard state too.
   - `cargo clippy --features server --all-targets -- -D warnings` is clean, and rustfmt and `git diff --check` are clean.
   - Full lib suite: `cargo test --features server --lib` 2237 passed, 10 ignored.
+
+### EPIC-004 second review corrections (offline)
+
+The re-review of f047bb9a found two remaining race variants. Both are fixed test-first. EPIC-004 and ITEM-009/010/011 stay **Partial**, and every earlier refusal is unchanged.
+
+- **A: a dispatched cloud effect is settled only when its operation is terminal.**
+  - A create whose operation is still open (running, unpollable or unidentified) stays unknown, even when the readback shows another owner's resource. `conflict` is settled only once the operation has `Succeeded` or `Failed`.
+  - A delete or stop is settled `deleted` or `stopped` only when its operation `Succeeded` **and** the readback proves the effect.
+  - An apparently finished readback (app absent, revisions inactive) while the operation is still open leaves the step unknown. This keeps the cancelled seal (`cleanup_pending`) and the retirement's reservation from being released.
+  - A `Failed` operation settles `failed:<code>`, even when the readback looks done. That is never success, and the seal stays refused.
+  - An explicit port refusal (`Refused`: no effect, by contract) is still terminal.
+  - Absence read before any dispatch still settles `absent`.
+- **B: an uncertain guard acquisition is fenced, not assumed.**
+  - New `Guards::fence(tenant, operation)` makes a conditional write of this operation's `released` guard: `Create` over absence, or `Match(etag)` over a released guard or this operation's own guard. It is idempotent over its own release and refused (`lifecycle_guard_held`) while another operation holds the guard.
+  - Every earlier conditional hold was conditioned on a revision that the fence replaces, so a delayed hold conflicts if it lands afterwards.
+  - A cancelled retirement's `release_guard` (both on the `retire` path and in `cleanup`) settles the hold and journals the release only after the fence write is acknowledged. An unknown fence outcome leaves the hold unresolved, so the seal refuses `cleanup_pending`.
+  - Absence, or a predecessor's released guard, is no longer taken as proof.
+- **Tests.**
+  - The reproductions failed on f047bb9a.
+  - A pending create with a foreign owner: running polls, then a `Failed` poll settling `conflict`.
+  - A pending delete with an absent readback, and a failed delete.
+  - A pending stop with an inactive readback.
+  - A delayed conditional hold that lands after cleanup and the seal, using a parking store wrapper, both with no prior guard and over a predecessor's released guard. On f047bb9a the late `Held` landed after the `Cancelled` seal and transfer refused `lifecycle_reserved`. Now it conflicts and the guard stays `released`.
+  - A `fence` unit test.
+- **Residual limits.**
+  - Only a single driver per operation is assumed. A hold issued after the fence by a concurrent driver of the same operation is not modelled.
+  - A cancelled retirement whose guard another operation now holds stays unsealed until that holder releases it.
+  - Real ARM terminal semantics remain unproven offline.

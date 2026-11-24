@@ -169,6 +169,66 @@ impl Guards {
         self.move_to(tenant, operation_id, State::Released)
     }
 
+    /// Ends an operation whose hold may still be in flight: writes this
+    /// operation's `released` guard with a conditional transition over
+    /// whatever revision is current (create over absence, compare-and-swap
+    /// over a released or this operation's guard). A delayed hold was
+    /// conditioned on a revision that preceded this write, so it can no
+    /// longer land. Refused while another operation holds the guard; a
+    /// write whose outcome is unknown fences nothing (retry it).
+    pub(in crate::server) fn fence(
+        &self,
+        tenant: &str,
+        operation_id: &str,
+    ) -> Result<Guard, ApiError> {
+        if !is_hex(tenant, 32) || !is_hex(operation_id, 32) {
+            return Err(invalid("tenant and operation IDs must be 32 lowercase hex"));
+        }
+        let next = Guard {
+            schema: SCHEMA.to_owned(),
+            tenant: tenant.to_owned(),
+            operation_id: operation_id.to_owned(),
+            state: State::Released,
+        };
+        let current = self.read().map_err(Refusal::error)?;
+        let cond = match &current {
+            None => Cond::Create,
+            // Only a write of this operation's own release can have
+            // produced this revision, and it postdates every hold attempt.
+            Some((guard, _)) if guard == &next => return Ok(next),
+            Some((guard, etag))
+                if guard.state == State::Released
+                    || (guard.tenant == tenant && guard.operation_id == operation_id) =>
+            {
+                Cond::Match(etag)
+            }
+            Some(_) => {
+                return Err(conflict(
+                    "lifecycle_guard_held",
+                    "another operation holds this target's lifecycle guard",
+                ));
+            }
+        };
+        self.write(&next, cond)
+    }
+
+    fn write(&self, next: &Guard, cond: Cond<'_>) -> Result<Guard, ApiError> {
+        let bytes = serde_json::to_vec(next).map_err(|_| state_invalid())?;
+        match self.store.put(&self.name, &bytes, cond) {
+            Ok(_) => Ok(next.clone()),
+            Err(StoreError::Conflict) => Err(conflict(
+                "lifecycle_guard_conflict",
+                "the lifecycle guard changed concurrently; read it and retry",
+            )),
+            Err(StoreError::Unknown(_)) => Err(ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "lifecycle_guard_indeterminate",
+                "the lifecycle guard write outcome is unknown; retry the same transition",
+            )),
+            Err(_) => Err(Refusal::Unavailable.error()),
+        }
+    }
+
     fn move_to(&self, tenant: &str, operation_id: &str, to: State) -> Result<Guard, ApiError> {
         if !is_hex(tenant, 32) || !is_hex(operation_id, 32) {
             return Err(invalid("tenant and operation IDs must be 32 lowercase hex"));
@@ -215,20 +275,7 @@ impl Guards {
                 ));
             }
         };
-        let bytes = serde_json::to_vec(&next).map_err(|_| state_invalid())?;
-        match self.store.put(&self.name, &bytes, cond) {
-            Ok(_) => Ok(next),
-            Err(StoreError::Conflict) => Err(conflict(
-                "lifecycle_guard_conflict",
-                "the lifecycle guard changed concurrently; read it and retry",
-            )),
-            Err(StoreError::Unknown(_)) => Err(ApiError::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "lifecycle_guard_indeterminate",
-                "the lifecycle guard write outcome is unknown; retry the same transition",
-            )),
-            Err(_) => Err(Refusal::Unavailable.error()),
-        }
+        self.write(&next, cond)
     }
 }
 
@@ -360,6 +407,64 @@ pub(in crate::server) mod tests {
             guards.enable_writes(TENANT, OTHER).unwrap().state,
             State::WriteEnabled
         );
+    }
+
+    #[test]
+    fn a_fence_invalidates_every_earlier_conditional_hold() {
+        let memory = Arc::new(Memory::default());
+        let guards = guards(&memory);
+        let bytes = |op: &str| {
+            serde_json::to_vec(&Guard {
+                schema: SCHEMA.into(),
+                tenant: TENANT.into(),
+                operation_id: op.into(),
+                state: State::Held,
+            })
+            .unwrap()
+        };
+        // Over absence: a delayed create-only hold conflicts afterwards.
+        assert_eq!(
+            guards.fence(TENANT, OPERATION).unwrap().state,
+            State::Released
+        );
+        assert_eq!(
+            memory.put(NAME, &bytes(OPERATION), Cond::Create),
+            Err(StoreError::Conflict)
+        );
+        // Idempotent over its own release, which postdates every hold.
+        guards.fence(TENANT, OPERATION).unwrap();
+        // Over a predecessor's release: a delayed hold matched on that
+        // revision conflicts afterwards.
+        guards.hold(TENANT, OTHER).unwrap();
+        guards.release(TENANT, OTHER).unwrap();
+        let old = memory.get(NAME, MAX_GUARD_BYTES).unwrap().etag;
+        guards.fence(TENANT, OPERATION).unwrap();
+        assert_eq!(
+            memory.put(NAME, &bytes(OPERATION), Cond::Match(&old)),
+            Err(StoreError::Conflict)
+        );
+        // Its own hold is released by the fence.
+        let fresh = Arc::new(Memory::default());
+        let own = Guards::new(fresh.clone(), "test/");
+        own.hold(TENANT, OPERATION).unwrap();
+        own.fence(TENANT, OPERATION).unwrap();
+        assert_eq!(own.current().unwrap().unwrap().state, State::Released);
+        // Never over another operation's hold; an unknown write fences
+        // nothing and is retried.
+        guards.hold(TENANT, OTHER).unwrap();
+        assert_eq!(
+            guards.fence(TENANT, OPERATION).unwrap_err().code,
+            "lifecycle_guard_held"
+        );
+        guards.release(TENANT, OTHER).unwrap();
+        memory.fault(Op::Put, NAME, Fault::Before, 0, 1);
+        assert_eq!(
+            guards.fence(TENANT, OPERATION).unwrap_err().code,
+            "lifecycle_guard_indeterminate"
+        );
+        assert_eq!(guards.current().unwrap().unwrap().operation_id, OTHER);
+        guards.fence(TENANT, OPERATION).unwrap();
+        assert_eq!(guards.current().unwrap().unwrap().operation_id, OPERATION);
     }
 
     #[test]
