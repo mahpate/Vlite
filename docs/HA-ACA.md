@@ -627,12 +627,18 @@ future qualified path must keep.
   slot was reserved against its plan's route.
   REST/CLI submission of a reader change or retirement records the operation
   (phase `accepted`, `observed.reserved` false) but reserves nothing: only the
-  plan-anchored actuator reserves, so cancel returns
-  `transition_unavailable` until then and a submission never blocks or
-  poisons later anchoring. Only `create` is reserved on submission. An
-  accepted, unreserved reader change or retirement cannot currently be
-  withdrawn; before a control worker drives these operations, withdrawal must
-  be made atomic with the plan-bound reservation. Slots reserved without a
+  plan-anchored actuator reserves, so a submission never blocks or poisons
+  later anchoring. Only `create` is reserved on submission. Cancelling an
+  accepted, unreserved reader change or retirement withdraws it in the same
+  control-state compare-and-swap that would reserve it, so exactly one of the
+  two wins. The withdrawal is a permanent marker in the control state, not a
+  journal flag. The operation is sealed `cancelled` and can never reserve
+  (`operation_terminal`), even on retry or after a restart. The slot, route
+  and latest receipt stay as they were, so the next change anchors as before.
+  If the reservation wins, the cancel goes through that reservation instead
+  (refused with `readers_in_progress`, `retirement_in_progress` or
+  `retirement_required` once the change has progressed) and the operation is
+  not withdrawn. Slots reserved without a
   plan by builds from EPIC-002 through e36403e1 are refused when their route
   differs from the plan. One reserved at the same route after a newer receipt
   is indistinguishable (a reserved slot records no predecessor) and can be
@@ -715,7 +721,7 @@ For managed tenants today, use the manual procedures in this guide.
 | `create` | Records the intent, creates **unrouted** tenant metadata from the persisted ID and reserves the tenant (phase `reserved`). Cloud execution refuses (OD-002). | No |
 | `status` | Read-only view of the records (below). | No |
 | `resume` | Records the action as an idempotent no-op; it never runs a cloud step. A `present` reader change answers 409 `pin_scope_unproven`. | No |
-| `cancel` | Seals and releases a reserved operation that has not activated (`retirement_required` once activated, `transition_unavailable` while unreserved). | No |
+| `cancel` | Seals and releases a reserved operation that has not activated (`retirement_required` once activated). Withdraws an unreserved reader change or retirement so it can never reserve; an unreserved `create` or `migrate` answers `transition_unavailable`. | No |
 | `readers`, `retire` | Recorded as intent only (`accepted`, `observed.reserved: false`). The actuators exist only in offline fixtures. | No |
 | `migrate`, `rollback`, `release`, `acknowledge-delivery`, `replace-credentials` | Excluded (see below). | No |
 
@@ -776,10 +782,17 @@ the status again). The same key with a different request answers
 `action_request_conflict`. A refused action writes no record. `resume` is not
 cloud execution. Cancelling a reserved `create` seals the operation and
 releases the reservation. If status shows `cancelling`, repeat the same
-request. A cancelled create keeps its non-routable tenant metadata. An
-accepted, unreserved reader change or retirement **cannot be withdrawn**
-(`transition_unavailable`), but it holds no slot and never blocks later
-changes. Atomic withdrawal is a prerequisite for any worker.
+request. A cancelled create keeps its non-routable tenant metadata.
+Cancelling an accepted, unreserved reader change or retirement **withdraws**
+it atomically with its reservation and seals it `cancelled`. It can never
+reserve afterwards, and the slot and route are left as they were. If its
+reservation won first, the cancel follows the reserved reader and retirement
+rules instead (see the anchoring contract above) and nothing is withdrawn.
+The control-state object keeps at most 1,024 withdrawals across all tenants.
+They are never pruned, because pruning would let a withdrawn operation
+reserve; past the limit, cancel answers 409 `withdrawal_capacity` and writes
+nothing. An unreserved `create` or `migrate` still answers
+`transition_unavailable`.
 
 **Readers and retirement.** Submissions only record intent. Present fleets
 stay denied (`pin_scope_unproven`, ITEM-008) and reader routing stays
@@ -821,13 +834,15 @@ cancelled, later changes refuse (fail closed). Leave such state in place and
 escalate.
 
 **Schema upgrade and rollback.** The control-state object gains a
-`lifecycle` field only once an operation reserves; until then its bytes are
+`lifecycle` field only once an operation reserves, and a `withdrawn` field
+only once an unreserved operation is withdrawn; until then its bytes are
 unchanged for older readers. Older binaries that refuse unknown fields fail
-closed on an object that carries lifecycle state. They do not ignore it.
-Locally this is shown with a strict pre-lifecycle field set, not by running
-an old binary. Rolling back therefore means rolling the binary forward again
-or keeping the new version. Never strip `lifecycle`, reservations, receipts
-or operation records to make an older binary start.
+closed on an object that carries either. They do not ignore it. Locally this
+is shown with strict pre-lifecycle and pre-withdrawal field sets, not by
+running an old binary. Rolling back therefore means rolling the binary
+forward again or keeping the new version. Never strip `lifecycle`,
+`withdrawn`, reservations, receipts or operation records to make an older
+binary start: stripping `withdrawn` would let a cancelled operation reserve.
 
 **Effective permissions are not proven.** Fixtures prove neither Azure RBAC
 nor mount isolation. Reader pins rewrite the writer's set record, so no
@@ -841,7 +856,7 @@ this surface:
 | Command | Shows | Does not show |
 |---------|-------|---------------|
 | `cargo test --features server --lib tenant_provisioning` | Durable intents and idempotency, reservation/route CAS, guards, fake-ARM create/update/delete/stop, unknown-outcome reconciliation, no adoption, retention on cancel/retire, reader anchoring/eligibility, schema compatibility, admin REST/CLI refusals and redaction | Real ARM/ACA behavior, Azure RBAC or mounts, clock/freshness, stop proofs, timing or storage measurements |
-| `cargo test --features server --lib epic_005` | The reader/retirement subset, including stale plans, races, failed-to-healthy fleet observations and route drift | ACA replica replacement, reader-pin/RBAC policy-propagation lag (ITEM-008/019), reader routing or reader qualification (ITEM-021) |
+| `cargo test --features server --lib epic_005` | The reader/retirement subset, including stale plans, races, withdrawal-versus-reservation races, failed-to-healthy fleet observations and route drift | ACA replica replacement, reader-pin/RBAC policy-propagation lag (ITEM-008/019), reader routing or reader qualification (ITEM-021) |
 | `cargo test --features server --test server_cli tenant_deployment` | Routes are opt-in and refused before a database is created | Any served lifecycle |
 | `python tests/openapi_contract.py`, `python tests/admin_route_coverage.py` | Routes are registered with their OpenAPI contracts and are admin-only | Behavior |
 

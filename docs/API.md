@@ -1505,9 +1505,17 @@ using tokens from the latest status. Results:
   `operation_not_found`.
 * `resume` of a `present` reader change: 409 `pin_scope_unproven` (ITEM-008).
 * `cancel`: seals and releases a reserved, unactivated operation. It answers
-  409 `retirement_required` once activated, `operation_terminal` once ended,
-  and `transition_unavailable` while unreserved. An accepted, unreserved
-  reader change or retirement therefore cannot be withdrawn yet.
+  409 `retirement_required` once activated and `operation_terminal` once
+  ended. An accepted reader change or retirement that holds no reservation
+  is withdrawn instead, in the same control-state compare-and-swap that
+  would reserve it, then sealed `cancelled`. It can never reserve afterwards
+  and the slot and route are unchanged. If its reservation won first, the
+  cancel goes through that reservation instead (refused with
+  `readers_in_progress`, `retirement_in_progress` or `retirement_required`
+  once the change has progressed) and nothing is withdrawn. Withdrawals are
+  never pruned; past 1,024 in the control state, cancel answers 409
+  `withdrawal_capacity` and writes nothing. An unreserved `create` or
+  `migrate` answers 409 `transition_unavailable`.
 * `acknowledge-delivery`, `replace-credentials`, `rollback` and `release`:
   409 `transition_unavailable`. `release` without `ack_irreversible: true`
   answers 422 `irreversible_ack_required` first.

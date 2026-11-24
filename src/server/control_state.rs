@@ -57,6 +57,12 @@ pub(super) struct Snapshot {
     /// consumer refuses a snapshot that carries it (`deny_unknown_fields`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     lifecycle: Vec<Lifecycle>,
+    /// design-tenant-provisioning EPIC-005: reader changes and retirements
+    /// cancelled before they ever reserved. Permanent, so such an operation
+    /// can never reserve. Absent (byte-identical) until the first; an older
+    /// consumer refuses a snapshot that carries it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    withdrawn: Vec<Withdrawal>,
 }
 
 /// A provisioning operation's kind (design-tenant-provisioning §3.3).
@@ -121,6 +127,19 @@ pub(super) struct Receipt {
 
 /// At most one lifecycle slot per tenant; same bound as the tenant list.
 const MAX_LIFECYCLE: usize = 1024;
+
+/// EPIC-005: an operation withdrawn before it reserved (it never held the
+/// tenant's slot, and never will).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Withdrawal {
+    tenant: String,
+    operation_id: String,
+}
+
+/// Withdrawals are never pruned: past this, a withdrawal is refused (409
+/// `withdrawal_capacity`) and nothing is written.
+const MAX_WITHDRAWN: usize = 1024;
 
 fn hex_id(value: &str, len: usize) -> bool {
     value.len() == len
@@ -367,6 +386,7 @@ impl Snapshot {
             directory: Vec::new(),
             migrations: Vec::new(),
             lifecycle: Vec::new(),
+            withdrawn: Vec::new(),
         })
     }
 
@@ -400,6 +420,7 @@ impl Snapshot {
         let mut next = Self::import(credentials, tenants)?.with_directory(self.directory.clone());
         next.migrations = self.migrations.clone();
         next.lifecycle = self.lifecycle.clone();
+        next.withdrawn = self.withdrawn.clone();
         let imported_restrictions = next.credentials.clone();
         for migration in &self.migrations {
             if matches!(
@@ -502,6 +523,7 @@ impl Snapshot {
             || !valid_directory(&snapshot.directory, &snapshot.tenants)
             || !snapshot.valid_migrations()
             || !snapshot.valid_lifecycle()
+            || !snapshot.valid_withdrawn()
         {
             return Err(Self::invalid());
         }
@@ -790,6 +812,28 @@ impl Snapshot {
             .is_some_and(|entry| matches!(entry.slot, Slot::Reserved { .. }))
     }
 
+    /// A withdrawn operation never held (nor holds) its tenant's slot.
+    fn valid_withdrawn(&self) -> bool {
+        let mut ids = std::collections::HashSet::new();
+        self.withdrawn.len() <= MAX_WITHDRAWN && self.withdrawn.iter().all(|entry| {
+            hex_id(&entry.tenant, 32)
+                && hex_id(&entry.operation_id, 32)
+                && ids.insert(entry.operation_id.as_str())
+                && !matches!(
+                    self.lifecycle(&entry.tenant).map(|e| &e.slot),
+                    Some(Slot::Reserved { operation_id, .. } | Slot::Released { operation_id, .. })
+                        if *operation_id == entry.operation_id
+                )
+        })
+    }
+
+    /// EPIC-005: whether `operation_id` was withdrawn before it reserved.
+    pub(super) fn withdrawn(&self, tenant: &str, operation_id: &str) -> bool {
+        self.withdrawn
+            .iter()
+            .any(|entry| entry.tenant == tenant && entry.operation_id == operation_id)
+    }
+
     /// The tenant's lifecycle slot, if it was ever reserved.
     pub(super) fn lifecycle(&self, tenant: &str) -> Option<&Lifecycle> {
         self.lifecycle.iter().find(|entry| entry.tenant == tenant)
@@ -812,7 +856,8 @@ impl Snapshot {
 
     /// Reserves the tenant's slot for `operation_id`. Refused while another
     /// operation holds it or a legacy migration of the tenant is active; a
-    /// `create` needs an unrouted tenant, every other kind a routed one.
+    /// `create` needs an unrouted tenant, every other kind a routed one. A
+    /// withdrawn operation never reserves (EPIC-005).
     pub(super) fn reserve(
         &self,
         tenant: &str,
@@ -820,6 +865,12 @@ impl Snapshot {
         kind: OperationKind,
         request_digest: &str,
     ) -> Result<Self, ApiError> {
+        if self.withdrawn(tenant, operation_id) {
+            return Err(lifecycle_error(
+                "operation_terminal",
+                "the operation was withdrawn and can never reserve",
+            ));
+        }
         if self.reserved(tenant)
             || self
                 .migrations
@@ -945,6 +996,49 @@ impl Snapshot {
             }
             *cancellation_requested = true;
         }
+        Ok(next)
+    }
+
+    /// EPIC-005: withdraws an operation that does not hold the tenant's
+    /// slot, so it can never reserve it ([`Self::reserve`]). One CAS with
+    /// any concurrent reservation: if that wins, the retried withdrawal is
+    /// refused (`lifecycle_reserved`) and [`Self::request_cancel`] applies.
+    /// The caller proves the operation has no terminal record (it never
+    /// held the slot: a slot is released only after its holder sealed).
+    pub(super) fn withdraw(&self, tenant: &str, operation_id: &str) -> Result<Self, ApiError> {
+        if self.withdrawn(tenant, operation_id) {
+            return Ok(self.clone());
+        }
+        match self.lifecycle(tenant).map(|e| &e.slot) {
+            Some(Slot::Reserved {
+                operation_id: held, ..
+            }) if held == operation_id => {
+                return Err(lifecycle_error(
+                    "lifecycle_reserved",
+                    "the operation holds the tenant's slot; it is cancelled through its reservation",
+                ));
+            }
+            Some(Slot::Released {
+                operation_id: done, ..
+            }) if done == operation_id => {
+                return Err(lifecycle_error(
+                    "operation_terminal",
+                    "the operation has already ended",
+                ));
+            }
+            _ => {}
+        }
+        if self.withdrawn.len() >= MAX_WITHDRAWN {
+            return Err(lifecycle_error(
+                "withdrawal_capacity",
+                "too many operations were withdrawn; nothing was written",
+            ));
+        }
+        let mut next = self.clone();
+        next.withdrawn.push(Withdrawal {
+            tenant: tenant.to_owned(),
+            operation_id: operation_id.to_owned(),
+        });
         Ok(next)
     }
 
@@ -2597,5 +2691,190 @@ mod tests {
             .unwrap();
         let (read, _) = objects.read().unwrap();
         assert!(read.record_for(T1).is_none() && read.reserved(T1));
+    }
+
+    /// design-tenant-provisioning EPIC-005: T1 and T2 routed.
+    fn routed(w: &World) -> Snapshot {
+        w.import().with_directory(vec![
+            Route::dedicated_for_test(T1, 1),
+            Route::dedicated_for_test(T2, 1),
+        ])
+    }
+
+    #[test]
+    fn a_withdrawn_operation_never_reserves_and_leaves_the_slot_alone() {
+        let w = world();
+        let [a, b, c, d] = ["a", "b", "c", "d"].map(|x| x.repeat(32));
+        let (digest, sealed) = ("2".repeat(64), "3".repeat(64));
+        let reader = OperationKind::SetReaders;
+        let withdrawn = routed(&w).withdraw(T1, &a).unwrap();
+        assert!(withdrawn.withdrawn(T1, &a) && !withdrawn.withdrawn(T2, &a));
+        assert!(withdrawn.lifecycle.is_empty());
+        // Idempotent.
+        assert_eq!(
+            withdrawn.withdraw(T1, &a).unwrap().withdrawn,
+            withdrawn.withdrawn
+        );
+        let error = withdrawn.reserve(T1, &a, reader, &digest).err().unwrap();
+        assert_eq!(
+            (error.status, error.code),
+            (StatusCode::CONFLICT, "operation_terminal")
+        );
+
+        // Another operation still reserves; withdrawing a third keeps its
+        // slot, and the holder itself is never withdrawn.
+        let held = withdrawn.reserve(T1, &b, reader, &digest).unwrap();
+        assert_eq!(held.withdraw(T1, &c).unwrap().lifecycle, held.lifecycle);
+        assert_eq!(
+            held.withdraw(T1, &b).err().unwrap().code,
+            "lifecycle_reserved"
+        );
+        let mut released = held.clone();
+        released.lifecycle[0].slot = Slot::Released {
+            operation_id: b.clone(),
+            terminal_digest: sealed.clone(),
+        };
+        assert_eq!(
+            released.withdraw(T1, &b).err().unwrap().code,
+            "operation_terminal"
+        );
+
+        // From the released anchor: the withdrawn operation never reserves,
+        // a fresh one does.
+        let route = route_digest(released.record_for(T1).unwrap());
+        let anchor = (b.as_str(), sealed.as_str());
+        let error = released
+            .reserve_after(T1, &a, reader, &digest, anchor, &route)
+            .err()
+            .unwrap();
+        assert_eq!(error.code, "operation_terminal");
+        let next = released
+            .reserve_after(T1, &d, reader, &digest, anchor, &route)
+            .unwrap();
+        assert!(next.withdrawn(T1, &a) && next.lifecycle(T1).unwrap().generation == 2);
+    }
+
+    #[test]
+    fn withdrawals_are_bounded_and_never_dropped_by_control_edits() {
+        let w = world();
+        let mut full = routed(&w);
+        for i in 0..MAX_WITHDRAWN {
+            full = full.withdraw(T2, &format!("{i:032x}")).unwrap();
+        }
+        let error = full.withdraw(T2, &"f".repeat(32)).err().unwrap();
+        assert_eq!(
+            (error.status, error.code),
+            (StatusCode::CONFLICT, "withdrawal_capacity")
+        );
+        // A full list still publishes.
+        let objects = w.objects();
+        objects.create(full, 1).unwrap();
+        assert_eq!(objects.read().unwrap().0.withdrawn.len(), MAX_WITHDRAWN);
+
+        let objects = Objects::new(Arc::new(Memory::default()), NAME);
+        objects.create(routed(&w), 1).unwrap();
+        objects
+            .update(2, |current| current.withdraw(T1, &"a".repeat(32)))
+            .unwrap();
+        let routes = [Route::dedicated_for_test(T1, 1)];
+        for (now, edit, routes) in [
+            (3, revoke("aaaaaaaaaaaa"), None),
+            (4, suspend(T2, true), None),
+            (5, Edit::Reimport(&w.credentials, &w.tenants), None),
+            (6, Edit::Directory, Some(&routes[..])),
+        ] {
+            let read = objects.apply(now, &edit, routes, None).unwrap();
+            assert!(read.withdrawn(T1, &"a".repeat(32)), "{now}");
+        }
+    }
+
+    #[test]
+    fn invalid_withdrawals_are_refused() {
+        let w = world();
+        let objects = w.objects();
+        objects.create(routed(&w), 1).unwrap();
+        let (a, b) = ("a".repeat(32), "b".repeat(32));
+        objects
+            .update(2, |current| {
+                current
+                    .withdraw(T1, &a)?
+                    .reserve(T1, &b, OperationKind::Retire, &"2".repeat(64))
+            })
+            .unwrap();
+        let good: Value = serde_json::from_slice(&w.memory.raw(NAME).unwrap()).unwrap();
+        let marker = |tenant: &str, operation_id: &str| json!({"tenant": tenant, "operation_id": operation_id});
+        let mut cases = Vec::new();
+        let push = |marker: Value| {
+            let mut v = good.clone();
+            v["withdrawn"].as_array_mut().unwrap().push(marker);
+            v
+        };
+        // A marker naming the holder, reserved or released.
+        cases.push(push(marker(T1, &b)));
+        let mut v = good.clone();
+        v["lifecycle"][0]["slot"] =
+            json!({"state": "released", "operation_id": a, "terminal_digest": "3".repeat(64)});
+        cases.push(v);
+        // Duplicate, malformed, unknown field, over capacity.
+        cases.push(push(marker(T2, &a)));
+        let mut v = good.clone();
+        v["withdrawn"][0] = marker(T1, "A".repeat(32).as_str());
+        cases.push(v);
+        let mut v = good.clone();
+        v["withdrawn"][0] = marker("tenant", &a);
+        cases.push(v);
+        let mut v = good.clone();
+        v["withdrawn"][0]["at"] = json!(1);
+        cases.push(v);
+        let mut v = good.clone();
+        v["withdrawn"] = (0..=MAX_WITHDRAWN)
+            .map(|i| marker(T2, &format!("{i:032x}")))
+            .collect();
+        cases.push(v);
+        for case in cases {
+            w.memory.set_raw(NAME, &serde_json::to_vec(&case).unwrap());
+            let error = objects.read().err().expect("refused");
+            assert_eq!(error.code, "control_state_invalid", "{case}");
+        }
+    }
+
+    #[test]
+    fn withdrawals_are_absent_until_the_first_and_older_consumers_refuse_them() {
+        // The field set of a pre-withdrawal control-state consumer (strict).
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        #[allow(dead_code)]
+        struct Older {
+            schema: String,
+            generation: u64,
+            written_unix_ms: u64,
+            tenants: Value,
+            credentials: Value,
+            #[serde(default)]
+            directory: Value,
+            #[serde(default)]
+            migrations: Value,
+            #[serde(default)]
+            lifecycle: Value,
+        }
+        let w = world();
+        let objects = w.objects();
+        objects.create(routed(&w), 1).unwrap();
+        let bytes = w.memory.raw(NAME).unwrap();
+        assert!(
+            !String::from_utf8(bytes.clone())
+                .unwrap()
+                .contains("withdrawn")
+        );
+        assert!(serde_json::from_slice::<Older>(&bytes).is_ok());
+        objects
+            .update(2, |current| current.withdraw(T1, &"a".repeat(32)))
+            .unwrap();
+        let bytes = w.memory.raw(NAME).unwrap();
+        assert!(serde_json::from_slice::<Older>(&bytes).is_err());
+        assert_eq!(
+            bytes,
+            serde_json::to_vec(&Snapshot::parse(&bytes).unwrap()).unwrap()
+        );
     }
 }

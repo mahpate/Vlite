@@ -1101,15 +1101,21 @@ impl<'a> Driver<'a> {
             return self.ops.release(objects, self.intent, now);
         }
         let journal = self.ops.journal(self.op())?;
-        let plan = plan(&journal).ok_or_else(|| {
+        let unverified = || {
             conflict(
                 "retirement_unverified",
                 "the retirement was not verified and reserved; reserve it first",
             )
-        })?;
+        };
+        let plan = plan(&journal).ok_or_else(unverified)?;
         let mut words = plan.split(' ').skip(1);
         let route = words.next().ok_or_else(state_invalid)?.to_owned();
         let planned: Vec<String> = words.map(str::to_owned).collect();
+        // Unsealed, so it never released a slot: one it does not hold now
+        // it never reserved (or was withdrawn, EPIC-005) and must not act.
+        if holds(&objects.read()?.0, self.intent).is_none() {
+            return Err(unverified());
+        }
         if self.cancelled_before_removal(objects)? {
             self.release_guard(guards)?;
             return Err(operation_cancelled());

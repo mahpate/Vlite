@@ -667,7 +667,7 @@ fn unsealed_terminal_never_releases_the_slot() {
     let w = world();
     let intent = w.intent_for_t(KEY);
     reserve(&w.ops, &w.objects, &intent, NOW).unwrap();
-    request_cancel(&w.objects, &intent, NOW).unwrap();
+    request_cancel(&w.ops, &w.objects, &intent, NOW).unwrap();
     w.memory
         .fault(Op::Put, "terminal.json", Fault::Before, 0, 1);
     assert_eq!(
@@ -810,9 +810,10 @@ fn cancel_wins_the_cas_race_and_activation_cannot_follow() {
     let intent = w.intent_for_t(KEY);
     reserve(&w.ops, &w.objects, &intent, NOW).unwrap();
     let racer = Objects::new(w.memory.clone(), CONTROL);
+    let racer_ops = Operations::new(w.memory.clone(), PREFIX);
     let cancelling = intent.clone();
     w.memory.hook(Op::Put, CONTROL, move || {
-        request_cancel(&racer, &cancelling, NOW).unwrap();
+        request_cancel(&racer_ops, &racer, &cancelling, NOW).unwrap();
     });
     let error = activate(
         &w.ops,
@@ -855,7 +856,7 @@ fn activation_wins_the_cas_race_and_cancel_requires_retirement() {
         )
         .unwrap();
     });
-    let error = request_cancel(&w.objects, &intent, NOW).unwrap_err();
+    let error = request_cancel(&w.ops, &w.objects, &intent, NOW).unwrap_err();
     assert_eq!(error.status, StatusCode::CONFLICT);
     assert_eq!(error.code, "retirement_required");
     let snapshot = w.snapshot();
@@ -876,7 +877,7 @@ fn indeterminate_cancel_is_reconciled_and_still_excludes_activation() {
     let intent = w.intent_for_t(KEY);
     reserve(&w.ops, &w.objects, &intent, NOW).unwrap();
     w.memory.fault(Op::Put, CONTROL, Fault::After, 0, 1);
-    request_cancel(&w.objects, &intent, NOW).unwrap();
+    request_cancel(&w.ops, &w.objects, &intent, NOW).unwrap();
     assert_eq!(
         activate(
             &w.ops,
@@ -1065,7 +1066,7 @@ fn unresolved_side_effect_blocks_terminal_release() {
             &action("create_app", false),
         )
         .unwrap();
-    request_cancel(&w.objects, &intent, NOW).unwrap();
+    request_cancel(&w.ops, &w.objects, &intent, NOW).unwrap();
     assert_eq!(
         w.ops.release(&w.objects, &intent, NOW).unwrap_err().code,
         "cleanup_pending"
@@ -1086,7 +1087,7 @@ fn an_ended_operation_can_never_reserve_or_activate_again() {
     let w = world();
     let intent = w.intent_for_t(KEY);
     reserve(&w.ops, &w.objects, &intent, NOW).unwrap();
-    request_cancel(&w.objects, &intent, NOW).unwrap();
+    request_cancel(&w.ops, &w.objects, &intent, NOW).unwrap();
     w.ops.release(&w.objects, &intent, NOW).unwrap();
     // Recovery from the operation ID alone must not re-open the slot.
     assert_eq!(
@@ -1127,7 +1128,7 @@ fn an_action_recorded_while_sealing_blocks_the_seal() {
     let intent = w.intent_for_t(KEY);
     reserve(&w.ops, &w.objects, &intent, NOW).unwrap();
     w.ops.claim(&intent.operation_id, "worker-a", None).unwrap();
-    request_cancel(&w.objects, &intent, NOW).unwrap();
+    request_cancel(&w.ops, &w.objects, &intent, NOW).unwrap();
     // The live owner records a step just before the sealing journal CAS.
     let racer = Operations::new(w.memory.clone(), PREFIX);
     let id = intent.operation_id.clone();
@@ -1783,7 +1784,7 @@ mod epic_004 {
             "operation_not_provisionable"
         );
         reserve(&w.ops, &w.objects, &intent, NOW).unwrap();
-        request_cancel(&w.objects, &intent, NOW).unwrap();
+        request_cancel(&w.ops, &w.objects, &intent, NOW).unwrap();
         assert_eq!(
             d.provision(&w.objects, &standard()).unwrap_err().code,
             "operation_not_provisionable"
@@ -1846,7 +1847,7 @@ mod epic_004 {
             "operation_not_cancelled"
         );
         d.provision(&w.objects, &standard()).unwrap();
-        request_cancel(&w.objects, &intent, NOW).unwrap();
+        request_cancel(&w.ops, &w.objects, &intent, NOW).unwrap();
         assert_eq!(
             w.ops.release(&w.objects, &intent, NOW).unwrap_err().code,
             "cleanup_pending"
@@ -1877,7 +1878,7 @@ mod epic_004 {
         arm.script(Begin::Pending("arm-op-slow"));
         arm.polls(running(3));
         d.provision(&w.objects, &app_only()).unwrap_err();
-        request_cancel(&w.objects, &intent, NOW).unwrap();
+        request_cancel(&w.ops, &w.objects, &intent, NOW).unwrap();
         arm.polls(running(3));
         assert_eq!(
             d.cleanup(&w.objects, &Guards::new(w.memory.clone(), TARGET))
@@ -2038,7 +2039,9 @@ mod epic_004 {
         );
         assert!(w.snapshot().record_for(T).is_none());
         assert_eq!(
-            request_cancel(&w.objects, &intent, NOW).unwrap_err().code,
+            request_cancel(&w.ops, &w.objects, &intent, NOW)
+                .unwrap_err()
+                .code,
             "retirement_in_progress"
         );
         assert_eq!(
@@ -2079,7 +2082,7 @@ mod epic_004 {
         let d = driver(&w, &arm, &intent);
         let guards = Guards::new(w.memory.clone(), TARGET);
         d.reserve_retirement(&w.objects, NOW).unwrap();
-        request_cancel(&w.objects, &intent, NOW).unwrap();
+        request_cancel(&w.ops, &w.objects, &intent, NOW).unwrap();
         assert_eq!(
             d.retire(&w.objects, &guards, NOW).unwrap_err().code,
             "operation_cancelled"
@@ -2518,7 +2521,7 @@ mod epic_004 {
         arm.script(Begin::Pending("arm-op-slow"));
         arm.polls(running(3));
         d.provision(&w.objects, &app_only()).unwrap_err();
-        request_cancel(&w.objects, &intent, NOW).unwrap();
+        request_cancel(&w.ops, &w.objects, &intent, NOW).unwrap();
         arm.effect(&arm.calls()[0]);
         arm.polls(running(3));
         assert_eq!(
@@ -2550,7 +2553,7 @@ mod epic_004 {
         let d = driver(&w, &arm, &intent);
         arm.script(Begin::Unknown);
         d.provision(&w.objects, &app_only()).unwrap_err();
-        request_cancel(&w.objects, &intent, NOW).unwrap();
+        request_cancel(&w.ops, &w.objects, &intent, NOW).unwrap();
         arm.effect(&arm.calls()[0]);
         assert_eq!(
             d.cleanup(&w.objects, &Guards::new(w.memory.clone(), TARGET))
@@ -2576,7 +2579,7 @@ mod epic_004 {
             "cloud_action_failed"
         );
         assert_eq!(steps(&w, &intent)[0].2, settled("failed:AlreadyExists"));
-        request_cancel(&w.objects, &intent, NOW).unwrap();
+        request_cancel(&w.ops, &w.objects, &intent, NOW).unwrap();
         d.cleanup(&w.objects, &Guards::new(w.memory.clone(), TARGET))
             .unwrap();
         assert_eq!(arm.count(&Verb::Delete), 0);
@@ -2679,7 +2682,7 @@ mod epic_004 {
         w.memory.fault(Op::Put, CONTROL, Fault::Before, 0, 1);
         d.retire(&w.objects, &guards, NOW).unwrap_err();
         assert_eq!(guards.current().unwrap().unwrap().state, guard::State::Held);
-        request_cancel(&w.objects, &intent, NOW).unwrap();
+        request_cancel(&w.ops, &w.objects, &intent, NOW).unwrap();
         // The seal waits for the guard to be reconciled.
         assert_eq!(
             w.ops.release(&w.objects, &intent, NOW).unwrap_err().code,
@@ -2711,7 +2714,7 @@ mod epic_004 {
         let d = driver(&w, &arm, &intent);
         let guards = Guards::new(w.memory.clone(), TARGET);
         d.reserve_retirement(&w.objects, NOW).unwrap();
-        request_cancel(&w.objects, &intent, NOW).unwrap();
+        request_cancel(&w.ops, &w.objects, &intent, NOW).unwrap();
         assert_eq!(
             d.retire(&w.objects, &guards, NOW).unwrap_err().code,
             "operation_cancelled"
@@ -2753,7 +2756,7 @@ mod epic_004 {
         let d = driver(&w, &arm, &first);
         let guards = Guards::new(w.memory.clone(), TARGET);
         d.reserve_retirement(&w.objects, NOW).unwrap();
-        request_cancel(&w.objects, &first, NOW).unwrap();
+        request_cancel(&w.ops, &w.objects, &first, NOW).unwrap();
         d.retire(&w.objects, &guards, NOW).unwrap_err();
         w.ops.release(&w.objects, &first, NOW).unwrap();
         // An unrelated receipt is still refused.
@@ -2790,7 +2793,7 @@ mod epic_004 {
             "cloud_outcome_unknown"
         );
         assert_eq!(steps(&w, &intent)[0].2, StepOutcome::Uncertain {});
-        request_cancel(&w.objects, &intent, NOW).unwrap();
+        request_cancel(&w.ops, &w.objects, &intent, NOW).unwrap();
         let guards = Guards::new(w.memory.clone(), TARGET);
         arm.polls(running(3));
         assert_eq!(
@@ -2821,7 +2824,7 @@ mod epic_004 {
         let d = driver(&w, &arm, &intent);
         let guards = Guards::new(w.memory.clone(), TARGET);
         d.provision(&w.objects, &app_only()).unwrap();
-        request_cancel(&w.objects, &intent, NOW).unwrap();
+        request_cancel(&w.ops, &w.objects, &intent, NOW).unwrap();
         arm.script(Begin::ApplyRunning("arm-op-delete"));
         arm.polls(running(3));
         assert_eq!(
@@ -2850,7 +2853,7 @@ mod epic_004 {
         let d = driver(&w, &arm, &intent);
         let guards = Guards::new(w.memory.clone(), TARGET);
         d.provision(&w.objects, &app_only()).unwrap();
-        request_cancel(&w.objects, &intent, NOW).unwrap();
+        request_cancel(&w.ops, &w.objects, &intent, NOW).unwrap();
         arm.script(Begin::ApplyRunning("arm-op-delete"));
         arm.polls([Ok(Poll::Failed("InternalError".into()))]);
         assert_eq!(
@@ -3016,7 +3019,7 @@ mod epic_004 {
         );
         // The hold has not landed yet: the guard reads as before.
         assert_eq!(guards.current().unwrap(), before);
-        request_cancel(&w.objects, &intent, NOW).unwrap();
+        request_cancel(&w.ops, &w.objects, &intent, NOW).unwrap();
         // A fencing write whose own outcome is unknown proves nothing: the
         // seal stays blocked.
         store.park_next(1);
@@ -3065,7 +3068,7 @@ mod epic_004 {
         driver(&w, &arm, &intent)
             .provision(&w.objects, &app_only())
             .unwrap();
-        request_cancel(&w.objects, &intent, NOW).unwrap();
+        request_cancel(&w.ops, &w.objects, &intent, NOW).unwrap();
         let (bw, barm, bintent) = (w.clone(), arm.clone(), intent.clone());
         arm.on_read(move || {
             let guards = Guards::new(bw.memory.clone(), TARGET);
@@ -3116,7 +3119,7 @@ mod epic_004 {
         driver(&w, &arm, &intent)
             .provision(&w.objects, &app_only())
             .unwrap();
-        request_cancel(&w.objects, &intent, NOW).unwrap();
+        request_cancel(&w.ops, &w.objects, &intent, NOW).unwrap();
         let (bw, barm, bintent) = (w.clone(), arm.clone(), intent.clone());
         arm.on_read(move || {
             let guards = Guards::new(bw.memory.clone(), TARGET);
@@ -3169,7 +3172,7 @@ mod epic_004 {
             }),
             1
         );
-        request_cancel(&w.objects, &intent, NOW).unwrap();
+        request_cancel(&w.ops, &w.objects, &intent, NOW).unwrap();
         arm.polls(running(3));
         assert_eq!(
             driver(&w, &arm, &intent)
@@ -3195,7 +3198,7 @@ mod epic_004 {
     /// a cancellation and its cleanup. Returns B's operation ID.
     fn cancel_a_then_cycle_b(w: &World, arm: &MockArm, a: &Intent, receipt: &str) -> String {
         let guards = Guards::new(w.memory.clone(), TARGET);
-        request_cancel(&w.objects, a, NOW).unwrap();
+        request_cancel(&w.ops, &w.objects, a, NOW).unwrap();
         driver(w, arm, a).cleanup(&w.objects, &guards).unwrap();
         assert_eq!(
             w.ops.release(&w.objects, a, NOW).unwrap().outcome(),
@@ -3211,7 +3214,7 @@ mod epic_004 {
             (held.operation_id.as_str(), held.state),
             (b.operation_id.as_str(), guard::State::Held)
         );
-        request_cancel(&w.objects, &b, NOW).unwrap();
+        request_cancel(&w.ops, &w.objects, &b, NOW).unwrap();
         db.cleanup(&w.objects, &guards).unwrap();
         assert_eq!(
             w.ops.release(&w.objects, &b, NOW).unwrap().outcome(),
@@ -3288,7 +3291,7 @@ mod epic_004 {
             );
             assert!(guards.current().unwrap().is_none());
             if cancel {
-                request_cancel(&w.objects, &intent, NOW).unwrap();
+                request_cancel(&w.ops, &w.objects, &intent, NOW).unwrap();
                 d.cleanup(&w.objects, &guards).unwrap();
                 w.ops.release(&w.objects, &intent, NOW).unwrap();
                 assert!(guards.check_transfer().is_ok());
@@ -3822,7 +3825,9 @@ mod epic_004 {
             assert_writer_unchanged(&w, None);
             assert!(!held_receipt(&w));
             assert_eq!(
-                request_cancel(&w.objects, &intent, NOW).unwrap_err().code,
+                request_cancel(&w.ops, &w.objects, &intent, NOW)
+                    .unwrap_err()
+                    .code,
                 "readers_in_progress"
             );
             assert_eq!(
@@ -3852,7 +3857,7 @@ mod epic_004 {
             let (profile, scope) = (reader_app("v1"), PinScope::for_test());
             d.set_readers(&w.objects, Some(&profile), Some(&scope), None, NOW)
                 .unwrap_err();
-            request_cancel(&w.objects, &intent, NOW).unwrap();
+            request_cancel(&w.ops, &w.objects, &intent, NOW).unwrap();
             let guards = Guards::new(w.memory.clone(), TARGET);
             d.cleanup(&w.objects, &guards).unwrap();
             let sealed = w.ops.release(&w.objects, &intent, NOW).unwrap();
@@ -4415,7 +4420,7 @@ mod epic_004 {
                 .set_readers(&w.objects, Some(&profile), Some(&scope), None, NOW)
                 .unwrap_err();
             assert_eq!(refused.code, "fleet_observation_unavailable");
-            request_cancel(&w.objects, &intent, NOW).unwrap();
+            request_cancel(&w.ops, &w.objects, &intent, NOW).unwrap();
             let guards = Guards::new(w.memory.clone(), TARGET);
             d.cleanup(&w.objects, &guards).unwrap();
             let sealed = w.ops.release(&w.objects, &intent, NOW).unwrap();
@@ -4784,17 +4789,31 @@ mod epic_004 {
             cli(w, command).unwrap()["operation"].clone()
         }
 
-        /// `vlite-server tenant-deployment cancel` quoting `operation`'s
-        /// current tokens.
-        fn cli_cancel(w: &World, id: &str, key: &str) -> Result<serde_json::Value, ApiError> {
-            let status = cli(
+        /// `vlite-server tenant-deployment status`: the operation.
+        fn op_status(w: &World, id: &str) -> serde_json::Value {
+            cli(
                 w,
                 admin::Command::Status {
                     operation: id.into(),
                 },
             )
             .unwrap()["operation"]
-                .clone();
+                .clone()
+        }
+
+        /// `vlite-server tenant-deployment cancel` quoting the operation's
+        /// current tokens.
+        fn cli_cancel(w: &World, id: &str, key: &str) -> Result<serde_json::Value, ApiError> {
+            cancel_quoting(w, id, key, &op_status(w, id))
+        }
+
+        /// `vlite-server tenant-deployment cancel` quoting `status`'s tokens.
+        fn cancel_quoting(
+            w: &World,
+            id: &str,
+            key: &str,
+            status: &serde_json::Value,
+        ) -> Result<serde_json::Value, ApiError> {
             let request = serde_json::json!({
                 "idempotency_key": key,
                 "expected_operation_generation": status["operation_generation"],
@@ -4858,10 +4877,10 @@ mod epic_004 {
                 let again = cli_submit(&w, "cli-a", &payload);
                 assert_eq!(again["operation_id"], submitted["operation_id"]);
                 assert_eq!(released_by(&w), anchor, "no planless slot");
-                // Nothing is held, so there is nothing to cancel.
+                // Nothing is held: cancelling withdraws it (EPIC-005).
                 let id = submitted["operation_id"].as_str().unwrap();
-                let refused = cli_cancel(&w, id, "cancel-a").unwrap_err();
-                assert_eq!(refused.code, "transition_unavailable");
+                let cancelled = cli_cancel(&w, id, "cancel-a").unwrap();
+                assert_eq!(cancelled["operation"]["phase"], "cancelled");
                 assert_eq!(released_by(&w), anchor);
                 lifecycle_still_anchors(&w, &arm, "v2", "r1");
             }
@@ -4926,14 +4945,202 @@ mod epic_004 {
                 let again = cli_submit(&w, "cli-a", &payload);
                 assert_eq!(again["observed"]["reserved"], false, "{again}");
                 assert_stale_refused(&w, &arm, &a, Some(ENDPOINT), "readers_unanchored");
-                assert_eq!(
-                    cli_cancel(&w, &a.operation_id, "cancel-a")
-                        .unwrap_err()
-                        .code,
-                    "transition_unavailable"
-                );
+                // EPIC-005: withdrawn, so its stale plan can never reserve.
+                let cancelled = cli_cancel(&w, &a.operation_id, "cancel-a").unwrap();
+                assert_eq!(cancelled["operation"]["phase"], "cancelled");
                 let revision = if same_route { "r2" } else { "r1" };
                 lifecycle_still_anchors(&w, &arm, "v3", revision);
+            }
+        }
+
+        // ------------ EPIC-005: withdrawing an unreserved operation (R1)
+
+        /// A reader change (2..=4) or a retirement naming `latest`,
+        /// submitted through the admin CLI: it holds no slot.
+        fn submitted(w: &World, retirement: bool, latest: &str) -> Intent {
+            let payload = if retirement {
+                Payload::Retire {
+                    tenant_id: T.into(),
+                    expected_receipt: latest.into(),
+                    reason: "offboarded".into(),
+                    data_disposition: DataDisposition::Retain,
+                }
+            } else {
+                Payload::SetReaders {
+                    tenant_id: T.into(),
+                    fleet: present(2, 4),
+                }
+            };
+            loaded(w, &cli_submit(w, "cli-a", &payload))
+        }
+
+        /// The operation's plan-anchored reservation by actuator `d`.
+        fn reserve_as(w: &World, d: &Driver<'_>, intent: &Intent) -> Result<(), ApiError> {
+            match intent.kind() {
+                Kind::Retire => d.reserve_retirement(&w.objects, NOW),
+                _ => d.reserve_readers(&w.objects, Some(ENDPOINT), NOW),
+            }
+        }
+
+        fn reserve_own(w: &World, arm: &MockArm, intent: &Intent) -> Result<(), ApiError> {
+            reserve_as(w, &driver(w, arm, intent), intent)
+        }
+
+        /// Cancelling a reader change or retirement that holds no slot
+        /// withdraws it: replays answer the same, and neither a retry nor a
+        /// restarted actuator ever reserves or acts for it. The tenant's
+        /// anchor and route are untouched.
+        #[test]
+        fn cancelling_an_unreserved_reader_or_retirement_withdraws_it_for_good() {
+            for (retirement, planned) in
+                [(false, false), (false, true), (true, false), (true, true)]
+            {
+                let w = world();
+                let arm = MockArm::default();
+                let (_, latest) = with_reader(&w, &arm);
+                let (anchor, route) = (released_by(&w), digest(&w));
+                let a = submitted(&w, retirement, &latest);
+                if planned {
+                    plan_only(&w, &arm, &a, (!retirement).then_some(ENDPOINT));
+                }
+                let guards = Guards::new(w.memory.clone(), TARGET);
+                let (calls, guard) = (arm.calls().len(), guards.current().unwrap());
+                let id = a.operation_id.as_str();
+                let before = op_status(&w, id);
+                let cancelled = cancel_quoting(&w, id, "cancel-a", &before).unwrap();
+                assert_eq!(cancelled["operation"]["phase"], "cancelled", "{cancelled}");
+                assert_eq!(cancelled["operation"]["observed"]["reserved"], false);
+                assert_eq!(
+                    (released_by(&w), digest(&w)),
+                    (anchor.clone(), route.clone())
+                );
+                // A replay answers the same; a new action finds it ended.
+                let replayed = cancel_quoting(&w, id, "cancel-a", &before).unwrap();
+                assert_eq!(replayed, cancelled);
+                let ended = cli_cancel(&w, id, "cancel-b").unwrap_err();
+                assert_eq!(ended.code, "operation_terminal");
+                // Its actuator retried, then restarted: never a slot or an effect.
+                let stopped = ActuatorStopped::proven_for_test("worker-a");
+                for (attempt, prior) in [("worker-a", None), ("worker-b", Some(&stopped))] {
+                    let d = Driver::new(&w.ops, &arm, &a, attempt, prior, 3).unwrap();
+                    let refused = reserve_as(&w, &d, &a).unwrap_err();
+                    assert_eq!(refused.code, "operation_terminal", "{attempt}");
+                    let sealed = if retirement {
+                        d.retire(&w.objects, &guards, NOW)
+                    } else {
+                        d.set_readers(
+                            &w.objects,
+                            Some(&reader_app("v9")),
+                            Some(&PinScope::for_test()),
+                            Some(&fleet(1)),
+                            NOW,
+                        )
+                    }
+                    .unwrap();
+                    assert_eq!(sealed.outcome(), &TerminalOutcome::Cancelled);
+                }
+                assert_eq!(arm.calls().len(), calls, "no cloud effect");
+                assert_eq!(guards.current().unwrap(), guard, "no guard write");
+                assert_eq!((released_by(&w), digest(&w)), (anchor, route));
+                lifecycle_still_anchors(&w, &arm, "v2", "r1");
+            }
+        }
+
+        /// A withdrawal and the operation's own planned reservation commit
+        /// through the same control-state CAS, so exactly one wins. Cancel
+        /// first: the reservation is refused and nothing acts. Reserve first:
+        /// the cancel goes through the reservation's plan and the slot is
+        /// released by it, as for any reserved operation.
+        #[test]
+        fn a_withdrawal_racing_the_reservation_has_exactly_one_winner() {
+            for (retirement, cancel_first) in
+                [(false, true), (false, false), (true, true), (true, false)]
+            {
+                let w = Arc::new(world());
+                let arm = Arc::new(MockArm::default());
+                let (_, latest) = with_reader(&w, &arm);
+                let anchor = released_by(&w);
+                let a = submitted(&w, retirement, &latest);
+                let guards = Guards::new(w.memory.clone(), TARGET);
+                let (calls, guard) = (arm.calls().len(), guards.current().unwrap());
+                let id = a.operation_id.as_str();
+                let (bw, barm, ba) = (w.clone(), arm.clone(), a.clone());
+                if cancel_first {
+                    // The cancel commits between the reservation's read and write.
+                    w.memory.hook(Op::Put, CONTROL, move || {
+                        let cancelled = cli_cancel(&bw, &ba.operation_id, "cancel-a").unwrap();
+                        assert_eq!(cancelled["operation"]["phase"], "cancelled");
+                    });
+                    let refused = reserve_own(&w, &arm, &a).unwrap_err();
+                    assert_eq!(refused.code, "operation_terminal");
+                    assert_eq!(released_by(&w), anchor, "no slot was taken");
+                    assert!(w.snapshot().withdrawn(T, id));
+                } else {
+                    // The reservation commits between the cancel's read and write.
+                    w.memory.hook(Op::Put, CONTROL, move || {
+                        reserve_own(&bw, &barm, &ba).unwrap();
+                    });
+                    let cancelled = cli_cancel(&w, id, "cancel-a").unwrap();
+                    assert_eq!(cancelled["operation"]["phase"], "cancelled", "{cancelled}");
+                    assert_eq!(released_by(&w).as_deref(), Some(id), "released by its plan");
+                    assert!(!w.snapshot().withdrawn(T, id), "never marked withdrawn");
+                }
+                assert_eq!(op_status(&w, id)["phase"], "cancelled");
+                let retried = reserve_own(&w, &arm, &a).unwrap_err();
+                assert_eq!(retried.code, "operation_terminal");
+                assert_eq!(arm.calls().len(), calls, "no cloud effect");
+                assert_eq!(guards.current().unwrap(), guard, "no guard write");
+                lifecycle_still_anchors(&w, &arm, "v2", "r1");
+            }
+        }
+
+        /// The withdrawal, not the journal, is the boundary: once it is
+        /// published the reservation is refused even though sealing failed,
+        /// and an actuator of the operation still acts on nothing. The same
+        /// cancel, replayed, seals it.
+        #[test]
+        fn an_unsealed_withdrawal_already_refuses_the_reservation() {
+            for retirement in [false, true] {
+                let w = world();
+                let arm = MockArm::default();
+                let (_, latest) = with_reader(&w, &arm);
+                let anchor = released_by(&w);
+                let a = submitted(&w, retirement, &latest);
+                let guards = Guards::new(w.memory.clone(), TARGET);
+                let (calls, guard) = (arm.calls().len(), guards.current().unwrap());
+                let id = a.operation_id.as_str();
+                let before = op_status(&w, id);
+                w.memory.fault(Op::Put, "journal.json", Fault::Before, 0, 1);
+                let lost = cancel_quoting(&w, id, "cancel-a", &before).unwrap_err();
+                assert_eq!(lost.code, "operation_indeterminate");
+                let status = op_status(&w, id);
+                assert_eq!(status["phase"], "cancelling", "{status}");
+                assert_eq!(status["observed"]["cancellation_requested"], true);
+                assert_eq!(status["observed"]["reserved"], false);
+                // Its plan settles, but it reserves nothing and acts on nothing.
+                let d = driver(&w, &arm, &a);
+                let refused = reserve_as(&w, &d, &a).unwrap_err();
+                assert_eq!(refused.code, "operation_terminal");
+                if retirement {
+                    let unverified = d.retire(&w.objects, &guards, NOW).unwrap_err();
+                    assert_eq!(unverified.code, "retirement_unverified");
+                } else {
+                    d.set_readers(
+                        &w.objects,
+                        Some(&reader_app("v9")),
+                        Some(&PinScope::for_test()),
+                        Some(&fleet(1)),
+                        NOW,
+                    )
+                    .unwrap_err();
+                }
+                assert_eq!(arm.calls().len(), calls, "no cloud effect");
+                assert_eq!(guards.current().unwrap(), guard, "no guard write");
+                assert_eq!(released_by(&w), anchor, "no slot was taken");
+                let cancelled = cancel_quoting(&w, id, "cancel-a", &before).unwrap();
+                assert_eq!(cancelled["operation"]["phase"], "cancelled", "{cancelled}");
+                assert_eq!(released_by(&w), anchor);
+                lifecycle_still_anchors(&w, &arm, "v2", "r1");
             }
         }
 
@@ -4969,7 +5176,7 @@ mod epic_004 {
             )
             .unwrap_err();
             assert_eq!(arm.calls().len(), calls, "no reader app effect");
-            request_cancel(&w.objects, &a, NOW).unwrap();
+            request_cancel(&w.ops, &w.objects, &a, NOW).unwrap();
             w.ops.release(&w.objects, &a, NOW).unwrap();
             let fresh = readers(&w, "fresh", present(1, 3));
             assert_eq!(

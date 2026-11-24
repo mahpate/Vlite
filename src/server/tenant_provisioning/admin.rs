@@ -382,6 +382,7 @@ fn render(
         }) => (true, *cancellation_requested, receipt.is_some()),
         _ => (false, false, false),
     };
+    let withdrawn = snapshot.withdrawn(&intent.tenant_id, &intent.operation_id);
     let (phase, next_step) = match terminal.map(|t| &t.outcome) {
         Some(TerminalOutcome::Succeeded { .. }) => ("succeeded", "none: the operation ended"),
         Some(TerminalOutcome::Cancelled) => ("cancelled", "none: the operation ended"),
@@ -396,6 +397,10 @@ fn render(
         None if cancelling => (
             "cancelling",
             "cancel again to seal and release the reservation",
+        ),
+        None if withdrawn => (
+            "cancelling",
+            "cancel again to seal the withdrawal; nothing is reserved",
         ),
         None if reserved && pins_sets(&intent.payload) => (
             "reserved",
@@ -441,7 +446,7 @@ fn render(
         "observed": {
             "reserved": reserved,
             "routed": snapshot.record_for(&intent.tenant_id).is_some(),
-            "cancellation_requested": cancelling,
+            "cancellation_requested": cancelling || withdrawn,
             "journal_steps": journal.steps.len(),
             "uncertain_steps": uncertain,
             "terminal": terminal.is_some(),
@@ -511,6 +516,10 @@ fn available(
                 "retirement_required",
                 "the operation already activated its route; retire the tenant instead",
             )),
+            // EPIC-005: withdrawn in the same CAS as its reservation.
+            None if matches!(payload, Payload::SetReaders { .. } | Payload::Retire { .. }) => {
+                Ok(())
+            }
             None if matches!(payload, Payload::Create { .. }) => Err(unavailable_transition(
                 "cancel needs this operation to hold the tenant reservation; resubmit the request to reserve it",
             )),
@@ -644,7 +653,7 @@ fn act(
                     ..
                 }) => return Err(super::ended()),
                 Some(_) => {}
-                None => request_cancel(&deployments.objects, &intent, now)?,
+                None => request_cancel(&deployments.ops, &deployments.objects, &intent, now)?,
             }
             // Idempotent: completes a release an earlier attempt sealed.
             deployments
@@ -1478,20 +1487,56 @@ mod tests {
         assert_eq!(body["operation"]["phase"], "activated");
     }
 
+    /// EPIC-005: an unreserved reader change or retirement is cancelled by
+    /// withdrawing it (`request_cancel`); a create or a migration still
+    /// needs to hold its reservation.
     #[test]
-    fn cancel_needs_this_operation_to_hold_an_unrouted_reservation() {
+    fn cancel_without_a_reservation_withdraws_only_readers_and_retirements() {
         let request: ActionRequest = serde_json::from_value(json!({
             "idempotency_key": "k",
             "expected_operation_generation": 0,
             "expected_lifecycle_generation": 0,
         }))
         .unwrap();
-        let readers = Payload::SetReaders {
-            tenant_id: ROUTED.into(),
-            fleet: Fleet::Absent {},
-        };
-        let error = available(Verb::Cancel, &request, &readers, false, None).unwrap_err();
-        assert_eq!(error.code, "transition_unavailable");
+        let withdrawable = [
+            Payload::SetReaders {
+                tenant_id: ROUTED.into(),
+                fleet: Fleet::Absent {},
+            },
+            Payload::Retire {
+                tenant_id: ROUTED.into(),
+                expected_receipt: "a".repeat(64),
+                reason: "test".into(),
+                data_disposition: DataDisposition::Retain,
+            },
+        ];
+        for payload in &withdrawable {
+            available(Verb::Cancel, &request, payload, false, None).unwrap();
+        }
+        let held_first = [
+            Payload::Create {
+                name: "contoso".into(),
+                max_vectors: None,
+                writer_profile: "a".repeat(64),
+                initialization: "a".repeat(64),
+                resources: Vec::new(),
+                secret_versions: Vec::new(),
+            },
+            Payload::Migrate {
+                tenant_id: ROUTED.into(),
+                expected_source_route: "a".repeat(64),
+                expected_source_lineage: 1,
+                target_profile: "a".repeat(64),
+                resources: Vec::new(),
+                migration_profile: "a".repeat(64),
+                verification_policy: "a".repeat(64),
+                onboarding_policy: "a".repeat(64),
+            },
+        ];
+        for payload in &held_first {
+            let error = available(Verb::Cancel, &request, payload, false, None).unwrap_err();
+            assert_eq!(error.code, "transition_unavailable");
+        }
     }
 
     #[tokio::test]
@@ -1555,9 +1600,9 @@ mod tests {
     /// ITEM-008: a reader fleet would pin sets with whole-record writes in
     /// the writer's coordination scope, so it cannot advance; it can still
     /// be read, and removing readers needs no pins. R1: a reader submission
-    /// takes no slot (only its plan-anchored actuator reserves), so there is
-    /// no planless reservation to cancel and later lifecycle anchoring is
-    /// never poisoned.
+    /// takes no slot (only its plan-anchored actuator reserves); EPIC-005:
+    /// cancelling it withdraws it without a slot, so later lifecycle
+    /// anchoring is never poisoned.
     #[tokio::test]
     async fn reader_fleets_are_denied_until_pin_scope_is_proven() {
         let f = fixture();
@@ -1593,10 +1638,10 @@ mod tests {
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(body["error"]["code"], "pin_scope_unproven");
         // Refused before any record: the key stays free for cancel, which
-        // is refused too because nothing is reserved.
+        // withdraws the unreserved submission and leaves the slot alone.
         let (status, body) = f.action(&operation, "cancel", "resume-1", json!({})).await;
-        assert_eq!(status, StatusCode::CONFLICT, "{body}");
-        assert_eq!(body["error"]["code"], "transition_unavailable");
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["operation"]["phase"], "cancelled");
         assert_eq!(f.snapshot().lifecycle(ROUTED).cloned(), before, "no anchor");
         let absent = json!({
             "idempotency_key": "readers-absent",

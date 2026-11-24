@@ -932,6 +932,10 @@ impl Operations {
                 }
                 None => return Err(not_terminal()),
             },
+            // EPIC-005: withdrawn before it ever reserved; it never acted.
+            _ if snapshot.withdrawn(&intent.tenant_id, &intent.operation_id) => {
+                TerminalOutcome::Cancelled
+            }
             _ => return Err(not_terminal()),
         };
         // Close the journal by CAS so no action can be recorded (and so
@@ -977,7 +981,8 @@ impl Operations {
         sealed(stored)
     }
 
-    /// Seals the terminal record, then releases the lifecycle slot.
+    /// Seals the terminal record, then releases the lifecycle slot. A
+    /// withdrawn operation (EPIC-005) holds none: the slot stays as it is.
     pub(super) fn release(
         &self,
         objects: &Objects,
@@ -990,7 +995,8 @@ impl Operations {
                 snapshot.lifecycle(&intent.tenant_id).map(|e| &e.slot),
                 Some(Slot::Released { operation_id, terminal_digest })
                     if *operation_id == intent.operation_id && terminal_digest == sealed.digest()
-            )
+            ) || (*sealed.outcome() == TerminalOutcome::Cancelled
+                && snapshot.withdrawn(&intent.tenant_id, &intent.operation_id))
         };
         let sealed = self.seal(intent, &snapshot, now)?;
         lifecycle_cas(
@@ -1113,9 +1119,18 @@ fn reserve_with(
     .map(drop)
 }
 
-/// ITEM-003: requests cancellation. Linearized with `activate` by the
-/// control-state CAS: exactly one of them wins.
-pub(super) fn request_cancel(objects: &Objects, intent: &Intent, now: u64) -> Result<(), ApiError> {
+/// ITEM-003: requests cancellation. Linearized with `activate` and
+/// [`reserve_after`] by the control-state CAS: exactly one of them wins.
+/// EPIC-005: a reader change or retirement that holds no slot is withdrawn
+/// in that same CAS (it can then never reserve); if its reservation wins,
+/// the retried CAS cancels it through that reservation instead.
+pub(super) fn request_cancel(
+    ops: &Operations,
+    objects: &Objects,
+    intent: &Intent,
+    now: u64,
+) -> Result<(), ApiError> {
+    let withdrawable = matches!(intent.kind(), Kind::SetReaders | Kind::Retire);
     lifecycle_cas(
         objects,
         now,
@@ -1126,9 +1141,19 @@ pub(super) fn request_cancel(objects: &Objects, intent: &Intent, now: u64) -> Re
                     cancellation_requested: true,
                     ..
                 })
-            )
+            ) || (withdrawable && snapshot.withdrawn(&intent.tenant_id, &intent.operation_id))
         },
-        |current| current.request_cancel(&intent.tenant_id, &intent.operation_id),
+        |current| {
+            if !withdrawable || holds(current, intent).is_some() {
+                return current.request_cancel(&intent.tenant_id, &intent.operation_id);
+            }
+            // Read after `current`: a slot is released only after its
+            // holder sealed, so no terminal means this never held it.
+            if ops.read_terminal(&intent.operation_id)?.is_some() {
+                return Err(ended());
+            }
+            current.withdraw(&intent.tenant_id, &intent.operation_id)
+        },
     )
     .map(drop)
 }
