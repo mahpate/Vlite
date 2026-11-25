@@ -1303,7 +1303,7 @@ def exercise_tenant_deployment_requests(browser):
     control(page, "#tenant-deployment-operation").fill(lost_id)
     control(page, "#tenant-deployment-check").click()
     expect(operation_message).to_contain_text("has no saved copy of the earlier cancel")
-    expect(operation_message).to_contain_text("Select Cancel to send a new cancel instead")
+    expect(operation_message).to_contain_text("select Cancel to send a new cancel")
     expect(page.locator("#tenant-deployment-cancel")).to_be_enabled()
     control(page, "#tenant-deployment-cancel").click()
     confirm_all(page, f"Finish cancelling operation {lost_id}?", "sends a new cancel that quotes the status just read",
@@ -1347,6 +1347,9 @@ def exercise_tenant_deployment_requests(browser):
     confirm_all(page, f"Finish cancelling operation {refused_id}?", "sends a new cancel that quotes the status just read")
     expect(operation_message).to_contain_text("The server refused a new cancel for this operation")
     expect(operation_message).to_contain_text("report the operation ID to the server operator")
+    # Cancel stays off for the refused operation, so the same refusal is not offered again.
+    expect(page.locator("#tenant-deployment-cancel")).to_be_disabled()
+    expect(page.locator("#tenant-deployment-operation-help")).to_contain_text("Cancel stays off for this operation")
     fake.older_server = False
     assert len(posts(f"{DEPLOY_OPS}/{refused_id}/cancel")) == 2
     assert not [key for key in page.evaluate("() => Object.keys(sessionStorage)") if refused_id in key]

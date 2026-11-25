@@ -1076,14 +1076,15 @@
       `Finish cancelling operation ${deploymentView(op).operation}?`,
       RELEASE_PENDING,
       resending ? "This resends your earlier cancel exactly, with the same request key, so the server only finishes releasing the reservation."
-        : "This sends a new cancel that quotes the status just read, so the server only finishes releasing the reservation. If the operation changes first, the server refuses it and nothing changes.",
+        : "This sends a new cancel that quotes the status just read; it only finishes releasing the reservation. If the operation changes first, or this server is older than the dashboard, the server refuses it and nothing changes.",
       "Cloud execution is switched off (OD-002), so nothing in Azure is touched.",
     ].join("\n");
   }
   // Without a saved cancel for this account, Cancel sends a new one quoting the status it reads first.
-  const RELEASE_LOST = `${RELEASE_PENDING} This browser tab has no saved copy of the earlier cancel for the account signed in now under this dashboard's API address (a saved cancel stays only in the tab that sent it, only for the account that sent it, and only until that account signs out or its session ends). Select Cancel to send a new cancel instead: it quotes the status read just before it is sent, and the server then finishes releasing the reservation.`;
-  // A server that predates this recovery refuses a new cancel once the operation has ended.
-  const RELEASE_REFUSED = "The server refused a new cancel for this operation. Select Check status: if the reservation is now released, nothing more is needed. If it is still held, this server is older than the dashboard and accepts only an exact resend of the earlier cancel, which this tab does not have: report the operation ID to the server operator.";
+  const RELEASE_LOST = `${RELEASE_PENDING} This browser tab has no saved copy of the earlier cancel for the account signed in now under this dashboard's API address (a saved cancel stays only in the tab that sent it, only for the account that sent it, and only until that account signs out or its session ends). If another account sent it from this tab and its session has not ended, that account can sign in here again to resend it. Or select Cancel to send a new cancel: it quotes the status read just before it is sent, and the server should then finish releasing the reservation (a server older than this dashboard refuses it, and nothing changes).`;
+  // The same refusal comes from a release that finished in between (a release moves no generation) and from a
+  // server that predates this recovery, so the text covers both; Cancel then stays off for this operation.
+  const RELEASE_REFUSED = "The server refused a new cancel for this operation. Another administrator or tab may have just finished the release: select Check status, and if the reservation is now released, nothing more is needed. If it is still held, this server is older than the dashboard and accepts only an exact resend of the cancel it recorded. If another account sent that cancel from this tab and its session has not ended, that account can sign in here again to resend it; otherwise report the operation ID to the server operator. Cancel stays off for this operation until the page reloads or someone signs in again.";
   // Saved cancels (sessionStorage) are filed by API address, then owner:
   // TD_CANCEL_STORE + encodeURIComponent(address) + "/" + principal + "." + operation ID.
   const TD_CANCEL_STORE = "vlite.tenant-deployment.cancel.";
@@ -1875,6 +1876,9 @@
     // The account the server verified for this sign-in (deploymentPrincipal), and the last one, so that a session found
     // to have ended after the page already let go of it still deletes that account's saved cancels.
     let tdPrincipal = null, tdLastPrincipal = null;
+    // The operation whose pending release this server refused to finish with a new cancel (operation_terminal):
+    // Cancel stays off for it, so the panel does not keep offering what was just refused. Cleared on sign-in and sign-out.
+    let tdCancelRefused = null;
     // The API address this page's requests go to (deploymentApiScope); saved cancels are filed and found under it only.
     const tdScope = deploymentApiScope(ctx.apiBase, globalThis.document?.baseURI ?? globalThis.location?.href);
     // Each sent cancel is also kept in this tab's sessionStorage under its API address and account (it holds only the
@@ -1976,10 +1980,11 @@
       const shown = tdOp !== null && tdOperationField() === tdOp.operation_id;
       const releasing = shown && deploymentReleasePending(tdOp);
       const resend = releasing && tdCancelSavedFor(tdOp.operation_id) !== null;
+      const refused = releasing && !resend && tdCancelRefused === tdOp.operation_id;
       const ended = shown && !releasing && deploymentTerminal(tdOp);
-      $(TD("cancel")).disabled = !allowed || ended;
+      $(TD("cancel")).disabled = !allowed || ended || refused;
       $(TD("operation-help")).textContent = !allowed ? gates.tenantDeployments.reason
-        : releasing ? (resend ? tdResendHelp(tdCancelSavedFor(tdOp.operation_id), " ") : RELEASE_LOST)
+        : releasing ? (resend ? tdResendHelp(tdCancelSavedFor(tdOp.operation_id), " ") : refused ? RELEASE_REFUSED : RELEASE_LOST)
         : ended ? "This operation has ended, so it cannot be cancelled. Enter another operation ID to cancel a different one."
         : "Check status reads the operation's current state. Cancel reads it again, shows what will be cancelled and asks you to confirm.";
     }
@@ -2128,7 +2133,7 @@
       if (!op) return;
       if (deploymentReleasePending(op)) {
         const saved = tdCancelSavedFor(id);
-        show(TD_MESSAGES.tdOperation, saved ? tdResendHelp(saved, "\n") : RELEASE_LOST);
+        show(TD_MESSAGES.tdOperation, saved ? tdResendHelp(saved, "\n") : tdCancelRefused === id ? RELEASE_REFUSED : RELEASE_LOST);
         return;
       }
       show(TD_MESSAGES.tdOperation, deploymentTerminal(op) ? "This operation has ended; it cannot be cancelled." : `Next step: ${typeof op.next_step === "string" ? op.next_step : "--"}`);
@@ -2159,8 +2164,11 @@
           if (deploymentRetryable(error)) error.deployRetry = true;
           else tdCancelDrop(id);
         }
-        if (releasing && saved === null && error?.code === "operation_terminal") error.deployHint = RELEASE_REFUSED;
-        if (error?.code === "operation_generation_stale" && current(mark)) focusAfterRun(TD("check"));
+        // Refused while the release looked pending, whether the cancel was new or a saved one the server never recorded.
+        const refused = releasing && error?.code === "operation_terminal";
+        if (refused) error.deployHint = RELEASE_REFUSED;
+        if (refused && current(mark)) { tdCancelRefused = id; gateTenantDeployments(); }
+        if ((refused || error?.code === "operation_generation_stale") && current(mark)) focusAfterRun(TD("check"));
         throw error;
       }
       if (!current(mark)) return;
@@ -2237,7 +2245,7 @@
       tdAfter = null; tdPage = 0;
       tdStatus("Tenant deployment operations not loaded.", "idle");
       cList("tenant-deployment-list", [], () => null);
-      tdPending = {}; tdCancelPending = null; tdOp = null;
+      tdPending = {}; tdCancelPending = null; tdOp = null; tdCancelRefused = null;
       $(TD("operation-status")).textContent = "No operation selected.";
       cList(TD("operation-facts"), [], () => null);
       for (const id of Object.values(TD_MESSAGES)) show(id, "");
@@ -2290,7 +2298,7 @@
     autoFailoverView, autoFailoverRequest, deploymentListPath, deploymentRequest, deploymentView, deploymentList, deploymentBlocked, deploymentExplain,
     sha256Hex, deploymentContent, deploymentCreateSubmission, deploymentReadersSubmission, deploymentRetireSubmission, deploymentTerminal,
     deploymentCancelRequest, deploymentCancelConfirm, deploymentRetryable, deploymentProfileText, DEPLOY_HINTS, DEPLOY_SETTLED,
-    deploymentReleasePending, deploymentReleaseConfirm, deploymentSavedCancel, deploymentAck, DEPLOY_PHASES,     DEPLOY_KINDS, RELEASE_PENDING, RELEASE_LOST, RELEASE_REFUSED,
+    deploymentReleasePending, deploymentReleaseConfirm, deploymentSavedCancel, deploymentAck, DEPLOY_PHASES, DEPLOY_KINDS, RELEASE_PENDING, RELEASE_LOST, RELEASE_REFUSED,
     deploymentPrincipal, deploymentApiScope, deploymentCancelOwner, deploymentCancelScope, DEPLOY_RETRY_AFTER_FIX } };
   if (typeof window !== "undefined") window.VLiteAdminTools = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;

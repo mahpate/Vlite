@@ -1486,7 +1486,7 @@ async function tenantDeploymentTests() {
 async function tenantDeploymentWriteTests() {
   const { sha256Hex, deploymentContent, deploymentCreateSubmission, deploymentReadersSubmission, deploymentRetireSubmission, deploymentTerminal,
     deploymentCancelRequest, deploymentCancelConfirm, deploymentRetryable, deploymentProfileText, deploymentExplain, DEPLOY_HINTS, DEPLOY_SETTLED,
-    deploymentAck, deploymentReleasePending, deploymentReleaseConfirm, deploymentSavedCancel, DEPLOY_PHASES,     DEPLOY_KINDS, RELEASE_PENDING, RELEASE_LOST, RELEASE_REFUSED,
+    deploymentAck, deploymentReleasePending, deploymentReleaseConfirm, deploymentSavedCancel, DEPLOY_PHASES, DEPLOY_KINDS, RELEASE_PENDING, RELEASE_LOST, RELEASE_REFUSED,
     deploymentPrincipal, deploymentCancelOwner, deploymentCancelScope, deploymentApiScope } = utils;
   const nodeSha = (data) => require("node:crypto").createHash("sha256").update(data).digest("hex");
   const plain = (value) => JSON.parse(JSON.stringify(value));
@@ -1679,10 +1679,10 @@ async function tenantDeploymentWriteTests() {
   const freshRelease = deploymentReleaseConfirm(op(A, { phase: "cancelled" }), false);
   assert.match(freshRelease, /^Finish cancelling operation a{32}\?\n[\s\S]*sends a new cancel that quotes the status just read[\s\S]*the server refuses it and nothing changes[\s\S]*nothing in Azure is touched/);
   assert.doesNotMatch(freshRelease, /same request key/);
-  assert.match(RELEASE_LOST, /^This operation is cancelled, but the server has not released[\s\S]*Select Cancel to send a new cancel instead[\s\S]*finishes releasing the reservation\.$/);
+  assert.match(RELEASE_LOST, /^This operation is cancelled, but the server has not released[\s\S]*another account sent it from this tab[\s\S]*can sign in here again to resend it[\s\S]*select Cancel to send a new cancel[\s\S]*should then finish releasing the reservation \(a server older than this dashboard refuses it, and nothing changes\)\.$/);
   assert.doesNotMatch(RELEASE_LOST, /refused|report the operation ID/);
-  // An older server refuses the new cancel; the page says how to tell whether anything is still held.
-  assert.match(RELEASE_REFUSED, /^The server refused a new cancel[\s\S]*Select Check status[\s\S]*still held[\s\S]*report the operation ID to the server operator\.$/);
+  // The refusal is the same when another administrator just finished the release and when the server is older.
+  assert.match(RELEASE_REFUSED, /^The server refused a new cancel[\s\S]*may have just finished the release: select Check status[\s\S]*still held[\s\S]*can sign in here again to resend it; otherwise report the operation ID to the server operator\. Cancel stays off for this operation[\s\S]*\.$/);
   // The tab keeps a saved cancel only for the verified account that sent it, until it signs out or its session ends.
   assert.match(RELEASE_LOST, /only for the account that sent it[\s\S]*signs out or its session ends/);
   // Whose a saved cancel is: a verified account (the server's actor names), never a role alone; anything else is no account.
@@ -2090,6 +2090,18 @@ async function tenantDeploymentWriteTests() {
   assert.match(el("operation-message").textContent, /^HTTP 409: operation_terminal: x\n/);
   assert.ok(el("operation-message").textContent.includes(RELEASE_REFUSED));
   assert.equal(session.has(oldKey), false);
+  // Cancel stays off for the refused operation instead of offering the same refusal again; Check status still works.
+  assert.equal(el("cancel").disabled, true);
+  assert.equal(el("operation-help").textContent, RELEASE_REFUSED);
+  ctx.responses.push({ operation: { ...releasing, operation_id: old } });
+  await el("check").click();
+  assert.equal(el("operation-message").textContent, RELEASE_REFUSED);
+  assert.equal(el("cancel").disabled, true);
+  // Another operation is unaffected.
+  el("operation").value = lost; el("operation").input();
+  assert.equal(el("cancel").disabled, false);
+  el("operation").value = old; el("operation").input();
+  assert.equal(el("cancel").disabled, true);
   // A new cancel whose outcome is unknown is kept for this account and resent exactly.
   const unsure = "5".repeat(32), unsureKey = keyIn(ROOT, `user:${ALICE}`, unsure);
   el("operation").value = unsure; el("operation").input();
@@ -2104,6 +2116,19 @@ async function tenantDeploymentWriteTests() {
   assert.match(ctx.confirms.at(-1), /resends your earlier cancel exactly, with the same request key/);
   assert.match(el("operation-message").textContent, /^Cancelled\./);
   assert.equal(session.has(unsureKey), false);
+  // A saved new cancel the server never recorded (its first send failed) is refused on resend by an older server:
+  // the page explains the refusal, drops the copy and keeps Cancel off.
+  const unrecorded = "6".repeat(32), unrecordedKey = keyIn(ROOT, `user:${ALICE}`, unrecorded);
+  el("operation").value = unrecorded; el("operation").input();
+  ctx.responses.push({ operation: { ...releasing, operation_id: unrecorded } }, fail(503, "operation_store_unavailable"));
+  await el("cancel").click();
+  assert.ok(session.has(unrecordedKey));
+  ctx.responses.push({ operation: { ...releasing, operation_id: unrecorded } }, fail(409, "operation_terminal"));
+  await el("cancel").click();
+  assert.match(ctx.confirms.at(-1), /resends your earlier cancel exactly/);
+  assert.ok(el("operation-message").textContent.includes(RELEASE_REFUSED));
+  assert.equal(session.has(unrecordedKey), false);
+  assert.equal(el("cancel").disabled, true);
   // A malformed ID or status sends nothing further.
   el("operation").value = "nope"; el("operation").input();
   const quiet = ctx.calls.length;

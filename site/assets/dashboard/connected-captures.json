@@ -6,11 +6,11 @@
   "capabilities": {
     "version": "0.7.12"
   },
-  "source_git_sha": "c38aaa1a872d2a4aa9fa9f91e511979ba71126aa",
+  "source_git_sha": "8433c836df7972c59ddc1fc783c015ae99f1149c",
   "source_git_dirty": true,
   "format_version": 5,
   "source_assets": {
-    "admin-tools.js": "32534815ca4717bc639c363a262fbdf3e36da26b988e325c5770048abd8af57c",
+    "admin-tools.js": "fded53a5a6a85f36a92659050426bc6b7b81f886e8d6ea4c6ced662d3dc89ed1",
     "ambience.js": "678612f0fe51412d5b8bce773f49333e3423154be61562a905908f7e41510087",
     "app.js": "e82c97799668106b90ce5275ab91dbcf2f21b97a80c8d81ff72db3f42d66a8c9",
     "console-tools.js": "fab5e78d415a784f8976a2bf34e18eabca70fe1c725b164bfc17c925c8773b22",
@@ -32,7 +32,7 @@
     {
       "file": "current-sign-in.png",
       "workspace": "Sign in",
-      "sha256": "8bb253eebce04672807a8489cd0ef9bc721f99b7170693810ba4c30069e77531"
+      "sha256": "7fc8216e97474d48d4c8bed26d29251a496efce94e4d072ddf1099e8ef23686f"
     },
     {
       "file": "current-overview-light.png",
@@ -77,12 +77,12 @@
     {
       "file": "current-search.png",
       "workspace": "Search",
-      "sha256": "90847d7199d2c4091cb65bb6d38e1e693d13a239b50d4f02aec627fb3dfb8f99"
+      "sha256": "e2bfa4674a8a85694312ed1d4ba98c4d7250bd213763add3bbe81afd8e3a8f79"
     },
     {
       "file": "current-hybrid.png",
       "workspace": "Search",
-      "sha256": "f47ca0b09f0db8d2ea88d459e11dd8de6df7b84b104046917104483a310ea168"
+      "sha256": "db7dc5f1f080dce968bb24c46f9872da0204e319baa11bcde50790621822fcd3"
     },
     {
       "file": "current-retrieval.png",
@@ -122,17 +122,17 @@
     {
       "file": "current-observability.png",
       "workspace": "Observability",
-      "sha256": "798ac84c59fe9325d0a057f9e685601728b367e3b46df92b3700a06e6e15f419"
+      "sha256": "4f4dd46702a81a67b5549effaee6f208203fb3f6c0e77feda1225ad064a7b9ab"
     },
     {
       "file": "current-feed.png",
       "workspace": "Observability",
-      "sha256": "9f7a67c0fb54f28e48a8510dbd0a52b5088a2eb0379d373ee215b0f9923384cb"
+      "sha256": "a7122e4b55d06eeb1ef345a1f52faa507061e0fa86fd86df7f56f2cf6b35c176"
     },
     {
       "file": "current-administration.png",
       "workspace": "Administration",
-      "sha256": "467950d553b16d28ec0aef1e8850998d1ff33e58ca17c851fc1f2ec4d9050030"
+      "sha256": "e14c3ae35ff9d89c948bae75d2e01da83440fa2c6628d11145b4663d1006a320"
     },
     {
       "file": "current-users.png",
@@ -142,7 +142,7 @@
     {
       "file": "current-backups.png",
       "workspace": "Administration",
-      "sha256": "6a243bfe94d06b0be0a7e69f17333e7c443df67480ed0407d9d05fd35228b588"
+      "sha256": "3e5466a170d74ca52fdb5368ad972826459fa27d489f0b36fd41f112b723c8d0"
     },
     {
       "file": "current-compaction.png",
@@ -152,12 +152,12 @@
     {
       "file": "current-credentials.png",
       "workspace": "Administration",
-      "sha256": "faaf11f8586b124e949754de7a3ddceba7df01b78fade12b1582a146b02cfd08"
+      "sha256": "f5334648a71e48d39726eb9ccf0d178661ab12649b013f123b1dc6efd7037b2d"
     },
     {
       "file": "current-tenants.png",
       "workspace": "Administration",
-      "sha256": "b38298b3a8d9fe56b4ddf2bcc592c941bd99e078b7abf0f1bca261ffe68f2201"
+      "sha256": "f255bcf3bef47ce094c43089bcae9ce6aba8de2dedd3abf7c5afe5277986347f"
     },
     {
       "file": "current-automation.png",
@@ -177,12 +177,12 @@
     {
       "file": "current-replication.png",
       "workspace": "Administration",
-      "sha256": "825c1e5eaec748ded6967fb2ca39fe533689a73d9e6688e219c5330361fa44df"
+      "sha256": "d765d1a4627c4e7a42727ef3c153ad7e256f330474507a91d921b2825565fa8e"
     },
     {
       "file": "current-developer.png",
       "workspace": "Developer Console",
-      "sha256": "f95328baf03df4bf6a48ca09eaee669b112a3bfd2bc7e50bbcc7f2fc26ca77a0"
+      "sha256": "e032b434ea66c6ed8f9b0aa71a5ddf7532aeaa0dd2ff2f67da678cc966427fb4"
     },
     {
       "file": "current-overview-dark.png",

@@ -853,10 +853,17 @@ value comes from:
   - If the saved cancel is gone (another tab or browser, a sign-out or an
     ended session), the panel says so and **Cancel** sends the new cancel
     described above instead: a new request key and the tokens from the
-    status it reads just before sending. A server older than this recovery
-    refuses that cancel (`operation_terminal`). The panel then says to
-    select **Check status** and, if the reservation is still held, to report
-    the operation ID to the server operator.
+    status it reads just before sending. If another account sent the
+    earlier cancel from this tab and its session has not ended, that account
+    can instead sign in again and resend it exactly.
+  - **Refused new cancel** (`operation_terminal`): either another
+    administrator or tab finished the release in between, or the server is
+    older than this recovery. The panel says to select **Check status**
+    first; nothing more is needed if the reservation is now released. If it
+    is still held, only an exact resend works on that server, so the account
+    that sent it can sign in again in this tab, or else report the operation
+    ID to the server operator. **Cancel** then stays off for that operation
+    until the page reloads or someone signs in or out.
 - Each **Create** adds a tenant record at once. The record counts toward the
   tenant limit and stays even if the request is later cancelled.
 
