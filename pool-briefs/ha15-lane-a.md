@@ -1,0 +1,328 @@
+# Task: ARM adapter follow-ups 1-5 (VLite tenant provisioning), test-first
+
+Repository: mahpate/Vlite (Rust). You are implementing, not designing. The design report appended below
+was written at an older commit; its line numbers are approximate and the "concurrent exact-app revision
+inventory change" it mentions HAS landed in this base (keep it unchanged). Read the current code first.
+
+## Exclusive write scope
+Only `src/server/tenant_provisioning/arm.rs` (production code and its existing `#[cfg(test)]` module).
+Any change to any other path fails the task. Do not create new files. Do not commit build output.
+
+## What to implement, in this order (one commit per item is ideal)
+1. Versioned handle envelope (report "PROPOSED 1"): `arm:1:{json}` carrying api, owner, started, deadline,
+   op. Legacy unversioned handles decode with the frozen api `2026-07-01`. Unknown schema version or api is
+   refused before any token is acquired or request sent. The whole persisted handle stays <= 2,048 bytes
+   (existing monitor-overflow rule: drop only the optional monitor, keep the fallback).
+2. Profile-drift guard (report "PROPOSED 2"): before interpreting an `update` poll, the current profile
+   body's `digest::config_digest` must equal the digest recorded in the handle; otherwise Unknown (never
+   Succeeded/Failed).
+3. Absent/Stop readback checks the recorded owner (report "PROPOSED 3"): a present resource with a foreign,
+   missing or malformed owner tag, or a legacy destructive handle with no owner, reads Unknown.
+4. Persisted deadline (report "PROPOSED 4"): 30 minutes (1,800,000 ms) from `started`, inclusive; at or after
+   the deadline the result is Unknown, never Failed. Add a test clock seam (no sleeping in tests).
+   Untimed legacy uncertain handles give Unknown before any I/O.
+5. Uncertain Stop/Delete is never re-dispatched (report "PROPOSED 5"): resume only by readback. Add test
+   `an_expired_or_foreign_destructive_handle_cannot_release_the_operation`.
+Write each item's failing tests first, then the code. Use the test names proposed in the report.
+
+## Must keep passing unchanged (do not weaken or delete)
+All existing `arm.rs` tests, notably `a_missing_replica_count_never_proves_a_stop`,
+`an_unprovable_inventory_is_incomplete`, the exact-app inventory tests, `polls_end_only_on_terminal_arm_states`,
+`malformed_handles_are_unknown_without_a_request`, `an_expired_monitor_falls_back_to_its_handle`,
+`an_update_succeeds_only_on_the_desired_configuration`, `every_handle_round_trips`,
+`an_over_long_monitor_persists_only_its_fallback`, `one_worker_attempt_provisions_a_writer_through_the_adapter`,
+and every test in `tenant_provisioning/tests.rs` and `tenant_provisioning/worker.rs`.
+
+## Forbidden
+No public API, REST route, OpenAPI, CLI or `site/api.html` change. No stored-record schema migration (the
+journal's `arm_operation: Option<String>` stays). No new dependency or Cargo.toml/Cargo.lock change. No change
+to gates, preflight, worker takeover rules or the production constructor. No Azure or network access other
+than the existing loopback fake ARM in tests. Never lower a check to make a test pass.
+
+## Validation (run before finishing; all must pass)
+- `cargo test --locked --features server --lib server::tenant_provisioning`
+- `cargo clippy --locked --features server --lib --tests -- -D warnings`
+- `cargo fmt --check`
+In your final commit message list the new test names and the validation results.
+
+---
+
+# Appended design report (authoritative for behavior; line numbers approximate)
+
+# ARM follow-ups: test-first, adapter-local design
+
+**Validation status: INCOMPLETE for implementation/runtime behavior.** This is a completed design-only report based on static inspection, not an implemented fix or a passing runtime review. No Rust tests, loopback servers, Azure requests, identity requests, or other network calls were run. All tests below are **PROPOSED**, not executed. Source code and documentation are unchanged.
+
+## Scope and implementation order
+
+Address the five assigned follow-ups in PRD section 15 (`docs\projects\feature-aca-ha\design-tenant-provisioning\design-tenant-provisioning.prd.md:1271-1287`), in this order:
+
+| Order | Assigned item | Independently reviewable change |
+|---|---|---|
+| 1 | (5) Unversioned handles / unstamped ARM API | Add a bounded, versioned envelope and explicit legacy decoding. |
+| 2 | (3) Update projection after profile drift | Detect an incompatible current profile before interpreting any update poll. |
+| 3 | (4) Absent handle / reused name | Check the recorded owner on present-resource delete readback. |
+| 4 | (2) No polling deadline | Enforce the envelope's original, persistent deadline; expiration stays unknown. |
+| 5 | (1) Uncertain Stop/Delete | Test read-only resume and explicitly gate unrecoverable/no-handle cases on operator reconciliation. |
+
+Each change can be implemented in `src\server\tenant_provisioning\arm.rs`, including tests in its existing test module. Order 1 supplies metadata needed by orders 3 and 4; order 5 consumes the prior safeguards. Order 2 needs only the already-recorded update digest and could land independently. Do not claim the deadline follow-up fixed merely because order 1 stamps timestamps.
+
+**Concurrent work boundary:** accept the other engineer's exact-app revision inventory changes as a prerequisite, without redesigning or editing them. All proposed fixtures use names such as `app-1--r1`, IDs `<appId>/revisions/<name>`, and pagination confined to that app's revision collection. Retain its complete-inventory, malformed-entry and paging checks. The baseline inspected here does not yet contain that concurrent change.
+
+Other section-15 items, including secret allow-listing, worker scan behavior, identity-helper relocation, dashboard changes, and production proof sources, are outside this report.
+
+## CONFIRMED: current contracts and evidence
+
+All line references describe the inspected checkout and will move when the concurrent change lands.
+
+| Evidence | Confirmed behavior |
+|---|---|
+| `src\server\tenant_provisioning\arm.rs:35-56,134-145` | Adapter-built URLs use the compile-time `2026-07-01` API version. The handle prefixes carry no schema or explicit adapter API version. |
+| `src\server\tenant_provisioning\arm.rs:152-195,264-280` | The adapter sends one mutation, follows no redirects, and does not retry it. A PUT/DELETE with an uncertain response normally returns a readback fallback handle rather than `ArmError::Unknown` without a handle. |
+| `src\server\tenant_provisioning\arm.rs:288-352` | Stop inventories before deactivating flagged revisions. It attempts each flagged revision once; it is not replaying a previous Stop step. All refusals produce `Refused`; mixed possible effects and refusals produce `stop-failed:`; other possible effects produce `stop:`. |
+| `src\server\tenant_provisioning\arm.rs:357-395,568-646` | The handle parser/formatter supports monitors, resource/update/absence fallbacks, Stop and StopFailed. Monitor overflow drops the optional monitor, not the fallback. No owner, creation time, or deadline is serialized. |
+| `src\server\tenant_provisioning\arm.rs:401-466` | Async/Location monitors can finish directly or fall back to resource readback. No elapsed-time deadline exists. Update hashes an observation projected onto the *current* mapped body and compares it with the original sent digest. Absent returns Running for any present JSON object, without checking its owner. Stop checks complete revision activity, not the owner during polling. |
+| `src\server\tenant_provisioning\arm.rs:472-514,681-709` | Begin checks ownership before an Update/Delete/Stop mutation. Poll receives only the stored string. It cannot recover an expected owner or dispatch time from an intent/journal it does not receive. |
+| `src\server\tenant_provisioning\arm.rs:517-547,712-747` | Read returns owner, current-profile-derived digest, provisioning state and complete/incomplete revisions. Missing replica count is malformed; inactive means neither flagged active nor running replicas. |
+| `src\server\tenant_provisioning\aca.rs:80-161,785-808,852-898` | The internal port exposes only `begin(Call) -> String`, `poll(&str)`, and `read(resource)`. Driver claims first, records before dispatch, persists the returned handle, and never invokes begin for `Decision::Reconcile`. Wait is bounded by poll count; missing handle or exhausted/unknown polls produce Open. |
+| `src\server\tenant_provisioning\aca.rs:1060-1099,1134-1216,1844-1920` | Cleanup and destructive operations do not equate an Open operation with success just because readback looks finished. Destructive readback also checks ownership. Update settlement requires successful operation polling plus exact owned readback. |
+| `src\server\tenant_provisioning.rs:269-331,689-709,779-888` | Journal schema is strict. A step has optional `arm_operation` with a backward-compatible serde default. Record returns Reconcile for the same uncertain action. Observe can fill an empty handle or repeat the exact same handle, but cannot replace an existing different handle. Settled observations are immutable. |
+| `src\server\tenant_provisioning.rs:956-982` | An uncertain step blocks sealing/release; closing the journal prevents another recorded dispatch. |
+| `src\server\tenant_provisioning\worker.rs:30-32,148-167,185-237,240-259` | Worker uses 30 polls, skips claimed/closed operations during scanning, refuses an unproven foreign-claim takeover, retains claims, and reports unresolved steps as Unknown. Production preflight still blocks execution. A fresh worker invocation is not an automatic recovery executor. |
+| `src\server\tenant_provisioning\admin.rs:431-458` | Public status projects counts and lifecycle state, not the opaque handle string. Changing its internal encoding does not itself change public JSON. |
+| `src\server\tenant_provisioning.rs:114-116`; `src\server\cloud_backup\azure.rs:146-154` | Persistable text is nonempty, no control characters, at most 2,048 bytes. Shared HTTP clients have a 120-second request timeout, 10-second connect timeout, and no redirects. |
+
+### Important qualifications
+
+**CONFIRMED:** "never re-dispatched" is a safety property, not something to remove. A Stop/Delete with a persisted usable handle can already converge through polling and readback. A journaled action with no handle, a perpetually Running fallback, and a definite partial Stop failure are different states.
+
+**CONFIRMED:** profile drift does not invariably cause Running. Projection uses the desired body's **shape**, not its current scalar values (`src\server\tenant_provisioning\digest.rs:20-58`). Added/removed fields or changed array shapes can prevent the old digest matching. A value-only edit with unchanged shape may still allow the old observation to match the sent digest. The new guard below deliberately treats either form of incompatible profile drift as unknown.
+
+**CONFIRMED:** no-handle uncertainty cannot be repaired solely by changing `ArmClient::poll`: Driver never calls poll when `arm_operation` is missing. Likewise, rewriting legacy handles "on first poll" is impossible through the present port and violates the journal's replace-once rules.
+
+## PROPOSED 1: version and API-stamp handles (assigned item 5)
+
+### Behavior
+
+Keep `Step.arm_operation: Option<String>` and the outer journal schema unchanged. Introduce a private, compact, serde-decoded envelope, illustratively:
+
+```text
+arm:1:{"api":"2026-07-01","owner":"vlite-tenant:t-1","started":1700000000000,"deadline":1700001800000,"op":"update:<appId>@<digest>"}
+```
+
+`op` is one existing validated handle, never another envelope. Its existing monitor/fallback nesting restrictions remain. The envelope contains no token, profile body, secret, or operator authorization. Its timestamps refer to the adapter action, not tenant creation. Owner and timestamps are stamped now so subsequent changes can enforce them without rewriting a stored string.
+
+Parse into an explicit `Legacy` or `V1` representation; never interpret an unknown `arm:<version>:` as a legacy operation. Reject unknown/duplicate envelope fields, missing mandatory fields, wrong types, malformed inner handles, invalid owner text, timestamp overflow/order errors, unsupported schema/API, and overlength/control-bearing strings as `ArmError::Unknown` **before acquiring a token**. Validate the complete inner monitor URL with the existing base-origin/path guard; a schema stamp grants no URL trust.
+
+Every newly returned handle, including fallback-only, already-absent, Stop and StopFailed, uses V1. Plan the *complete fallback envelope* and verify it fits `text()` before sending any mutation. If no bounded fallback can be persisted, do not mutate. If an accepted operation supplies an overlong monitor, discard only that optional monitor; preserve owner, API stamp, digest and timestamps in the fallback envelope. Never return an oversized handle after causing an effect.
+
+Use the stamped API for adapter-generated resource/revision polling URLs; do not silently substitute a future compiled default. Initially support only `2026-07-01`. Monitor URLs are provider-returned opaque URLs: retain their validated query verbatim rather than rewriting their possibly endpoint-specific API version. Keep nextLink validation owned by the concurrent inventory work.
+
+### Legacy compatibility and stored records
+
+Freeze a named legacy API mapping to **`2026-07-01`**, independent of any future default. Continue decoding every presently accepted legacy grammar, including storage/environment resource fallbacks and monitor nesting. Never change the bytes in an existing journal and never reinterpret old resource IDs as new identities.
+
+At this foundation step legacy handles retain their present polling behavior at that frozen version. Orders 3 and 4 below intentionally restrict old uncertain handles when required evidence is absent. This is **read/schema compatibility, not a promise of unchanged recovery liveness**. Settled records remain settled; absent `arm_operation` still deserializes as None.
+
+An eventual ARM API upgrade must fail unknown for unsupported historical stamps until observation/digest compatibility is proven. `Arm::read(resource)` has no per-handle API argument, so this envelope alone does **not** solve end-to-end multi-version final readback. Do not enable historical/new API combinations merely because the decoder understands a version string; proving equivalent readback or changing the internal port would be separate work.
+
+### Exact new tests and assertions
+
+All names below belong in `arm.rs::tests`.
+
+| New test | Required assertions |
+|---|---|
+| `v1_handles_round_trip_every_operation_and_stamp_the_arm_api` | Round-trip every existing handle variant, including nested update/absence monitors, storage/resource legacy cases and StopFailed. New emissions contain schema 1, exact API, expected owner and fixed-clock start/deadline. Parsing/formatting never changes operation identity or digest. |
+| `legacy_handles_decode_without_rewriting_the_journal` | Load literal old journal JSON with no `arm_operation`, and with each legacy string; deserialize successfully. Foundation polling uses the frozen API. Serialize an unchanged loaded record without adding a missing handle; existing handle bytes remain exact. |
+| `unsupported_handle_schema_or_api_is_unknown_before_token_acquisition` | Unknown schema/API, duplicate/extra/missing fields, nested envelope, wrong timestamp types/order and unsafe inner URL all return Unknown; an empty fake script sees zero requests, including zero identity requests. |
+| `handle_size_is_checked_before_mutation_and_preserved_on_monitor_fallback` | Exercise exactly 2,048 and 2,049 bytes of the *whole serialized envelope*. A valid in-limit fallback remains persistable when either monitor overflows; all mandatory metadata survives. An unpersistable fallback causes zero PUT/DELETE/POST requests. |
+
+**Files touched:** only `src\server\tenant_provisioning\arm.rs` (private envelope, parser/formatter, URL context, begin preparation, tests/module grammar documentation). No dependency or journal field additions.
+
+**Public/API contract:** no route, public type, request field, status field or error-code contract change. `site\api.html`, `src\openapi.json`, `docs\API.md`: no updates required for this adapter-internal change.
+
+**Risk/trade-off:** larger strings reduce available monitor space. Rejecting unsupported versions is intentionally fail-closed and makes downgrade/rollback recovery less convenient. Do not log full monitor strings or embed profile bodies to regain convenience.
+
+## PROPOSED 2: detect profile drift before an update poll (assigned item 3)
+
+### Behavior
+
+Before any token/monitor/read request for an update-bearing handle, obtain the mapped body and require:
+
+```text
+config_digest(current_mapped_body) == digest_recorded_in_update_handle
+```
+
+Absent mapping or mismatch returns `ArmError::Unknown`, never Running, Refused, Failed, or Succeeded. Apply this guard to a bare update and to both monitor forms, including the case where a monitor would immediately say Succeeded. Thus no path can bypass the guard by taking a monitor-success shortcut.
+
+With the same compatible body, retain the present exact projection/readback rules: other configurations' terminal states remain Running; the sent configuration's provisioning failure remains Failed; success requires that sent digest. Do not hash the entire observed ARM response, ignore additional desired fields, replace the sent digest, or silently pick the new profile's desired configuration.
+
+This chooses explicit unknown/operator action over embedding the original body in a 2,048-byte handle. If continued automatic recovery under a different profile is desired later, reconstruct the original content-addressed retained profile in a correctly claimed/fenced driver context; do not trust a current profile as a historical snapshot.
+
+### Exact new tests and assertions
+
+| New test | Required assertions |
+|---|---|
+| `an_update_with_a_changed_profile_shape_is_unknown_before_any_request` | Obtain/store a handle for body A, restart with body B adding/removing a desired field and separately changing an array shape. B's digest differs; polling returns Unknown with zero restart-side identity/ARM requests, even if an old A resource would be Succeeded. |
+| `an_update_with_value_only_profile_drift_is_explicitly_unknown` | Keep A/B shapes equal but change image or replicas. Guard still returns Unknown; it does not assume all profile drift previously produced Running. |
+| `update_monitors_cannot_bypass_the_profile_digest_guard` | For Async and Location wrapping A's update, restart with B or no mapping. A scripted terminal success must not be requested; poll is Unknown. |
+| `an_update_with_the_original_profile_keeps_exact_poll_semantics` | Restart with A; an ARM-normalized echo of A succeeds, stale other-config Succeeded/Failed/Canceled remains Running, and matching-config Failed/Canceled reports Failed. No PUT is sent on any poll. |
+
+**Files touched:** only `arm.rs` (pre-token guard and tests; reuse `digest::config_digest` without changing the digest algorithm).
+
+**Public/API contract:** unchanged; existing unknown outcome remains the external result. No `site\api.html`, `src\openapi.json`, or `docs\API.md` update.
+
+**Stored-record migration:** none. Both old and V1 update handles already contain the sent digest. They become incompatible, rather than endlessly settling, when current mapping differs; their stored bytes and uncertain step remain untouched.
+
+**Risk/trade-off:** this conservatively rejects some value-only drift that previously could be polled successfully. That is deliberate: no false claim that a changed profile is the original dispatch context. Driver may block on a prior action whose digest differs from the new desired action before reaching this guard; the guard does not bypass that journal protection or make restart takeover available.
+
+## PROPOSED 3: bind absence readback to the recorded owner (assigned item 4)
+
+### Behavior
+
+Use the envelope's original `Call.owner`; never derive the expected owner from the resource currently occupying the name.
+
+| Delete readback | Poll result |
+|---|---|
+| Definitive 404, within a valid handle/deadline | Succeeded, subject to the existing Driver final read and ownership check. |
+| Present and exact recorded owner | Running. No second DELETE. |
+| Present with missing/different owner or malformed/ambiguous ownership tags | Unknown; no mutation, adoption, or claim that the original mutation was refused. |
+| Unavailable/unparseable read | Unknown. |
+
+For an Async/Location monitor with an absence fallback, a **terminal successful** monitor must also pass this absence readback. A still-Running monitor is not overridden by a 404; retain the driver's requirement that apparent effect alone cannot settle an ongoing monitor. A definite monitor failure stays Failed, never transformed into deletion success.
+
+Apply the recorded-owner check to present-resource Stop polling too: otherwise a recreated foreign app with zero active revisions could be mistaken for successful stop. This is tightly coupled destructive-handle provenance, not a change to inventory interpretation. Fail unknown before inventorying a foreign/malformed-owner resource.
+
+Legacy absent/Stop handles contain no expected owner. Do not infer it from the live tag or the current desired profile. Before order 4, keep 404 readback meaningful, but return Unknown for a present resource instead of treating its owner as verified. After order 4's deadline enforcement, untimed legacy handles require operator handling before polling at all.
+
+### Exact new tests and assertions
+
+| New test | Required assertions |
+|---|---|
+| `an_absent_handle_rechecks_the_recorded_owner_when_a_name_is_reused` | Begin one owned Delete; change GET to a foreign-owned replacement at the same ID. Poll is Unknown and the total DELETE count stays exactly one. Do not copy the replacement's owner into the handle. |
+| `an_absent_handle_rejects_missing_ambiguous_or_malformed_owners` | Parameterize no tags, null/missing owner, different owner value, case-variant duplicate owner keys and non-string owner. All present cases return Unknown; one correctly recased owner key with exact value is accepted as Running. |
+| `a_successful_delete_monitor_still_requires_owned_absence_readback` | For Async and Location success, foreign replacement is Unknown, original-owned presence is Running, and 404 is Succeeded. A Running monitor plus apparently absent state is not promoted to success; terminal failure stays failure. |
+| `a_stop_handle_never_proves_a_foreign_replacement_stopped` | Foreign/missing/malformed owner yields Unknown before revision GET, even if a fixture offers an inactive inventory. Original-owned complete zero-replica inactive inventory succeeds; a positive draining replica remains Running. |
+| `legacy_destructive_handles_never_infer_the_expected_owner` | In the intermediate pre-deadline policy, present legacy absent/Stop handles are Unknown for both apparently matching and foreign owner tags, with zero mutations. Once order 4 lands, update this test to expect pre-I/O Unknown for untimed legacy handles. |
+
+**Files touched:** only `arm.rs` (propagate/use envelope owner, absence/Stop readback and successful delete-monitor handling, tests).
+
+**Public/API contract:** unchanged. Public status may remain uncertain longer; it does not acquire an owner or handle field. No updates to `site\api.html`, `src\openapi.json`, or `docs\API.md`.
+
+**Stored-record migration:** no rewrite. Legacy data remains readable but lacks owner evidence for present resources. Do not use `Operations::observe` to replace it, because that is expressly forbidden for different strings.
+
+**Risk/trade-off:** tag identity is not a resource-incarnation identifier. Delete/recreate with the *same* owner tag cannot be distinguished reliably by this port. Keep conservative Running/Unknown and the deadline; do not invent an ETag/creation-UID guarantee. The precheck-to-mutation ownership race and undocumented container-app conditional support remain unproven.
+
+## PROPOSED 4: a persisted observation deadline (assigned item 2)
+
+### Behavior and persistence
+
+Use a private initial policy of **30 minutes** (`1_800_000` ms), explicitly a proposed operator policy, not an Azure SLA or measured completion bound. Compute the original start and checked absolute deadline before the first mutation. Store both in every new envelope. A new process or proven takeover uses the **same stored deadline**, never "now plus another 30 minutes". Dropping a monitor must not reset it. Keep the existing poll-count budget as an additional bound, not a substitute.
+
+Expiration means **unknown requiring operator action**, not provider failure, successful completion, definite refusal, permission to settle, claim release, cancellation, or mutation retry. Return `ArmError::Unknown`. Existing Driver wait will exhaust its small count with Open; existing error classification remains `cloud_outcome_unknown` and the step stays Uncertain. Do not add a `Poll::Failed("timeout")` or return `ArmError::Refused("timeout")`.
+
+Check `now >= deadline` before token acquisition, before each ARM read/page/fallback, and again before returning any result from a request that crossed the deadline. The boundary is inclusive: even a Succeeded response arriving at the deadline is Unknown. Deadline checks also precede StopFailed's no-I/O shortcut, so expiration is never mislabeled as a newly observed provider failure.
+
+Bound adapter ARM GET request timeout by remaining time using existing reqwest facilities; maintain current no-redirect/no-mutation-retry rules. Do not start a later inventory page once the budget expires, and never turn a truncated inventory into a complete proof. No added sleeping/backoff algorithm is needed for this follow-up; pace/Retry-After remains a separate unverified concern.
+
+**Deadline versus hard runtime limit:** managed-identity acquisition uses a shared credential client outside the adapter's per-request control. An in-flight credential call can overrun the deadline; check again after it returns and do not send ARM traffic or accept a result. Thus this proposal guarantees a persisted **observation/acceptance deadline**, not exact wall-clock process termination at D. Driver final `read(resource)` is also outside handle-specific timing context. A hard end-to-end invocation deadline would require internal credential/port/driver changes and is not claimed by this `arm.rs`-only series.
+
+Use fallible `SystemTime` conversion and checked arithmetic, plus `Instant` for non-extending elapsed budget within a live process. Clock failure, an impossible/future start, or detected rollback is Unknown, not time zero. After restart an absolute UTC deadline assumes reasonably bounded trusted host-clock error; arbitrary undetectable clock rollback cannot be solved by an immutable handle alone. This is an explicit operational uncertainty, not a lease or fencing proof.
+
+### Legacy policy and migration
+
+Legacy handles have neither original start nor deadline. There is no honest way to create a restart-persistent historical budget inside poll or infer dispatch time from intent creation. At this step, legacy/untimed **uncertain** handles return Unknown before I/O and require operator reconciliation. Do not grant a fresh deadline per process and do not rewrite stored strings. Settled steps retain their recorded result and are not reopened.
+
+This is the recommended fail-closed compatibility choice. **Strict old polling liveness plus a mandatory original deadline for every old uncertain record cannot both be delivered inside `arm.rs`.** If preserving that liveness is mandatory, a separately designed audited journal migration is required in `tenant_provisioning.rs`/`aca.rs`, with authoritative start/owner evidence and CAS protections. It is not part of this adapter-only series, and `observe` must not simply be weakened to permit replacement.
+
+### Exact new tests and assertions
+
+Use a private deterministic test clock, not sleeps or new dependencies. Let start be T and D = T + 1,800,000.
+
+| New test | Required assertions |
+|---|---|
+| `a_poll_deadline_expires_to_unknown_at_the_exact_boundary` | Valid compatible polls at D-1 retain existing results; polls at D and D+1 return Unknown with zero new identity/ARM requests. Cover bare and monitor handles for create/update/delete/Stop/StopFailed. No timeout maps to Succeeded, Failed or Refused. |
+| `a_poll_deadline_survives_adapter_restart_and_monitor_fallback` | Serialize at T, construct a new adapter at D-1 and D, and reuse the exact string from a loaded journal. It does not extend the deadline; fallback retains identical metadata. At D the step is still Uncertain. |
+| `a_response_crossing_the_poll_deadline_cannot_prove_completion` | Advance the fake clock during identity response, terminal monitor response, resource response and an inventory page. Discard apparent terminal success/failure after D, make no next-page/ARM request after expiry, return Unknown. |
+| `poll_clock_failure_or_invalid_time_is_unknown_not_a_fresh_budget` | Clock conversion failure, rollback before start, deadline-before-start, overflow, and excessive encoded budget are Unknown; no fresh timestamp is substituted. Validate fields before token acquisition. |
+| `an_untimed_legacy_handle_requires_operator_reconciliation` | Every legacy variant still decodes, but poll returns Unknown before requests under final policy. Old settled journal observations remain unchanged; no bytes are rewritten and no handle is fabricated for None. |
+| `a_deadline_leaves_the_driver_step_uncertain_and_the_claim_held` | Through real Driver and in-memory Operations, expired handle yields existing `cloud_outcome_unknown`; original step remains Uncertain with byte-identical handle, claim unchanged, no control-route publication or release. A repeated/fenced resume performs no second mutation. |
+
+**Files touched:** only `arm.rs` (clock seam, deadline enforcement, remaining-time ARM request context, tests). Use standard library and existing reqwest/serde dependencies. Shared credential client, Driver, worker and journal logic stay unchanged.
+
+**Public/API contract:** no new timeout phase, route, public error code, request flag or status JSON field. Existing unknown is intentionally retained. No `site\api.html`, `src\openapi.json`, or `docs\API.md` changes. If a later project exposes operator-action reasons, deadline timestamps or a hard-deadline setting publicly, all three contract surfaces must be updated then, not silently added here.
+
+**Risk/trade-off:** legitimate slow ARM operations become operator work and may still complete after local observation expires. Never describe expiration as stopping them. Clock accuracy and actual ARM duration are unverified. A durable, sticky "expired once" fact under arbitrary later clock rollback would require journal state beyond this immutable envelope; this proposal makes no such stronger claim.
+
+## PROPOSED 5: reconcile uncertain Stop/Delete without redispatch (assigned item 1)
+
+### Case distinction and selected behavior
+
+| Journal/adapter evidence | Allowed action | Must not do |
+|---|---|---|
+| Valid, unexpired handle and same compatible execution context | Poll/read only; preserve existing Driver settlement conditions and the stronger owner checks above. Delete settles only from valid completion plus absence; Stop requires complete no-active/no-running-replica inventory and valid completion. | Invoke begin again, deactivate newly discovered revisions on resume, or promote an ongoing monitor because effect looks visible. |
+| Monitor unavailable, valid fallback still available | Use only the adapter's existing conservative readback fallback, subject to recorded owner/API/deadline checks. | Replace a failed/expired handle with a newly budgeted handle. |
+| Step Uncertain, `arm_operation: None` | Keep unknown; require the operator-gated procedure below. Poll cannot repair this state. | Settle from a lone 404 or inactive snapshot: a delayed original request could still land. |
+| Handle expired, unsupported, incompatible, or missing required provenance | Keep unknown; operator handling. | Treat observation deadline or parsing failure as a no-effect refusal. |
+| Mixed partial Stop result represented by StopFailed | Keep the definite failure semantics within its valid context; no automatic recovery Stop. | Clear a known failure because a later snapshot looks inactive or retry a refused revision under the same uncertain step. |
+
+The adapter already makes most uncertain network outcomes pollable; the essential new work here is explicit state-matrix tests and safe diagnostics/documentation in `arm.rs`, not a second mutation algorithm. A restart is not authorization: same-attempt resume or proven takeover remains a Driver/journal concern, and production lacks an `ActuatorStopped` proof source.
+
+### Clearly operator-gated path
+
+For the no-handle/unprovable cases, retain the unresolved step and reservation/claim. The existing public unknown message does not itself authorize recovery.
+
+1. Stop automation for that exact operation and identify its operation ID, original attempt, sequence, action/resource, request digest and any stored handle. Obtain authoritative proof that the old actuator cannot dispatch; a stopped local process, elapsed deadline, portal snapshot, or operator checkbox alone is not OD-002.
+2. Separately establish the original provider request's terminal/non-pending state using authoritative provider evidence. Actuator fencing alone does not prove an ARM request already sent cannot still act. If that evidence is unavailable, leave the step unknown.
+3. Only after both proofs, collect fresh read-only state: Delete requires absence; Stop requires the expected owner or definitive absence plus a complete inventory with every active flag false and every replica count explicitly zero. Retain original operation identity and audit evidence; a foreign owner is never adopted/touched.
+4. An authorized reconciliation facility would settle the **existing sequence** by journal CAS, checking the same claim, action, uncertain state and proof binding, not dispatch a replacement mutation or hand-edit blobs. A failure to prove the desired result leaves operator work; any later destructive intent needs separate authorization and normal safety gates, not a blind retry.
+
+**Availability limitation:** no production proof constructor or audited administrative settle interface exists in the inspected code. Consequently this series deliberately does **not** promise automatic recovery or a new working operator command for a lost handle. The selected permitted branch is to leave it operator-gated and blocked until that separately reviewed facility exists. Building such a facility would require `tenant_provisioning.rs`, `aca.rs`, worker/admin integration and authorization/audit design; it cannot truthfully be hidden in `arm.rs`.
+
+### Exact new tests and assertions
+
+Add these in `arm.rs::tests`, using real Operations/Driver integration where specified and the existing fake ARM for future execution. Keep fixtures local and names valid for the concurrently tightened inventory.
+
+| New test | Required assertions |
+|---|---|
+| `an_uncertain_delete_resumes_by_readback_without_a_second_delete` | First DELETE response is dropped or 5xx and returns a persisted bounded absence handle. Restart/reconcile polls original-owned presence then 404. Exactly one DELETE total; final existing step settles deleted only through Driver's required readback. |
+| `an_uncertain_stop_resumes_without_redeactivating_any_revision` | First deactivation response is dropped; original handle is persisted. Reconcile sees draining replicas then explicit zero inactive inventory. Exactly one POST per originally dispatched revision; no new deactivation for a later appearing active revision; later active revisions keep Running/Unknown until deadline rather than being mutated. |
+| `an_uncertain_delete_without_a_handle_requires_operator_reconciliation` | Seed an uncertain delete action with no handle (models crash before begin or before observe). Repeated same-attempt cleanup with 404 stays unknown; sequence, handle None, claim and reservation remain; zero DELETE requests. Proven takeover alone does not make absence a terminal cloud-operation proof. |
+| `an_uncertain_stop_without_a_handle_requires_operator_reconciliation` | Seed the corresponding uncertain Stop and supply an owned complete inactive/zero inventory. Still unknown, no POST, no seal/release. Missing/partial count is also never proof. |
+| `a_partial_stop_failure_is_not_replayed_or_reclassified_as_success` | One deactivation may succeed and another refuses; persist StopFailed. Repeated Driver reconciliation sends no POST, retains terminal failure semantics, and never seals a successful stop from a later inactive snapshot. |
+| `an_expired_or_foreign_destructive_handle_cannot_release_the_operation` | Parameterize Delete/Stop expiration and replacement ownership. Handle/journal stay unchanged and Uncertain, no second mutation, no release, and no claimed success. A foreign-owned read may surface the existing Driver ownership-conflict error, but cannot settle the uncertain action. |
+
+**Files touched:** only `arm.rs` tests and directly related module/handle documentation for this selected scope. No production recovery endpoint, proof constructor, journal bypass or worker retry path is added.
+
+**Public/API contract:** unchanged; no new operator command or route is claimed. `site\api.html`, `src\openapi.json`, `docs\API.md`: no update for these adapter-only tests/semantics. If an administrative reconciliation route is later chosen, it is a separate contract change requiring all three references plus authorization/audit tests.
+
+**Stored-record migration:** none. No-handle uncertain steps remain no-handle; old steps are neither deleted nor re-recorded under new sequences. Unknown does not become retryable. Recovery metadata cannot be backfilled from guesses.
+
+**Risk/trade-off:** unavailable historical provider evidence may make some operations permanently unrecoverable through automation. This is preferable to a delayed original Delete/Stop affecting a replacement resource or clearing a reservation while an executor may still act. Complete revision inventory proves observed stopped state, not writer fencing, pin safety, or impossibility of future external activation.
+
+## Regression evidence and validation plan
+
+### CONFIRMED by static inspection, not execution
+
+Read **all of `arm.rs`**, including its fake server, handle parsing, revision parser and tests; read all of `worker.rs`, the relevant Driver/port/handle consumers in `aca.rs`, journal records/CAS rules in `tenant_provisioning.rs`, digest projection, and public status projection.
+
+Existing tests that must remain meaningful:
+
+- `arm.rs:1449-1705`: `a_delete_removes_only_our_app_and_watches_it_go`, `a_stop_deactivates_the_active_revisions_and_waits_for_none`, `a_stop_is_refused_only_before_any_deactivation`, `a_missing_replica_count_never_proves_a_stop`.
+- `arm.rs:1977-2285`: `polls_end_only_on_terminal_arm_states`, `malformed_handles_are_unknown_without_a_request`, `an_expired_monitor_falls_back_to_its_handle`, `an_update_succeeds_only_on_the_desired_configuration`, `every_handle_round_trips`, `an_over_long_monitor_persists_only_its_fallback`. Adapt expected encoding and legacy eligibility, not their no-false-success/no-unsafe-request invariants.
+- `arm.rs:2346-2474`: `one_worker_attempt_provisions_a_writer_through_the_adapter`; retain the no-route-write and settled-created assertions.
+- `src\server\tenant_provisioning\tests.rs:1630-1680,2069-2118,2869-2956`: persisted-handle resume/no redispatch, no-handle uncertainty, retirement Stop resume, Running Delete with absent readback, failed Delete never success, Running Stop with inactive readback.
+- `worker.rs:560-621,640-666`: failed/unknown dispatch remains claimed; no automatic retry or unproven takeover.
+
+### Checks actually executed
+
+- Read-only local worktree/status inspection and source searches/range reads; initial worktree was clean.
+- Local report checks after writing: UTF-8 decoding, nonempty content and maximum size, source-citation existence/ranges, proposed-test-name uniqueness, `git diff --check`, and worktree write-scope verification. These are artifact/static checks only, not Rust behavior checks.
+
+### Checks not executed / not claimed
+
+- No compilation, Rust tests, new-test implementation, mutation testing or runtime fixtures were executed. Existing ARM tests open loopback sockets, so they were not run under this assignment's **no network calls** restriction.
+- No dependency restoration/install, Azure/provider/API documentation fetch, identity test, live ARM experiment, deployment, or operator-recovery drill was attempted.
+- After implementation, in an environment explicitly allowing loopback-only fake traffic, run `cargo test --offline --locked --features server --lib server::tenant_provisioning` with build output, caches and test temporary data isolated outside the checkout. Start with the adapter selector for each incremental change, then cover Driver/worker regressions. Offline missing dependencies are a blocker, not permission to fetch them.
+
+**Remaining uncertainties:** provider echo fidelity, actual completion durations, conditional mutation support, Single-mode deactivation refusal, authoritative terminal-request evidence, production actuator-fencing proof sources, and host-clock error remain unverified. None of these designs changes production gates or establishes a dedicated-writer, reader, fencing, pin-release or production stop proof.
