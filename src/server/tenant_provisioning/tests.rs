@@ -127,6 +127,16 @@ fn prefixed(memory: &Memory) -> Vec<String> {
 
 // ------------------------------------------------------------- ITEM-001
 
+// The dashboard hashes profile contents in JS (tests/admin_tools.test.cjs pins the same hex for these bytes).
+#[test]
+fn content_digest_is_plain_lowercase_sha256_of_the_bytes() {
+    let sample = "\u{FEFF}line1\r\nna\u{EF}ve \u{2013} \u{65E5}\u{672C} \u{1F600}\r\n";
+    assert_eq!(
+        sha256_hex(sample.as_bytes()),
+        "e07ad4b95327338923a222fd2dabade046c608d400549667038c9a51f046d3fa"
+    );
+}
+
 #[test]
 fn identical_retry_returns_the_same_operation_and_tenant() {
     let w = world();

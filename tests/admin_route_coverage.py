@@ -101,25 +101,27 @@ INVENTORY = {
     ("DELETE", "/v1/admin/cloud-backup/sets/{id}/pins/{pin}"): ("admin-tools.js", "cloud-backup-unpin"),
     ("GET", "/v1/admin/auto-failover"): ("admin-tools.js", "auto-failover-refresh"),
     ("PUT", "/v1/admin/auto-failover"): ("admin-tools.js", "auto-failover-toggle"),
-    # Users > Tenant deployments: read-only list of recorded operations (design EPIC-011).
+    # Users > Tenant deployments (design EPIC-011): list recorded operations, record create, readers and
+    # retire requests, check one operation and cancel it. Nothing runs in Azure (cloud execution, OD-002).
     ("GET", "/v1/admin/tenant-deployment-operations"): ("admin-tools.js", "tenant-deployment-refresh"),
+    ("POST", "/v1/admin/tenant-deployments"): ("admin-tools.js", "tenant-deployment-create"),
+    ("POST", "/v1/admin/tenant-deployments/{tenant}/readers"): ("admin-tools.js", "tenant-deployment-readers"),
+    ("POST", "/v1/admin/tenant-deployments/{tenant}/retire"): ("admin-tools.js", "tenant-deployment-retire"),
+    ("GET", "/v1/admin/tenant-deployment-operations/{operation}"): ("admin-tools.js", "tenant-deployment-check"),
+    # The only action the dashboard sends is cancel; resume, acknowledge-delivery, replace-credentials,
+    # rollback and release stay API/CLI only.
+    ("POST", "/v1/admin/tenant-deployment-operations/{operation}/{action}"): ("admin-tools.js", "tenant-deployment-cancel"),
     # Live monitor > Server role and replication panel, refreshed with the other observability reads.
     ("GET", "/v1/admin/serve-status"): ("observability.js", "obs-refresh"),
 }
 
 # Admin routes deliberately without a dashboard control. Each needs a reason, and
 # the dashboard must not half-implement one.
-_TENANT_DEPLOYMENTS = (
-    "design-tenant-provisioning EPIC-002: managed tenant deployment intents and actions are API/CLI only; "
-    "the dashboard panel (EPIC-011) lists operations read-only for now; cloud execution is blocked (OD-002)"
-)
 BACKEND_ONLY = {
-    ("POST", "/v1/admin/tenant-deployments"): _TENANT_DEPLOYMENTS,
-    ("POST", "/v1/admin/tenant-deployments/{tenant}/readers"): _TENANT_DEPLOYMENTS,
-    ("POST", "/v1/admin/tenant-deployments/{tenant}/migrations"): _TENANT_DEPLOYMENTS,
-    ("POST", "/v1/admin/tenant-deployments/{tenant}/retire"): _TENANT_DEPLOYMENTS,
-    ("GET", "/v1/admin/tenant-deployment-operations/{operation}"): _TENANT_DEPLOYMENTS,
-    ("POST", "/v1/admin/tenant-deployment-operations/{operation}/{action}"): _TENANT_DEPLOYMENTS,
+    ("POST", "/v1/admin/tenant-deployments/{tenant}/migrations"): (
+        "design-tenant-provisioning ITEM-024: tenant migration is excluded from the dashboard (do not use it); "
+        "the Tenant deployments panel offers create, readers, retire and cancel only"
+    ),
 }
 
 # Graph routes (src/server/graph.rs).
@@ -153,14 +155,26 @@ def main():
     scripts = {name: (dashboard / name).read_text(encoding="utf-8") for name, _ in INVENTORY.values()}
     for (method, route), (script, control) in INVENTORY.items():
         assert f'id="{control}"' in markup, f"{method} {route}: missing UI #{control}"
-        assert f'"{control}"' in scripts[script], f"{method} {route}: missing handler #{control}"
+        # Tenant deployment controls are named through TD("...") in admin-tools.js.
+        short = control.removeprefix("tenant-deployment-")
+        assert f'"{control}"' in scripts[script] or (short != control and f'on(TD("{short}")' in scripts[script]), (
+            f"{method} {route}: missing handler #{control}")
         prefix = route.split("{", 1)[0]
         assert prefix in scripts[script], f"{method} {route}: missing request path in {script}"
     every_script = "".join(path.read_text(encoding="utf-8") for path in sorted(dashboard.glob("*.js")))
+    inventoried = [route for _, route in INVENTORY]
     for (method, route), reason in BACKEND_ONLY.items():
         assert reason, f"{method} {route}: backend-only routes need a reason"
-        assert route.split("{", 1)[0] not in every_script + markup, (
+        # A prefix shared with a route that has a control is allowed; then the route's own tail must be absent.
+        prefix = route.split("{", 1)[0]
+        probe = route.rsplit("}", 1)[-1] if any(other.startswith(prefix) for other in inventoried) else prefix
+        assert probe and probe not in every_script + markup, (
             f"{method} {route}: the dashboard references a backend-only route; inventory its control instead")
+    admin = scripts["admin-tools.js"]
+    for verb in ["readers", "retire", "cancel"]:
+        assert f"}}/{verb}`" in admin, f"Missing tenant deployment {verb} request path"
+    actions = set(re.findall(r"tenant-deployment-operations/\$\{[^}]+\}/([a-z-]+)", admin))
+    assert actions == {"cancel"}, f"The dashboard may only send the tenant deployment cancel action, found {sorted(actions)}"
     console = scripts["console-tools.js"]
     for control in ["pitr-run", "cred-tenant", "cred-rpm", "cred-max-vectors", "cred-max-vectors-per-collection"]:
         assert f'id="{control}"' in markup and f'"{control}"' in console, f"Missing admin input/control #{control}"

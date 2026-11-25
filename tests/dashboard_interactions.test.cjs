@@ -4,7 +4,8 @@ const fs = require("node:fs");
 const vm = require("node:vm");
 const { test } = require("node:test");
 
-function dashboard(fetch = async () => { throw new Error("Unexpected request"); }) {
+// options.apiBase: the content of <meta name="vlite-api-base"> (the Docker image serves the API under /api); absent by default.
+function dashboard(fetch = async () => { throw new Error("Unexpected request"); }, options = {}) {
   class Element {
     constructor(id = "", tag = "DIV") {
       this.id = id; this.tagName = tag; this.dataset = {}; this.attributes = new Map();
@@ -51,7 +52,7 @@ function dashboard(fetch = async () => { throw new Error("Unexpected request"); 
   const document = {
     activeElement: null,
     getElementById: get,
-    querySelector: () => null,
+    querySelector: (selector) => selector === 'meta[name="vlite-api-base"]' && options.apiBase !== undefined ? { content: options.apiBase } : null,
     querySelectorAll(selector) {
       if (selector === "button, input, select, textarea") return controls;
       if (selector === '[data-interaction-gate="blocked"]') return controls.filter((element) => element.dataset.interactionGate === "blocked");
@@ -63,9 +64,13 @@ function dashboard(fetch = async () => { throw new Error("Unexpected request"); 
   let context;
   let adminContext;
   const tools = { gate() {}, clear() {}, loaded() {}, connected() {} };
-  const adminTools = { gate() {}, disconnect() {}, capabilities() {} };
+  const adminCalls = [];
+  // Options are copied into this realm (the dashboard runs in its own vm context), so deepStrictEqual can compare them.
+  const adminTools = { gate() {}, disconnect(options) { adminCalls.push(["disconnect", options === undefined ? undefined : { ...options }]); }, capabilities() {},
+    forgetAccountCancels() { adminCalls.push(["forgetAccountCancels"]); } };
+  const windowListeners = {};
   const window = {
-    addEventListener() {},
+    addEventListener(type, listener) { (windowListeners[type] ||= []).push(listener); },
     VLiteAdminTools: {
       init(value) { adminContext = value; return adminTools; },
     },
@@ -88,12 +93,14 @@ function dashboard(fetch = async () => { throw new Error("Unexpected request"); 
   const source = fs.readFileSync("src/dashboard/app.js", "utf8").replace(/\}\)\(\);\s*$/, `
     window.testDashboard = {
       payloadPreview, metadataPreview, vectorPreview, presentRecord, confirmOperation,
-      setConnection(name = "default") {
-        connected = true; token = "memory-only-credential"; collection = name; dimensions = 2;
+      // credential "" signs in with the password session cookie instead of an access token.
+      setConnection(name = "default", credential = "memory-only-credential") {
+        connected = true; token = credential; collection = name; dimensions = 2;
         capabilities = { role: "admin", features: { collections: true }, format_version: 4 };
       },
       setCapabilities(value) { capabilities = value; },
-      clearRecordInspector, advanceWorkflowContext, connect, memoryOff
+      setSession(value) { session = value; },
+      clearRecordInspector, advanceWorkflowContext, connect, memoryOff, restoreSession
     };
   })();`);
   vm.runInNewContext(source, {
@@ -105,7 +112,7 @@ function dashboard(fetch = async () => { throw new Error("Unexpected request"); 
   get("hnsw-m").value = "16"; get("hnsw-ef").value = "100"; get("hnsw-seed").value = "42";
   get("k").value = "10"; get("query").value = "[1,0]"; get("filter").value = "[]";
   window.testDashboard.setConnection();
-  return { ...window.testDashboard, context, adminContext, tools, adminTools, window, document, get, controls, Element };
+  return { ...window.testDashboard, context, adminContext, tools, adminTools, adminCalls, windowListeners, window, document, get, controls, Element };
 }
 
 const response = (value, status = 200) => ({
@@ -122,6 +129,15 @@ test("both dashboard modules initialize with the same transport context", () => 
   const ui = dashboard();
   assert.equal(ui.adminContext, ui.context);
   assert.doesNotMatch(ui.get("status").textContent, /failed to initialize/);
+});
+
+test("the admin tools get the API base the requests use, so saved cancels are filed under that address", async () => {
+  assert.equal(dashboard().adminContext.apiBase, "");
+  const urls = [];
+  const ui = dashboard(async (url) => { urls.push(url); return response({ id: 1 }); }, { apiBase: "/api" });
+  assert.equal(ui.adminContext.apiBase, "/api");
+  await ui.context.api("GET", "/v1/vectors/1");
+  assert.deepEqual(urls, ["/api/v1/vectors/1"]);
 });
 
 test("payload previews decode UTF-8 safely, bound text and explicitly identify binary data", () => {
@@ -246,6 +262,139 @@ test("disconnect invalidates pending confirmations and prevents subsequent reque
   ui.get("confirmation").returnValue = "confirm";
   await ui.get("confirmation").emit("close");
   assert.equal(await answer, false);
+});
+
+test("a private submission sends the original body but the inspector only shows its summary", async () => {
+  const body = { contents: ["private deployment settings"], request: { secret_versions: ["private reference"] } };
+  const summary = { documents: 1, secret_versions: 1, profile_digests: ["a".repeat(64)] };
+  const pending = deferred();
+  let sent;
+  const ui = dashboard((_url, options) => { sent = JSON.parse(options.body); return pending.promise; });
+  const send = () => ui.context.api("POST", "/v1/admin/tenant-deployments", body, { data: false, inspectorSummary: summary });
+  const request = send();
+  const inspector = ui.get("inspector");
+  assert.deepEqual(sent, body);
+  assert.deepEqual(JSON.parse(inspector.textContent).request.body, summary);
+  pending.resolve(response({ operation: "ok", echoed: body }));
+  assert.equal((await request).operation, "ok");
+  assert.deepEqual(JSON.parse(inspector.textContent).request.body, summary);
+  assert.doesNotMatch(inspector.textContent, /private deployment settings|private reference/);
+});
+
+test("a 401 clears the inspector without exposing the previous request or processing the response body", async () => {
+  const ui = dashboard(async () => ({ status: 401, ok: false, text() { throw new Error("not JSON"); } }));
+  await assert.rejects(ui.context.api("POST", "/v1/admin/tenant-deployments", { contents: ["private settings"] }),
+    (e) => e.status === 401);
+  assert.equal(ui.get("inspector").textContent, "");
+  assert.equal(ui.context.connected(), false);
+  assert.match(ui.get("gate-message").textContent, /HTTP 401/);
+  assert.doesNotMatch(ui.get("gate-message").textContent, /private settings|not JSON/);
+});
+
+test("sign-out and an ended session delete saved tenant-deployment cancels; leaving the page or reconnecting keeps them", async () => {
+  // Both sign-out buttons (and a credentials reload) call disconnect(): the signed-in account's saved cancels go.
+  let ui = dashboard();
+  ui.adminCalls.length = 0;
+  ui.context.disconnect();
+  assert.deepEqual(ui.adminCalls, [["disconnect", { sessionEnded: true }]]);
+  // Leaving the page (pagehide) keeps them, so the same account can resend after a reload.
+  ui = dashboard();
+  ui.adminCalls.length = 0;
+  for (const listener of ui.windowListeners.pagehide) listener({});
+  assert.deepEqual(ui.adminCalls, [["disconnect", { sessionEnded: false }]]);
+  // A 401 (session expired or revoked, token rejected) ends the session. A rejected access token also tells the admin
+  // tools so, which deletes the bootstrap admin token's saved cancels even before the page learned who was signed in.
+  ui = dashboard(async () => response({ error: { code: "unauthorized", message: "session ended" } }, 401));
+  ui.adminCalls.length = 0;
+  await assert.rejects(ui.context.api("GET", "/v1/vectors/1"), (e) => e.status === 401);
+  assert.deepEqual(ui.adminCalls, [["disconnect", { sessionEnded: true, rejectedToken: true }]]);
+  // A password session (no access token) found ended is not a rejected token.
+  ui = dashboard(async () => response({ error: { code: "unauthorized", message: "session ended" } }, 401));
+  ui.setConnection("default", "");
+  ui.setSession({ username: "alice", mustChange: false });
+  ui.adminCalls.length = 0;
+  await assert.rejects(ui.context.api("GET", "/v1/vectors/1"), (e) => e.status === 401);
+  assert.deepEqual(ui.adminCalls, [["disconnect", { sessionEnded: true }]]);
+  // disconnect() passes rejectedToken on only when it is exactly true.
+  for (const [options, expected] of [
+    [{ endSession: false, rejectedToken: true }, { sessionEnded: true, rejectedToken: true }],
+    [{ endSession: false, rejectedToken: false }, { sessionEnded: true }],
+    [{ endSession: false, rejectedToken: "yes" }, { sessionEnded: true }],
+    [{ endSession: false, rejectedToken: 1 }, { sessionEnded: true }],
+    [{ endSession: false }, { sessionEnded: true }],
+    [{ endSession: false, leaving: true }, { sessionEnded: false }],
+  ]) {
+    ui = dashboard();
+    ui.adminCalls.length = 0;
+    ui.context.disconnect(options);
+    assert.deepEqual(ui.adminCalls, [["disconnect", expected]], JSON.stringify(options));
+  }
+  // Reconnecting (Refresh session, Connect) only clears the page; a reconnect that cannot reach the server deletes nothing.
+  ui = dashboard(async () => { throw new Error("offline"); });
+  ui.adminCalls.length = 0;
+  await ui.context.run(ui.connect);
+  assert.deepEqual(ui.adminCalls, [["disconnect", undefined]]);
+});
+
+test("a typed token that replaces a password session deletes the accounts' saved cancels first", async () => {
+  const ui = dashboard(async () => { throw new Error("offline"); });
+  ui.context.disconnect();
+  ui.setSession({ username: "alice", mustChange: false });
+  ui.adminCalls.length = 0;
+  ui.get("token").value = "typed-token";
+  ui.get("connection").listeners.submit[0]({ preventDefault() {} });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(ui.adminCalls, [["forgetAccountCancels"], ["disconnect", undefined]]);
+});
+
+test("a typed token refused on a fresh page, even with a non-JSON 401, is reported as a rejected token", async () => {
+  const urls = [];
+  const ui = dashboard(async (url) => {
+    urls.push(url);
+    return { ok: false, status: 401, headers: { get: () => null }, text: async () => "<html>401 Authorization Required</html>" };
+  });
+  // A fresh page: nothing signed in, nothing known about the account yet.
+  ui.context.disconnect();
+  ui.adminCalls.length = 0;
+  ui.get("token").value = "mistyped-token";
+  ui.get("connection").listeners.submit[0]({ preventDefault() {} });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(urls, ["/v1/capabilities"]);
+  // connect() clears the page (no options), then the refusal ends the session as a rejected token.
+  assert.deepEqual(ui.adminCalls, [["disconnect", undefined], ["disconnect", { sessionEnded: true, rejectedToken: true }]]);
+  assert.equal(ui.context.connected(), false);
+  assert.equal(ui.context.tokenAuth(), false);
+});
+
+test("a page load with no password session deletes the accounts' saved cancels; an unreadable answer deletes nothing", async () => {
+  const auth = (config, current) => async (url) => {
+    const route = url.split("?")[0];
+    if (route === "/v1/auth/config") return config();
+    if (route === "/v1/auth/session") return current();
+    throw new Error(`Unexpected ${route}`);
+  };
+  const offline = () => { throw new Error("offline"); };
+  const on = () => response({ password_login: true });
+  for (const [label, config, current, forgets] of [
+    ["password sign-in is off", () => response({ password_login: false }), offline, true],
+    ["session cookie expired or absent", on, () => response({ error: { code: "unauthorized", message: "x" } }, 401), true],
+    ["no password session", on, () => response({ method: "open" }), true],
+    ["config unreachable", offline, offline, false],
+    ["session unreachable", on, offline, false],
+    ["session busy", on, () => response({ error: { code: "busy", message: "x" } }, 503), false],
+  ]) {
+    const ui = dashboard(auth(config, current));
+    ui.context.disconnect();
+    ui.adminCalls.length = 0;
+    await ui.restoreSession();
+    assert.deepEqual(ui.adminCalls, forgets ? [["forgetAccountCancels"]] : [], label);
+  }
+  // A live password session resumes the same account (connect), so its saved cancels stay usable.
+  const ui = dashboard(auth(on, () => response({ method: "password", user: { username: "alice" } })));
+  ui.context.disconnect();
+  ui.adminCalls.length = 0;
+  await ui.restoreSession();
+  assert.deepEqual(ui.adminCalls, [["disconnect", undefined]]);
 });
 
 test("independent observability requests snapshot context and discard stale completions", async () => {

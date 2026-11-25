@@ -390,7 +390,7 @@
     clearRecordInspector();
   }
   function clearData() {
-    for (const id of ["overview", "inspector"]) $(id).textContent = "";
+    for (const id of ["overview", "inspector", "confirmation-text"]) $(id).textContent = "";
     resetCollectionData();
     dimensions = null;
     setVectorless(false);
@@ -419,7 +419,9 @@
     window.VLiteGraphConnection?.invalidate();
     capabilities = null;
     tools?.clear();
-    adminTools?.disconnect();
+    // Signing out deletes the signed-in account's saved tenant-deployment cancels; leaving the page keeps them for a reload.
+    // A refused access token (only ever true) also ends the bootstrap admin token's, even before the page learned who it was.
+    adminTools?.disconnect({ sessionEnded: options.leaving !== true, ...(options.rejectedToken === true ? { rejectedToken: true } : {}) });
     $("token").value = "";
     for (const id of ["password", "current-password", "new-password", "repeat-password"]) $(id).value = "";
     clearData();
@@ -551,7 +553,8 @@
     return Object.assign(error, { message, unavailable: `Unavailable: ${message[0].toLowerCase()}${message.slice(1)}`, help: MEMORY_HELP, memoryMode: true });
   }
   // options: { headers, withHeaders (returns { value, etag, status }), data: false for
-  // requests that never change records, sensitive (response holds a one-time secret) }.
+  // requests that never change records, sensitive (response holds a one-time secret),
+  // inspectorSummary (display this instead of the request body and withhold the response) }.
   async function api(method, path, body, options = {}) {
     if (busy && operationGeneration !== connectionGeneration) throw staleRequest();
     if (!connected) throw new Error("Sign in before accessing the database");
@@ -563,7 +566,8 @@
     const changesData = method !== "GET" && !search && options.data !== false;
     const started = performance.now();
     const redact = utils().redact;
-    const request = redact({ method, path, ...(options.headers ? { headers: options.headers } : {}), ...(body === undefined ? {} : { body }) });
+    const request = redact({ method, path, ...(options.headers ? { headers: options.headers } : {}),
+      ...(body === undefined ? {} : { body: options.inspectorSummary ?? body }) });
     show("inspector", { request, state: "pending" });
     let response;
     let value;
@@ -579,10 +583,14 @@
         headers: { ...(token ? { Authorization: `Bearer ${token}` } : { "X-VLite-Request": "1" }), ...(body === undefined ? {} : { "Content-Type": "application/json" }), ...(options.headers || {}) },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       });
-      const text = await response.text();
       if (!current()) throw staleRequest();
-      value = options.text && response.ok ? text : text ? JSON.parse(text) : null;
-      serverClock = utils().serverTime(response.headers.get("date"));
+      // A 401 ends the session even if a proxy returned a non-JSON body. Never display or parse it.
+      if (response.status !== 401) {
+        const text = await response.text();
+        if (!current()) throw staleRequest();
+        value = options.text && response.ok ? text : text ? JSON.parse(text) : null;
+        serverClock = utils().serverTime(response.headers.get("date"));
+      }
     } catch (error) {
       if (!current() || error.stale) throw staleRequest();
       if (changesData) mutationChanged();
@@ -593,33 +601,20 @@
       if (activeRequest === controller) activeRequest = null;
       $("cancel-request").disabled = true;
     }
-    // Inspector output is always redacted; one-time secrets never reach it.
+    if (response.status === 401) {
+      const ended = session !== null;
+      disconnect({ endSession: false, rejectedToken: Boolean(token) });
+      const failure = Object.assign(new Error("HTTP 401: unauthorized. Sign in again."), { status: 401, code: "unauthorized", body: null });
+      status(ended ? "Your session ended. Sign in again." : failure.message, true);
+      throw failure;
+    }
     show("inspector", {
       request, status: response.status, request_id: response.headers.get("x-request-id"),
       latency_ms: performance.now() - started,
-      response: options.sensitive ? "[response withheld: contains a one-time credential secret]" : options.text && response.ok ? `[${value.length} characters of text]` : redact(value),
+      response: options.inspectorSummary ? "[response withheld for this submission]" : options.sensitive ? "[response withheld: contains a one-time credential secret]" : options.text && response.ok ? `[${value.length} characters of text]` : redact(value),
     });
     if (!response.ok) {
       if (response.status >= 500 && changesData) mutationChanged();
-      const ended = response.status === 401 && session !== null;
-      if (response.status === 401) {
-        connectionGeneration++;
-        window.VLiteObservabilityConnection?.request.invalidate();
-        window.VLiteGraphConnection?.invalidate();
-        token = "";
-        session = null;
-        changingPassword = false;
-        connected = false;
-        connectionState();
-        clearData();
-        tools?.clear();
-        adminTools?.disconnect();
-        show("inspector", { request, status: response.status, response: redact(value) });
-        $("token").value = "";
-        clearBrowse();
-        $("index-status").textContent = "Index readiness not checked";
-        connectionChanged();
-      }
       const detail = value?.error;
       const failure = new Error(redact(`HTTP ${response.status}: ${detail?.code || "request_failed"}: ${detail?.message || "See inspector"}`));
       failure.status = response.status;
@@ -627,7 +622,6 @@
       failure.body = options.sensitive ? null : value;
       const off = memoryOff(method, path, response.status, detail?.code);
       if (off) memoryFailure(failure, off);
-      if (response.status === 401) status(ended ? "Your session ended. Sign in again." : failure.message, true);
       throw failure;
     }
     if (changesData) {
@@ -997,10 +991,11 @@
       if (!tools) throw new Error("Console tools failed to initialize; reload the page. Not connecting (fails closed).");
       const typed = $("token").value;
       $("token").value = "";
-      // A typed token replaces this browser's password session.
+      // A typed token replaces this browser's password session, so the accounts' saved cancels are deleted first.
       if (typed && session) {
         session = null;
         changingPassword = false;
+        adminTools?.forgetAccountCancels?.();
         signOut(true);
       }
       token = typed || token;
@@ -1089,8 +1084,11 @@
       if (!config.ok || typeof config.value?.password_login !== "boolean") return;
       authConfig = config.value;
       authState();
-      if (!authConfig.password_login || connected || busy || token) return;
+      // Without a password session no user account can resend its saved cancels, so they are deleted (fails closed).
+      if (!authConfig.password_login) { adminTools?.forgetAccountCancels?.(); return; }
+      if (connected || busy || token) return;
       const current = await authRequest("GET", "/v1/auth/session");
+      if (current.status === 401 || (current.ok && current.value?.method !== "password")) adminTools?.forgetAccountCancels?.();
       if (!current.ok || current.value?.method !== "password" || connected || busy || token) return;
       session = { username: String(current.value.user?.username ?? ""), mustChange: current.value.must_change_password === true };
       if (session.mustChange) {
@@ -1326,6 +1324,8 @@
   }));
   try {
   const toolsContext = {
+    // The admin tools file saved tenant-deployment cancels under the API address the requests go to.
+    apiBase,
     api, run, status, confirm: confirmOperation, inspect: inspectRecord, search, indexConfig, disconnect,
     dimensions: () => dimensions, busy: () => busy, connected: () => connected, tokenAuth: () => Boolean(token),
     capabilities: () => capabilities, lastSearch: () => lastSearch, serverNow: () => serverClock,
@@ -1451,7 +1451,7 @@
       },
     };
   })();
-  window.addEventListener("pagehide", () => disconnect({ endSession: false }));
+  window.addEventListener("pagehide", () => disconnect({ endSession: false, leaving: true }));
   window.addEventListener("pageshow", (event) => { if (event.persisted) restoreSession(); });
   tools?.gate();
   adminTools?.gate?.();

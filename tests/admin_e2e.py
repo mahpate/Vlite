@@ -4,7 +4,11 @@ Run on a hosted runner: python tests/admin_e2e.py.
 No Docker, real credentials, server, or database is used.
 """
 
+import hashlib
+import json
+import re
 import time
+from urllib.parse import quote
 
 from playwright.sync_api import expect, sync_playwright
 
@@ -972,10 +976,391 @@ def exercise_tenant_deployments(browser):
     fake = TenantDeploymentApi("read_only")
     context, page, errors = mocked_page(browser, fake)
     control(page, "#admin-tenant-deployments")
-    for selector in ("#tenant-deployment-refresh", "#tenant-deployment-next"):
+    for selector in ("#tenant-deployment-refresh", "#tenant-deployment-next", "#tenant-deployment-check",
+                     "#tenant-deployment-cancel", "#tenant-deployment-create", "#tenant-deployment-readers",
+                     "#tenant-deployment-retire", "#tenant-deployment-name", "#tenant-deployment-writer-file"):
         expect(page.locator(selector)).to_be_disabled()
     expect(page.locator("#tenant-deployment-help")).to_contain_text("requires a super admin")
+    expect(page.locator("#tenant-deployment-operation-help")).to_contain_text("requires a super admin")
     assert not calls(fake, DEPLOY_OPS, "GET")
+    assert not errors, errors
+    context.close()
+
+
+DEPLOY_SUBMIT = "/v1/admin/tenant-deployments"
+# A chosen file is sent and hashed byte for byte (CRLF and non-ASCII kept); pasted text is sent as typed.
+WRITER = '{\r\n  "apps": ["writer"],\r\n  "note": "caf\u00e9"\r\n}\r\n'
+INIT = '{"start": "empty"}\n'
+READER = '{"apps": ["reader"]}\n'
+SCALING = '{"rule": "cpu above 70 percent"}'
+RECEIPT = "f" * 64
+UUID4 = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
+
+
+def sha(text):
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+class TenantDeploymentWriteApi(TenantDeploymentApi):
+    """Records create, readers and retire requests and cancels them as the documented contract says: the digests
+    must name exactly the posted contents, a repeated key with the same request returns the same operation, and
+    cancel must quote the operation's current generations. Nothing is executed."""
+
+    def __init__(self):
+        super().__init__()
+        self.operations = []
+        self.keys = {}
+        self.fail = []  # (status, code, recorded first) for the next submissions and cancels
+        self.bump_on_read = False  # the operation changes right after its status is read
+        self.actions = {}  # (operation, key) -> the stored cancel and its result
+        self.release_fails = False  # the next cancel seals the operation but fails to release its reservation
+        self.rejected_token = None  # an access token refused with a non-JSON 401, as a proxy in front might answer
+
+    def failure(self):
+        return self.fail.pop(0) if self.fail else None
+
+    def submit(self, path, body):
+        assert set(body) == {"idempotency_key", "request", "contents"}, body
+        request, contents = body["request"], body["contents"]
+        fleet = request.get("fleet", {})
+        referenced = ({request["writer_profile"], request["initialization"]} if request["kind"] == "create"
+                      else {fleet["reader_profile"], fleet["scaling_rule"]} if fleet.get("state") == "present" else set())
+        digests = [sha(text) for text in contents]
+        tenant = request.get("tenant_id")
+        expected_path = DEPLOY_SUBMIT if request["kind"] == "create" else (
+            f"{DEPLOY_SUBMIT}/{tenant}/{'readers' if request['kind'] == 'set_readers' else 'retire'}")
+        if len(set(digests)) != len(digests) or set(digests) != referenced or path != expected_path:
+            return self.error(400, "operation_request_invalid")
+        fingerprint = (path, repr(request), tuple(sorted(contents)))
+        if body["idempotency_key"] in self.keys:
+            known, operation = self.keys[body["idempotency_key"]]
+            if known != fingerprint:
+                return self.error(409, "operation_request_conflict")
+            return 200, {"duplicate": True, "operation": operation}, {}
+        failure = self.failure()
+        if failure and not failure[2]:
+            return self.error(*failure[:2])
+        index = len(self.operations) + 1
+        operation = deployment(index, kind=request["kind"], tenant_id=tenant or "c" * 31 + f"{index:x}",
+                               phase="reserved" if request["kind"] == "create" else "accepted", desired=request,
+                               next_step=HOSTILE)
+        self.operations.append(operation)
+        self.keys[body["idempotency_key"]] = (fingerprint, operation)
+        return self.error(*failure[:2]) if failure else (202, {"duplicate": False, "operation": operation}, {})
+
+    def act(self, method, rest, body):
+        operation = next((item for item in self.operations if item["operation_id"] == rest[0]), None)
+        if operation is None:
+            return self.error(404, "operation_not_found")
+        if method == "GET" and len(rest) == 1:
+            snapshot = {**operation, "observed": dict(operation["observed"])}
+            if self.bump_on_read:
+                self.bump_on_read = False
+                operation["operation_generation"] += 1
+            return 200, {"operation": snapshot}, {}
+        if method != "POST" or rest[1:] != ["cancel"]:
+            return self.error(404, "tenant_deployment_action_unknown")
+        assert set(body) <= {"idempotency_key", "expected_operation_generation", "expected_lifecycle_generation",
+                             "expected_receipt"}, body
+        # As admin.rs `act`: the action is stored per key before it is applied; an exact replay returns the stored
+        # result, or applies again (finishing a release) without checking tokens when no result was stored.
+        stored = self.actions.get((rest[0], body["idempotency_key"]))
+        if stored is not None:
+            if stored["body"] != body:
+                return self.error(409, "action_request_conflict")
+            if stored["result"] is not None:
+                return 200, stored["result"], {}
+        else:
+            if (body["expected_operation_generation"], body["expected_lifecycle_generation"]) != (
+                    operation["operation_generation"], operation["lifecycle_generation"]):
+                return self.error(409, "operation_generation_stale")
+            if operation["observed"]["terminal"]:
+                return self.error(409, "operation_terminal")
+            stored = self.actions[(rest[0], body["idempotency_key"])] = {"body": dict(body), "result": None}
+        if not operation["observed"]["terminal"]:
+            # The terminal record is sealed first; releasing the reservation is a separate control-state write.
+            operation.update(phase="cancelled", next_step="none: cancelled",
+                             operation_generation=operation["operation_generation"] + 1,
+                             observed={**operation["observed"], "cancellation_requested": True, "terminal": True})
+        if self.release_fails:
+            self.release_fails = False
+            return self.error(503, "control_state_unavailable")
+        operation["observed"]["reserved"] = False
+        stored["result"] = {"action": "cancel", "operation": {**operation, "observed": dict(operation["observed"])}}
+        return 200, stored["result"], {}
+
+    def api(self, method, path, query, body, headers):
+        if self.rejected_token is not None and headers.get("authorization") == "Bearer " + self.rejected_token:
+            return 401, "<html><body>401 Authorization Required</body></html>", {}
+        if method == "POST" and (path == DEPLOY_SUBMIT or path.startswith(DEPLOY_SUBMIT + "/")):
+            return self.submit(path, body)
+        if path.startswith(DEPLOY_OPS + "/"):
+            return self.act(method, path[len(DEPLOY_OPS) + 1:].split("/"), body)
+        return super().api(method, path, query, body, headers)
+
+
+def confirm_all(page, *expected, accept=True):
+    for text in expected[:-1]:
+        expect(control(page, "#confirmation-text")).to_contain_text(text)
+    confirm(page, expected[-1], accept=accept)
+
+
+def deployment_overflow(page):
+    for width, height in ((1280, 900), (768, 1000), (390, 844)):
+        page.set_viewport_size({"width": width, "height": height})
+        control(page, "#admin-tenant-deployments")
+        overflow = page.evaluate("""() => {
+            const card = document.querySelector('#admin-tenant-deployments');
+            return { page: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+                     card: card.scrollWidth - card.clientWidth };
+        }""")
+        assert overflow["page"] <= 0 and overflow["card"] <= 0, (width, overflow)
+    page.set_viewport_size({"width": 1280, "height": 900})
+
+
+def exercise_tenant_deployment_requests(browser):
+    fake = TenantDeploymentWriteApi()
+    context, page, errors = mocked_page(browser, fake)
+    control(page, "#admin-tenant-deployments")
+    expect(page.locator("#tenant-deployment-operation-help")).to_contain_text("Check status reads")
+    posts = lambda path: calls(fake, path, "POST")  # noqa: E731
+
+    # Create: a declined confirmation sends nothing.
+    control(page, "#tenant-deployment-name").fill("Contoso EU")
+    control(page, "#tenant-deployment-max-vectors").fill("1000")
+    control(page, "#tenant-deployment-writer-file").set_input_files(
+        files=[{"name": "writer.json", "mimeType": "application/json", "buffer": WRITER.encode("utf-8")}])
+    expect(page.locator("#tenant-deployment-writer-note")).to_contain_text("writer.json")
+    control(page, "#tenant-deployment-init-text").fill(INIT)
+    control(page, "#tenant-deployment-secrets").fill("archive-sas@3\n")
+    control(page, "#tenant-deployment-create").click()
+    confirm_all(page, 'Record a request to create tenant "Contoso EU" (vector limit 1000)?',
+                "Cloud execution is switched off (OD-002), so nothing is deployed, routed, started or stopped in Azure",
+                f"Initialization settings: {len(INIT)} bytes, SHA-256 {sha(INIT)}",
+                f"Writer profile: {len(WRITER.encode('utf-8'))} bytes, SHA-256 {sha(WRITER)}", accept=False)
+    message = page.locator("#tenant-deployment-create-message")
+    expect(message).to_have_text("Nothing was sent.")
+    assert not posts(DEPLOY_SUBMIT)
+
+    # The server records it but the answer is lost: the same button repeats the same key and is told it was recorded.
+    fake.fail = [(503, "operation_indeterminate", True)]
+    control(page, "#tenant-deployment-create").click()
+    confirm(page, "only records the request on this server")
+    expect(message).to_contain_text("Select the same button again without changing anything")
+    inspector = json.loads(page.locator("#inspector").text_content())
+    assert inspector["request"]["body"] == {
+        "documents": 2, "resources": 0, "secret_versions": 1, "profile_digests": [sha(WRITER), sha(INIT)]}
+    assert "archive-sas@3" not in json.dumps(inspector)
+    control(page, "#tenant-deployment-create").click()
+    confirm(page, "repeats your earlier request whose outcome is unknown, with the same request key")
+    expect(message).to_contain_text("This was already recorded earlier with the same request key; nothing new was added.")
+    expect(message).to_contain_text("Create tenant: Reserved, waiting for cloud execution")
+    expect(message).to_contain_text(HOSTILE)
+    first, second = posts(DEPLOY_SUBMIT)
+    assert first["body"] == second["body"] and UUID4.fullmatch(first["body"]["idempotency_key"])
+    assert first["body"]["request"] == {
+        "kind": "create", "name": "Contoso EU", "max_vectors": 1000, "writer_profile": sha(WRITER),
+        "initialization": sha(INIT), "resources": [], "secret_versions": ["archive-sas@3"]}
+    assert first["body"]["contents"] == [WRITER, INIT]
+    assert len(fake.operations) == 1
+    # The form is cleared, the list reloads from page 1 and the operation box holds the new operation.
+    expect(control(page, "#tenant-deployment-name")).to_have_value("")
+    assert page.locator("#tenant-deployment-writer-file").evaluate("input => input.files.length") == 0
+    expect(page.locator("#tenant-deployment-status")).to_have_text(
+        "Page 1: 1 operation. Listed in operation ID order, not by time.")
+    assert calls(fake, DEPLOY_OPS, "GET")[-1]["query"] == "limit=20"
+    operation_id, tenant = fake.operations[0]["operation_id"], fake.operations[0]["tenant_id"]
+    expect(control(page, "#tenant-deployment-operation")).to_have_value(operation_id)
+    expect(page.locator("#tenant-deployment-operation-status")).to_have_text(
+        "Create tenant: Reserved, waiting for cloud execution")
+    assert page.evaluate("() => window.__xss === undefined && !document.querySelector('#admin-tenant-deployments img')")
+    deployment_overflow(page)
+
+    # Cancel reads the status first and quotes its generations; a change in between is explained, then retried.
+    cancel_path = f"{DEPLOY_OPS}/{operation_id}/cancel"
+    fake.bump_on_read = True
+    control(page, "#tenant-deployment-cancel").click()
+    confirm_all(page, f"Cancel operation {operation_id}?",
+                f"It is: Create tenant for tenant {tenant}, now Reserved, waiting for cloud execution.",
+                "Cloud execution is switched off (OD-002), so nothing is deployed, routed, started or stopped in Azure.")
+    operation_message = page.locator("#tenant-deployment-operation-message")
+    expect(operation_message).to_contain_text("The operation changed after its status was read, so nothing was recorded.")
+    assert [(item["method"], item["path"]) for item in fake.log if item["path"].startswith(DEPLOY_OPS + "/")][-2:] == [
+        ("GET", f"{DEPLOY_OPS}/{operation_id}"), ("POST", cancel_path)]
+    stale = posts(cancel_path)[-1]["body"]
+    assert stale["expected_operation_generation"] == 1 and stale["expected_lifecycle_generation"] == 1
+    control(page, "#tenant-deployment-cancel").click()
+    confirm(page, f"Cancel operation {operation_id}?")
+    expect(operation_message).to_contain_text("Cancelled. Cloud execution is switched off (OD-002), so nothing in Azure was touched.")
+    fresh = posts(cancel_path)[-1]["body"]
+    assert fresh["expected_operation_generation"] == 2 and fresh["idempotency_key"] != stale["idempotency_key"]
+    assert len(calls(fake, f"{DEPLOY_OPS}/{operation_id}", "GET")) == 2
+    expect(page.locator("#tenant-deployment-cancel")).to_be_disabled()
+    expect(page.locator("#tenant-deployment-operation-help")).to_contain_text("has ended")
+    expect(page.locator("#tenant-deployment-list > li").first).to_contain_text("Create tenant: Cancelled")
+
+    # Readers: Use this operation fills the tenant; profiles from a file and a paste.
+    page.locator("#tenant-deployment-list > li").first.get_by_role("button", name=f"Use operation {operation_id}").click()
+    expect(control(page, "#tenant-deployment-readers-tenant")).to_have_value(tenant)
+    expect(control(page, "#tenant-deployment-retire-tenant")).to_have_value(tenant)
+    control(page, "#tenant-deployment-readers-min").fill("0")
+    control(page, "#tenant-deployment-readers-max").fill("2")
+    control(page, "#tenant-deployment-reader-file").set_input_files(
+        files=[{"name": "reader.json", "mimeType": "application/json", "buffer": READER.encode("utf-8")}])
+    control(page, "#tenant-deployment-scaling-text").fill(SCALING)
+    control(page, "#tenant-deployment-readers").click()
+    confirm_all(page, f"Record a request for 0 to 2 reader replicas on tenant {tenant}", "ITEM-008",
+                "only records the request on this server")
+    expect(page.locator("#tenant-deployment-readers-message")).to_contain_text("Recorded. Nothing was deployed (cloud execution is switched off, OD-002).")
+    readers = posts(f"{DEPLOY_SUBMIT}/{tenant}/readers")[-1]["body"]
+    assert readers["request"] == {"kind": "set_readers", "tenant_id": tenant, "fleet": {
+        "state": "present", "min_replicas": 0, "max_replicas": 2, "reader_profile": sha(READER),
+        "scaling_rule": sha(SCALING), "read_routing": "writer_only"}}
+    assert readers["contents"] == [READER, SCALING] and UUID4.fullmatch(readers["idempotency_key"])
+
+    # Retire: the answer is lost before anything was recorded; editing the form first makes it a new request.
+    control(page, "#tenant-deployment-retire-receipt").fill(RECEIPT)
+    control(page, "#tenant-deployment-retire-reason").fill("Customer left")
+    fake.fail = [(503, "operation_store_unavailable", False)]
+    control(page, "#tenant-deployment-retire").click()
+    confirm(page, "All data is kept.")
+    retire_message = page.locator("#tenant-deployment-retire-message")
+    expect(retire_message).to_contain_text("Select the same button again without changing anything")
+    control(page, "#tenant-deployment-retire-reason").fill("Customer left the service")
+    control(page, "#tenant-deployment-retire").click()
+    expect(control(page, "#confirmation-text")).to_contain_text("Reason: Customer left the service")
+    expect(control(page, "#confirmation-text")).not_to_contain_text("repeats your earlier request")
+    confirm(page, "Reason: Customer left the service")
+    expect(retire_message).to_contain_text("Recorded. Nothing was deployed (cloud execution is switched off, OD-002).")
+    expect(retire_message).to_contain_text("Retire tenant: Recorded, nothing reserved yet")
+    lost, retire = (item["body"] for item in posts(f"{DEPLOY_SUBMIT}/{tenant}/retire"))
+    assert lost["idempotency_key"] != retire["idempotency_key"]
+    assert retire["request"] == {"kind": "retire", "tenant_id": tenant, "expected_receipt": RECEIPT,
+                                 "reason": "Customer left the service", "data_disposition": "retain"}
+    assert retire["contents"] == []
+    deployment_overflow(page)
+
+    # Cancel records the outcome, then the release fails: status says cancelled but still reserved. The saved cancel
+    # survives a reload in this tab, and resending it exactly (same key and body) finishes the release.
+    def create_second(name):
+        control(page, "#tenant-deployment-name").fill(name)
+        control(page, "#tenant-deployment-writer-text").fill(WRITER)
+        control(page, "#tenant-deployment-init-text").fill(INIT)
+        control(page, "#tenant-deployment-create").click()
+        confirm(page, "only records the request on this server")
+        expect(control(page, "#tenant-deployment-name")).to_have_value("")
+        operation = fake.operations[-1]["operation_id"]
+        expect(control(page, "#tenant-deployment-operation")).to_have_value(operation)
+        return operation
+
+    pending_id = create_second("Fabrikam")
+    pending_path = f"{DEPLOY_OPS}/{pending_id}/cancel"
+    fake.release_fails = True
+    control(page, "#tenant-deployment-cancel").click()
+    confirm(page, f"Cancel operation {pending_id}?")
+    expect(operation_message).to_contain_text("Select the same button again without changing anything")
+    assert fake.operations[-1]["phase"] == "cancelled" and fake.operations[-1]["observed"]["reserved"] is True
+    # The saved cancel is filed under the API address this dashboard sends requests to (here the site root), then the
+    # signed-in account (the bootstrap admin token is one account for everyone holding it). It holds only the key and
+    # quoted generations, never the token.
+    saved = page.evaluate("() => Object.entries(sessionStorage)")
+    cancel_key = lambda operation: f"vlite.tenant-deployment.cancel.{quote(MOCK_ORIGIN, safe='')}/admin_token.{operation}"
+    assert [key for key, _ in saved if pending_id in key] == [cancel_key(pending_id)]
+    assert not [item for item in saved if "t" * 32 in item[0] or "t" * 32 in item[1]]
+    page.reload()
+    sign_in_with_token(page, "admin-" + "t" * 32)
+    control(page, "#admin-tenant-deployments")
+    control(page, "#tenant-deployment-operation").fill(pending_id)
+    control(page, "#tenant-deployment-check").click()
+    expect(operation_message).to_contain_text("has not released the tenant's reservation yet")
+    expect(operation_message).to_contain_text("Select Cancel to resend your earlier cancel exactly")
+    expect(operation_message).to_contain_text("Everyone signed in with the bootstrap admin token counts as one account")
+    expect(page.locator("#tenant-deployment-cancel")).to_be_enabled()
+    control(page, "#tenant-deployment-cancel").click()
+    confirm_all(page, f"Finish cancelling operation {pending_id}?", "resends your earlier cancel exactly")
+    expect(operation_message).to_contain_text("Cancelled. Cloud execution is switched off (OD-002)")
+    sealed, resent = (item["body"] for item in posts(pending_path))
+    assert sealed == resent and fake.operations[-1]["observed"]["reserved"] is False
+    expect(page.locator("#tenant-deployment-cancel")).to_be_disabled()
+    assert not [key for key in page.evaluate("() => Object.keys(sessionStorage)") if pending_id in key]
+
+    # Without the saved cancel (another tab, cleared storage) the dashboard cannot resend it and says so honestly.
+    lost_id = create_second("Northwind")
+    fake.release_fails = True
+    control(page, "#tenant-deployment-cancel").click()
+    confirm(page, f"Cancel operation {lost_id}?")
+    expect(operation_message).to_contain_text("Select the same button again without changing anything")
+    page.evaluate("() => sessionStorage.clear()")
+    page.reload()
+    sign_in_with_token(page, "admin-" + "t" * 32)
+    control(page, "#admin-tenant-deployments")
+    control(page, "#tenant-deployment-operation").fill(lost_id)
+    control(page, "#tenant-deployment-check").click()
+    expect(operation_message).to_contain_text("report the operation ID to the server operator")
+    expect(page.locator("#tenant-deployment-cancel")).to_be_disabled()
+    assert len(posts(f"{DEPLOY_OPS}/{lost_id}/cancel")) == 1
+
+    # A token refused on a fresh page (here with a non-JSON 401) deletes the bootstrap admin token's saved cancels on
+    # this API address, even though the dashboard never learned who was signed in: the right token can no longer resend.
+    refused_id = create_second("Litware")
+    fake.release_fails = True
+    control(page, "#tenant-deployment-cancel").click()
+    confirm(page, f"Cancel operation {refused_id}?")
+    expect(operation_message).to_contain_text("Select the same button again without changing anything")
+    page.reload()
+    assert cancel_key(refused_id) in page.evaluate("() => Object.keys(sessionStorage)")
+    fake.rejected_token = "wrong-" + "t" * 32
+    sign_in_with_token(page, fake.rejected_token, expected=None)
+    page.wait_for_function("key => sessionStorage.getItem(key) === null", arg=cancel_key(refused_id))
+    expect_signed_out(page)
+    fake.rejected_token = None
+    sign_in_with_token(page, "admin-" + "t" * 32)
+    control(page, "#admin-tenant-deployments")
+    control(page, "#tenant-deployment-operation").fill(refused_id)
+    control(page, "#tenant-deployment-check").click()
+    expect(operation_message).to_contain_text("report the operation ID to the server operator")
+    expect(page.locator("#tenant-deployment-cancel")).to_be_disabled()
+    assert len(posts(f"{DEPLOY_OPS}/{refused_id}/cancel")) == 1
+
+    # Signing out clears every form, result and kept request, and deletes this account's saved cancels: signed in
+    # again with the same token, the dashboard can no longer resend that cancel.
+    held_id = create_second("Contoso")
+    fake.release_fails = True
+    control(page, "#tenant-deployment-cancel").click()
+    confirm(page, f"Cancel operation {held_id}?")
+    expect(operation_message).to_contain_text("Select the same button again without changing anything")
+    assert [key for key in page.evaluate("() => Object.keys(sessionStorage)") if held_id in key]
+    control(page, "#tenant-deployment-name").fill("draft")
+    sign_out(page)
+    assert not [key for key in page.evaluate("() => Object.keys(sessionStorage)") if held_id in key]
+    sign_in_with_token(page, "admin-" + "t" * 32)
+    control(page, "#admin-tenant-deployments")
+    for selector in ("#tenant-deployment-name", "#tenant-deployment-operation", "#tenant-deployment-readers-tenant",
+                     "#tenant-deployment-retire-receipt", "#tenant-deployment-scaling-text"):
+        expect(page.locator(selector)).to_have_value("")
+    for selector in ("#tenant-deployment-create-message", "#tenant-deployment-readers-message",
+                     "#tenant-deployment-retire-message", "#tenant-deployment-operation-message"):
+        expect(page.locator(selector)).to_have_text("")
+    expect(page.locator("#tenant-deployment-operation-status")).to_have_text("No operation selected.")
+    expect(page.locator("#tenant-deployment-list > li")).to_have_count(0)
+    control(page, "#tenant-deployment-operation").fill(held_id)
+    control(page, "#tenant-deployment-check").click()
+    expect(operation_message).to_contain_text("report the operation ID to the server operator")
+    expect(page.locator("#tenant-deployment-cancel")).to_be_disabled()
+    assert len(posts(f"{DEPLOY_OPS}/{held_id}/cancel")) == 1
+    # Losing authentication during a real form submission leaves no inspector contents in the hidden dashboard.
+    control(page, "#tenant-deployment-name").fill("Session boundary")
+    control(page, "#tenant-deployment-writer-text").fill(WRITER)
+    control(page, "#tenant-deployment-init-text").fill(INIT)
+    control(page, "#tenant-deployment-secrets").fill("archive-sas@7")
+    fake.fail = [(401, "unauthorized", False)]
+    control(page, "#tenant-deployment-create").click()
+    confirm(page, "only records the request on this server")
+    expect(page.locator("#app-shell")).to_be_hidden()
+    expect(page.locator("#inspector")).to_have_text("")
+    expect(page.locator("#tenant-deployment-writer-text")).to_have_value("")
+    expect(page.locator("#tenant-deployment-secrets")).to_have_value("")
+    assert not [item for item in fake.log if "/migrations" in item["path"]]
     assert not errors, errors
     context.close()
 
@@ -990,6 +1375,7 @@ if __name__ == "__main__":
             exercise_cloud_backup(browser)
             exercise_auto_failover(browser)
             exercise_tenant_deployments(browser)
+            exercise_tenant_deployment_requests(browser)
         finally:
             browser.close()
     print("PASS browser admin flows: identity badge, confirmations/cancel, tenant CRUD/usage/settings/"
@@ -1007,3 +1393,8 @@ if __name__ == "__main__":
           "unavailable/role gates.")
     print("PASS tenant deployments panel: no read on connect, paged list with plain-language status, untrusted text "
           "kept literal, no overflow at 1280/768/390, sign-out clearing, not-configured explanation and reader gate.")
+    print("PASS tenant deployment requests: create/readers/retire with browser SHA-256 digests of the exact file or "
+          "pasted text, declined confirmation sends nothing, unknown outcome retried with the same key and shown as "
+          "already recorded, edits get a new key, cancel reads fresh tokens and explains a stale one, ended operations "
+          "cannot be cancelled, a cancel whose release failed is resent exactly (even after a reload) and clears the "
+          "reservation, a lost saved cancel is reported honestly, list refresh, no overflow and sign-out clearing.")

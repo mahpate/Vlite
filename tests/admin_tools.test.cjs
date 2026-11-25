@@ -36,17 +36,35 @@ const ids = ["tenant-list", "tenant-name", "tenant-max-vectors", "tenant-create"
   "cloud-backup-drill", "cloud-backup-restore", "cloud-backup-pin-reason", "cloud-backup-pin-reason-error", "cloud-backup-pin",
   "cloud-backup-pin-id", "cloud-backup-force", "cloud-backup-unpin", "cloud-backup-sets-help", "cloud-backup-result",
   "auto-failover-status", "auto-failover-facts", "auto-failover-refresh", "auto-failover-toggle", "auto-failover-help", "auto-failover-result",
-  "tenant-deployment-status", "tenant-deployment-list", "tenant-deployment-refresh", "tenant-deployment-next", "tenant-deployment-help", "tenant-deployment-result"];
+  "tenant-deployment-status", "tenant-deployment-list", "tenant-deployment-refresh", "tenant-deployment-next", "tenant-deployment-help", "tenant-deployment-result",
+  ...["operation", "operation-status", "operation-facts", "operation-help", "operation-message", "check", "cancel",
+    "name", "max-vectors", "resources", "secrets", "create", "create-message",
+    "readers-tenant", "readers-mode", "readers-present", "readers-min", "readers-max", "readers-routing", "readers", "readers-message",
+    "retire-tenant", "retire-receipt", "retire-reason", "retire", "retire-message",
+    ...["writer", "init", "reader", "scaling"].flatMap((p) => [`${p}-file`, `${p}-text`, `${p}-note`])].map((id) => `tenant-deployment-${id}`)];
 const elements = Object.fromEntries(ids.map((id) => [id, element(id, id.endsWith("-result") ? "PRE" : "BUTTON")]));
+// File inputs: clearing the value clears the chosen files, as in a browser.
+for (const id of ids.filter((name) => name.endsWith("-file"))) {
+  const e = elements[id];
+  let value = "";
+  e.files = [];
+  Object.defineProperty(e, "value", { enumerable: true, get: () => value, set: (next) => { value = next; if (next === "") e.files = []; } });
+}
 const downloads = [];
 // Polling timers (5 s and longer) are captured so tests advance them by hand.
 const timers = [];
+// This tab's sessionStorage (a saved cancel survives a reload).
+const session = new Map();
 const sandbox = {
-  window: {}, URLSearchParams, Blob, BigInt, Number, JSON, Uint8Array, Date, crypto: globalThis.crypto,
+  sessionStorage: { getItem: (k) => session.get(k) ?? null, setItem: (k, v) => session.set(k, String(v)), removeItem: (k) => session.delete(k),
+    key: (i) => [...session.keys()][i] ?? null, get length() { return session.size; } },
+  window: {}, URLSearchParams, Blob, BigInt, Number, JSON, Uint8Array, Date, crypto: globalThis.crypto, TextEncoder, TextDecoder,
   setTimeout: (fn, ms) => { if (ms >= 5000) { timers.push({ fn, ms }); return timers.length; } return setTimeout(fn, ms); },
   clearTimeout: (id) => { if (typeof id === "number") { if (timers[id - 1]) timers[id - 1].fn = null; } else clearTimeout(id); },
-  URL: { createObjectURL: (blob) => { downloads.push(blob); return "blob:x"; }, revokeObjectURL() {} },
+  // A real URL parser (the page resolves its API address with it), with object URLs captured for downloads.
+  URL: Object.assign(class extends URL {}, { createObjectURL: (blob) => { downloads.push(blob); return "blob:x"; }, revokeObjectURL() {} }),
   document: {
+    baseURI: "http://dash.test/console/",
     getElementById: (id) => elements[id] ?? null,
     createElement: (tag) => ({ ...element("", tag.toUpperCase()), click() { downloads.push(this.download); }, remove() {} }),
     body: { append() {} },
@@ -264,6 +282,8 @@ assert.match(explain(Object.assign(new Error("HTTP 422"), { code: "tls_reload_fa
 function fakeCtx() {
   const ctx = {
     calls: [], responses: [], errors: [], confirms: [], answer: true, isConnected: true, caps: adminCaps, statuses: [],
+    // app.js's apiBase (the vlite-api-base meta): requests go to `${apiBase}${path}`, here the site root.
+    apiBase: "",
     connected: () => ctx.isConnected, capabilities: () => ctx.caps,
     api: async (method, path, body, options) => {
       ctx.calls.push({ method, path, body, options });
@@ -297,7 +317,7 @@ const reset = () => { for (const e of Object.values(elements)) { e.listeners.len
   }
   let ctx = fakeCtx();
   let tools = init(ctx);
-  assert.deepEqual(Object.keys(tools).sort(), ["capabilities", "disconnect", "gate"]);
+  assert.deepEqual(Object.keys(tools).sort(), ["capabilities", "disconnect", "forgetAccountCancels", "gate"]);
   tools.capabilities(adminCaps);
   assert.equal(ctx.calls.length, 0);
   assert.equal(elements["replication-export"].disabled, false);
@@ -584,6 +604,7 @@ const reset = () => { for (const e of Object.values(elements)) { e.listeners.len
   await cloudBackupTests();
   await autoFailoverTests();
   await tenantDeploymentTests();
+  await tenantDeploymentWriteTests();
   console.log("admin tools tests passed");
 })().catch((error) => { console.error(error); process.exit(1); });
 
@@ -1304,7 +1325,7 @@ async function tenantDeploymentTests() {
   assert.equal(deploymentBlocked(new Error("network")), "");
   assert.match(deploymentExplain(fail(503, "operation_store_unavailable")), /^HTTP 503: operation_store_unavailable: x\nThe operation store could not be read/);
   assert.match(deploymentExplain(fail(400, "invalid_query")), /start again from the first page/);
-  assert.match(deploymentExplain(fail(409, "constructor")), /^HTTP 409: constructor: x\nThis view only reads/);
+  assert.match(deploymentExplain(fail(409, "constructor")), /^HTTP 409: constructor: x\nThe dashboard has no explanation for this code/);
   assert.equal(deploymentExplain(new Error("network down")), "network down");
 
   // Availability: super admin only; everyone else is told why, including about the HA gateway.
@@ -1420,7 +1441,7 @@ async function tenantDeploymentTests() {
   // A reader token refused by the server (403 read_only) and the HA gateway refusal read the same way.
   ctx.responses.push(fail(403, "read_only"));
   await el("refresh").click();
-  assert.match(el("status").textContent, /Read-only credentials cannot view/);
+  assert.match(el("status").textContent, /Read-only credentials cannot use tenant deployments/);
   ctx.responses.push(fail(403, "gateway_tenant_required"));
   await el("refresh").click();
   assert.match(el("status").textContent, /HA gateway does not serve admin routes/);
@@ -1459,4 +1480,902 @@ async function tenantDeploymentTests() {
   await el("refresh").click();
   assert.equal(el("status").textContent, "Tenant deployment operations not loaded.");
   assert.equal(el("list").hidden, true);
+}
+
+// ---- Tenant deployments: recording create, readers and retire requests, and cancelling an operation (ITEM-024). ----
+async function tenantDeploymentWriteTests() {
+  const { sha256Hex, deploymentContent, deploymentCreateSubmission, deploymentReadersSubmission, deploymentRetireSubmission, deploymentTerminal,
+    deploymentCancelRequest, deploymentCancelConfirm, deploymentRetryable, deploymentProfileText, deploymentExplain, DEPLOY_HINTS, DEPLOY_SETTLED,
+    deploymentAck, deploymentReleasePending, deploymentReleaseConfirm, deploymentSavedCancel, DEPLOY_PHASES, DEPLOY_KINDS, RELEASE_PENDING, RELEASE_LOST,
+    deploymentPrincipal, deploymentCancelOwner, deploymentCancelScope, deploymentApiScope } = utils;
+  const nodeSha = (data) => require("node:crypto").createHash("sha256").update(data).digest("hex");
+  const plain = (value) => JSON.parse(JSON.stringify(value));
+  const fail = (status, code) => Object.assign(new Error(`HTTP ${status}: ${code}: x`), { status, code });
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+  const A = "a".repeat(32), B = "b".repeat(32), T = "c".repeat(32), RC = "d".repeat(64);
+  const op = (id, extra = {}) => ({ operation_id: id, kind: "create", tenant_id: T, phase: "reserved",
+    next_step: "cloud execution is blocked (OD-002); cancel to release the reservation",
+    operation_generation: 4, lifecycle_generation: 2, control_generation: 9, receipt_digest: null, created_unix_ms: 0,
+    desired: { kind: "create", name: "acme" }, observed: { journal_steps: 2, uncertain_steps: 0, terminal: false }, ...extra });
+  const file = (name, bytes) => ({ name, size: bytes.length, arrayBuffer: async () => Uint8Array.from(bytes).buffer });
+
+  // SHA-256 in plain JS (crypto.subtle is missing on plain HTTP): FIPS 180-2 vectors, then every padding boundary against node.
+  assert.equal(sha256Hex(""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+  assert.equal(sha256Hex("abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+  assert.equal(sha256Hex("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"), "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
+  assert.equal(sha256Hex("a".repeat(1000000)), "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");
+  for (let n = 0; n <= 130; n++) {
+    const bytes = Uint8Array.from({ length: n }, (_, i) => (i * 31 + n * 7) & 255);
+    assert.equal(sha256Hex(bytes), nodeSha(bytes), `length ${n}`);
+  }
+  for (const text of ["\u00e9", "\u6f22\u5b57", "\ud83d\ude42 profile\r\n", "\ufeff{}\n"]) assert.equal(sha256Hex(text), nodeSha(Buffer.from(text, "utf8")));
+  assert.throws(() => sha256Hex(42), /string or a Uint8Array/);
+
+  // Profile text: the exact text and the SHA-256 of its UTF-8 bytes; empty, broken or over 1 MiB is refused.
+  assert.deepEqual(plain(deploymentContent("{}", "Writer profile")), { text: "{}", bytes: 2, digest: nodeSha("{}") });
+  assert.equal(deploymentContent("x".repeat(1048576), "W").bytes, 1048576);
+  assert.throws(() => deploymentContent("x".repeat(1048577), "Writer profile"), /Writer profile is 1048577 bytes; at most 1048576/);
+  assert.throws(() => deploymentContent("", "Writer profile"), /Writer profile is required: choose the file or paste its text/);
+  assert.throws(() => deploymentContent("\ud800", "Writer profile"), /invalid Unicode/);
+  // A chosen file is used byte for byte (BOM and CRLF kept), so the digest matches sha256sum / Get-FileHash of the file.
+  assert.equal(await deploymentProfileText(null, "pasted", "Writer profile"), "pasted");
+  const bom = [0xef, 0xbb, 0xbf, ...Buffer.from('{"name":"\u00e9"}\r\n')];
+  const read = await deploymentProfileText(file("writer.json", bom), "ignored", "Writer profile");
+  assert.equal(read, '\ufeff{"name":"\u00e9"}\r\n');
+  assert.equal(deploymentContent(read, "Writer profile").digest, nodeSha(Buffer.from(bom)));
+  await assert.rejects(deploymentProfileText(file("app.bin", [0xff, 0xfe, 0x00]), "", "Writer profile"), /Writer profile: app\.bin is not UTF-8 text/);
+  await assert.rejects(deploymentProfileText({ name: "big.json", size: 1048577, arrayBuffer: async () => { throw new Error("read"); } }, "", "Writer profile"),
+    /big\.json is 1048577 bytes; at most 1048576/);
+
+  // Create: digests of the exact texts, each distinct text once, blank lines dropped, a blank limit omitted.
+  const W = '{"apps":{"writer":"w"}}\r\n', I = "seed: empty\n";
+  const create = deploymentCreateSubmission({ name: "acme", maxVectors: " 1000 ", writer: W, initialization: I,
+    resources: " /subscriptions/s/a \r\n\r\n/subscriptions/s/b\n", secrets: "archive-sas@3" });
+  assert.equal(create.path, "/v1/admin/tenant-deployments");
+  assert.deepEqual(plain(create.request), { kind: "create", name: "acme", max_vectors: 1000, writer_profile: nodeSha(W), initialization: nodeSha(I),
+    resources: ["/subscriptions/s/a", "/subscriptions/s/b"], secret_versions: ["archive-sas@3"] });
+  assert.deepEqual(plain(create.contents), [W, I]);
+  assert.match(create.confirm, /^Record a request to create tenant "acme" \(vector limit 1000\)\?\n/);
+  assert.match(create.confirm, /Cloud execution is switched off \(OD-002\), so nothing is deployed, routed, started or stopped in Azure\./);
+  assert.ok(create.confirm.includes(`Writer profile: ${Buffer.byteLength(W)} bytes, SHA-256 ${nodeSha(W)}`));
+  assert.match(create.confirm, /2 Azure resources and 1 secret version listed/);
+  const same = deploymentCreateSubmission({ name: "b", maxVectors: "", writer: "{}", initialization: "{}", resources: "", secrets: "" });
+  assert.equal(Object.hasOwn(same.request, "max_vectors"), false);
+  assert.deepEqual(plain(same.contents), ["{}"]);
+  assert.deepEqual(plain([same.request.resources, same.request.secret_versions]), [[], []]);
+  for (const [form, pattern] of [
+    [{ name: "", writer: "{}", initialization: "{}" }, /Tenant name is required/],
+    [{ name: "x".repeat(65), writer: "{}", initialization: "{}" }, /at most 64/],
+    [{ name: "a", maxVectors: "0", writer: "{}", initialization: "{}" }, /whole number above 0/],
+    [{ name: "a", maxVectors: "-1", writer: "{}", initialization: "{}" }, /Max vectors must be blank/],
+    [{ name: "a", writer: "", initialization: "{}" }, /Writer profile is required/],
+    [{ name: "a", writer: "{}", initialization: "" }, /Initialization settings is required/],
+    [{ name: "a", writer: "{}", initialization: "{}", resources: "x\ty" }, /Azure resources line 1 must not contain/],
+    [{ name: "a", writer: "{}", initialization: "{}", resources: "x".repeat(2049) }, /2049 bytes; at most 2048/],
+    [{ name: "a", writer: "{}", initialization: "{}", secrets: Array(65).fill("s@1").join("\n") }, /Secret versions has 65 lines; at most 64/],
+  ]) assert.throws(() => deploymentCreateSubmission(form), pattern);
+
+  // Readers: a present fleet references both profiles; absent sends no contents.
+  const R = "reader: {}\n", S = "scale: cpu above 70\n";
+  const readers = deploymentReadersSubmission({ tenant: ` ${T.toUpperCase()} `, mode: "present", min: "1", max: " 3 ", routing: "writer_only", reader: R, scaling: S });
+  assert.equal(readers.path, `/v1/admin/tenant-deployments/${T}/readers`);
+  assert.deepEqual(plain(readers.request), { kind: "set_readers", tenant_id: T,
+    fleet: { state: "present", min_replicas: 1, max_replicas: 3, reader_profile: nodeSha(R), scaling_rule: nodeSha(S), read_routing: "writer_only" } });
+  assert.deepEqual(plain(readers.contents), [R, S]);
+  assert.match(readers.confirm, /^Record a request for 1 to 3 reader replicas on tenant c{32}, with reads going to the writer only\?/);
+  assert.match(readers.confirm, /OD-002[\s\S]*ITEM-008/);
+  assert.equal(deploymentReadersSubmission({ tenant: T, mode: "present", min: "0", max: "1", routing: "readers", reader: R, scaling: S }).request.fleet.read_routing, "readers");
+  const absent = deploymentReadersSubmission({ tenant: T, mode: "absent", min: "junk", reader: "" });
+  assert.deepEqual(plain([absent.request, absent.contents]), [{ kind: "set_readers", tenant_id: T, fleet: { state: "absent" } }, []]);
+  assert.match(absent.confirm, /remove all reader replicas from tenant c{32}\?\nThis only records/);
+  for (const [form, pattern] of [
+    [{ tenant: "x", mode: "absent" }, /Tenant ID must be the 32-character/],
+    [{ tenant: T, mode: "" }, /Choose whether the tenant should have reader replicas/],
+    [{ tenant: T, mode: "present", min: "1.5", max: "2", reader: R, scaling: S }, /Minimum readers must be a whole number from 0/],
+    [{ tenant: T, mode: "present", min: "0", max: "0", reader: R, scaling: S }, /Maximum readers must be a whole number from 1/],
+    [{ tenant: T, mode: "present", min: "3", max: "2", reader: R, scaling: S }, /must not be more than maximum/],
+    [{ tenant: T, mode: "present", min: "0", max: "4294967296", reader: R, scaling: S }, /from 1 to 4294967295/],
+    [{ tenant: T, mode: "present", min: "0", max: "1", routing: "sideways", reader: R, scaling: S }, /Choose where reads go/],
+    [{ tenant: T, mode: "present", min: "0", max: "1", reader: "", scaling: S }, /Reader profile is required/],
+    [{ tenant: T, mode: "present", min: "0", max: "1", reader: R, scaling: "" }, /Scaling rule is required/],
+  ]) assert.throws(() => deploymentReadersSubmission(form), pattern);
+
+  // Retire: the receipt from the tenant's latest finished operation; data is always retained.
+  const retire = deploymentRetireSubmission({ tenant: T, receipt: ` ${RC.toUpperCase()} `, reason: "  customer left  " });
+  assert.equal(retire.path, `/v1/admin/tenant-deployments/${T}/retire`);
+  assert.deepEqual(plain([retire.request, retire.contents]), [{ kind: "retire", tenant_id: T, expected_receipt: RC, reason: "customer left", data_disposition: "retain" }, []]);
+  assert.match(retire.confirm, /^Record a request to retire tenant c{32}\?\n.*All data is kept\.\nThis only records/);
+  assert.match(retire.confirm, /Reason: customer left/);
+  for (const [form, pattern] of [
+    [{ tenant: T, receipt: "abc", reason: "r" }, /Receipt must be the 64-character receipt/],
+    [{ tenant: T, receipt: RC, reason: " " }, /Reason is required/],
+    [{ tenant: T, receipt: RC, reason: "x".repeat(513) }, /Reason is 513 bytes; at most 512/],
+    [{ tenant: T, receipt: RC, reason: "a\nb" }, /Reason must not contain tabs, line breaks/],
+  ]) assert.throws(() => deploymentRetireSubmission(form), pattern);
+
+  // Cancel quotes the tokens of the status just read; ended operations cannot be cancelled.
+  assert.equal(deploymentTerminal(op(A)), false);
+  for (const phase of ["succeeded", "cancelled", "retired"]) assert.equal(deploymentTerminal(op(A, { phase })), true);
+  assert.equal(deploymentTerminal(op(A, { phase: "cancelling", observed: { terminal: true } })), true);
+  assert.equal(deploymentTerminal(null), false);
+  assert.deepEqual(plain(deploymentCancelRequest(op(A), "k")), { path: `/v1/admin/tenant-deployment-operations/${A}/cancel`,
+    body: { idempotency_key: "k", expected_operation_generation: 4, expected_lifecycle_generation: 2 } });
+  assert.equal(deploymentCancelRequest(op(A, { receipt_digest: RC }), "k").body.expected_receipt, RC);
+  for (const bad of [null, op("x"), op(A, { operation_generation: "4" }), op(A, { lifecycle_generation: undefined })])
+    assert.throws(() => deploymentCancelRequest(bad, "k"), /unexpected operation status/);
+  const confirmText = deploymentCancelConfirm(op(A), false);
+  assert.match(confirmText, /^Cancel operation a{32}\?\nIt is: Create tenant for tenant c{32}, now Reserved, waiting for cloud execution\.\n/);
+  assert.match(confirmText, /releases it\. For a create, the tenant record stays\.\nThis only records the cancellation on this server\. Cloud execution is switched off \(OD-002\), so nothing is deployed/);
+  assert.doesNotMatch(confirmText, /same request key/);
+  assert.match(deploymentCancelConfirm(op(A, { kind: "set_readers", phase: "accepted" }), true), /Change reader replicas[\s\S]*withdraws it for good[\s\S]*same request key/);
+
+  // Retry rules: an unknown outcome keeps the key; a definite answer discards it.
+  for (const error of [new Error("network down"), fail(408, "timeout"), fail(429, "rate_limited"), fail(500, "internal_error"), fail(503, "operation_store_unavailable"),
+    fail(409, "lifecycle_conflict"), fail(422, "invalid_input")]) assert.equal(deploymentRetryable(error), true, error.message);
+  for (const error of [fail(400, "operation_request_invalid"), fail(409, "operation_request_conflict"), fail(409, "operation_generation_stale"),
+    fail(404, "operation_not_found"), fail(404, "route_missing"), fail(401, "admin_auth_required"), fail(403, "read_only"), fail(409, "transition_unavailable")])
+    assert.equal(deploymentRetryable(error), false, error.message);
+  assert.match(deploymentExplain(Object.assign(fail(503, "operation_store_unavailable"), { deployRetry: true })),
+    /^HTTP 503: operation_store_unavailable: x\nThe operation store could not be read or written right now\. Try again shortly\.\nThe server may already have recorded this/);
+  // invalid_input may follow a recorded request, so the key stays; but an immediate resend fails the same way, so the
+  // message says to fix the cause first (deleted tenants still count towards the 1,024 limit) and not to edit the form.
+  const invalidInput = deploymentExplain(Object.assign(fail(422, "invalid_input"), { deployRetry: true }));
+  assert.match(invalidInput, /^HTTP 422: invalid_input: x\nThe server may already have recorded/);
+  assert.match(invalidInput, /Resending does not help until the cause is fixed[\s\S]*deleted tenants still count[\s\S]*server operator[\s\S]*without changing the form[\s\S]*recorded at most once[\s\S]*stays listed/);
+  assert.doesNotMatch(invalidInput, /without changing anything/);
+  assert.doesNotMatch(deploymentExplain(fail(422, "invalid_input")), /Resending does not help/);
+  assert.match(deploymentExplain(fail(409, "operation_generation_stale")), /Select Check status to read it again/);
+  assert.match(deploymentExplain(fail(404, "operation_not_found")), /No operation with this ID is recorded/);
+
+  // Every refusal code the tenant deployment routes can raise has a plain explanation (kept in sync with the server).
+  const sourceOf = (path) => { const text = fs.readFileSync(path, "utf8"); const cut = text.search(/#\[cfg\(test\)\]\s*mod tests/); return cut < 0 ? text : text.slice(0, cut); };
+  const raising = /(?:ApiError::new\(\s*StatusCode::[A-Z_]+,\s*|\bconflict\(\s*|lifecycle_error\(\s*|\bunavailable\(\s*)"([a-z][a-z0-9_]*)"/g;
+  const raised = new Set();
+  for (const path of ["src/server/tenant_provisioning.rs", "src/server/tenant_provisioning/admin.rs", "src/server/control_state.rs"])
+    for (const match of sourceOf(path).matchAll(raising)) raised.add(match[1]);
+  // Raised only by the cloud worker, actuators, credential delivery, migration and rollback, or control-state setup: never by the routes this panel calls.
+  const NOT_FROM_PANEL_ROUTES = new Set(["activation_route_invalid", "actuator_fence_unproven", "actuator_not_owner", "authority_identity_mismatch",
+    "candidate_revocation_unconfirmed", "control_state_exists", "credential_delivery_unacknowledged", "credential_view_unpublished",
+    "delivery_candidate_exists", "delivery_conflict", "delivery_stale", "directory_invalid", "migration_source_released",
+    "projection_freshness_unproven", "readiness_unproven", "rollback_requires_reconciliation", "seed_mismatch", "seed_unrecorded",
+    "tenant_migration_ack_required"]);
+  assert.ok(raised.size > 40, "the error code scan found too few codes; check the pattern");
+  assert.deepEqual([...raised].filter((code) => !Object.hasOwn(DEPLOY_HINTS, code) && !NOT_FROM_PANEL_ROUTES.has(code)).sort(), [],
+    "new tenant deployment error codes need a plain explanation in DEPLOY_HINTS (admin-tools.js)");
+  assert.deepEqual([...NOT_FROM_PANEL_ROUTES].filter((code) => !raised.has(code)), [], "codes no longer raised: drop them from NOT_FROM_PANEL_ROUTES");
+  const rustFiles = (dir) => fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => entry.isDirectory() ? rustFiles(`${dir}/${entry.name}`)
+    : entry.name.endsWith(".rs") ? [`${dir}/${entry.name}`] : []);
+  const server = rustFiles("src/server").map((path) => fs.readFileSync(path, "utf8")).join("\n");
+  assert.deepEqual(Object.keys(DEPLOY_HINTS).filter((code) => !server.includes(`"${code}"`)), [], "explained codes the server no longer uses");
+  for (const code of ["tenant_deployments_not_configured", "admin_auth_required", "read_only", "forbidden_scope", "gateway_tenant_required", "not_found",
+    "operation_not_found", "tenant_deployment_action_unknown", "operation_request_invalid", "operation_request_conflict", "action_request_conflict",
+    "operation_generation_stale", "pin_scope_unproven", "retirement_required", "operation_terminal", "readers_in_progress", "retirement_in_progress",
+    "withdrawal_capacity", "transition_unavailable", "irreversible_ack_required", "tenants_disabled", "admin_dir_busy"]) assert.ok(Object.hasOwn(DEPLOY_HINTS, code), code);
+  for (const code of DEPLOY_SETTLED) assert.ok(Object.hasOwn(DEPLOY_HINTS, code), code);
+  for (const [code, hint] of Object.entries(DEPLOY_HINTS)) assert.ok(typeof hint === "string" && hint.length > 20 && !/[<>]/.test(hint), code);
+  // Codes that can follow a durable record say so; invalid_input is not settled, so it does not claim a definite outcome.
+  assert.doesNotMatch(DEPLOY_HINTS.invalid_input, /^The request is recorded/);
+  assert.match(DEPLOY_HINTS.invalid_input, /may already have recorded[\s\S]*fails the same way/);
+  assert.match(DEPLOY_HINTS.tenant_id_conflict, /stays recorded \(Load operations lists it\)/);
+  assert.match(DEPLOY_HINTS.tenants_commit_indeterminate, /refresh the Tenants list[\s\S]*same request key/);
+  for (const code of ["readers_in_progress", "retirement_in_progress", "withdrawal_capacity"]) assert.match(DEPLOY_HINTS[code], /cancel may stay recorded/, code);
+
+  // Whitespace-only profiles are refused before anything is sent.
+  assert.throws(() => deploymentContent("  \r\n\t\n", "Writer profile"), /Writer profile contains only spaces or blank lines/);
+
+  // The same bytes hash the same here and in the server (tenant_provisioning::sha256_hex; see its tests.rs twin).
+  assert.equal(sha256Hex("\ufeffline1\r\nna\u00efve \u2013 \u65e5\u672c \ud83d\ude00\r\n"), "e07ad4b95327338923a222fd2dabade046c608d400549667038c9a51f046d3fa");
+
+  // A 2xx answer only counts when it names the operation (and kind/tenant) that was asked for.
+  assert.equal(deploymentAck({ operation: op(A) }, { operation: A, kind: "create", tenant: T }).operation_id, A);
+  for (const [value, expect] of [[null, {}], [{}, {}], [{ operation: "x" }, {}], [{ operation: op("x") }, {}], [{ operation: op(A) }, { operation: B }],
+    [{ operation: op(A) }, { kind: "retire" }], [{ operation: op(A) }, { tenant: B }]]) assert.equal(deploymentAck(value, expect), null, JSON.stringify(expect));
+
+  // A cancelled operation that still holds its reservation needs the exact earlier cancel resent.
+  assert.equal(deploymentReleasePending(op(A, { phase: "cancelled", observed: { terminal: true, reserved: true } })), true);
+  for (const other of [op(A, { phase: "cancelled", observed: { terminal: true, reserved: false } }), op(A, { observed: { reserved: true } }), null])
+    assert.equal(deploymentReleasePending(other), false);
+  assert.match(deploymentReleaseConfirm(op(A, { phase: "cancelled" })), /^Finish cancelling operation a{32}\?\n[\s\S]*same request key/);
+  assert.match(RELEASE_LOST, /^This operation is cancelled, but the server has not released[\s\S]*A new cancel is refused[\s\S]*report the operation ID to the server operator/);
+  // The tab keeps a saved cancel only for the verified account that sent it, until it signs out or its session ends.
+  assert.match(RELEASE_LOST, /only for the account that sent it[\s\S]*signs out or its session ends[\s\S]*sign in here again/);
+  // Whose a saved cancel is: a verified account (the server's actor names), never a role alone; anything else is no account.
+  const ALICE = "a1".repeat(16), BOB = "b2".repeat(16), STORE = "vlite.tenant-deployment.cancel.";
+  const userCaps = (id, accountRole = "super_admin") => ({ role: "admin", identity: { kind: "user", user_id: id, account_role: accountRole, label: "x" }, features: {}, routes: [] });
+  const tokenCaps = { role: "admin", identity: { kind: "super_admin", label: "Super admin (bootstrap admin token)" }, features: {}, routes: [] };
+  assert.equal(deploymentPrincipal(userCaps(ALICE)), `user:${ALICE}`);
+  assert.equal(deploymentPrincipal(tokenCaps), "admin_token");
+  for (const caps of [null, {}, { role: "admin" }, { role: "admin", features: {}, routes: [] }, { role: "admin", identity: "user" },
+    { role: "admin", identity: { kind: "open", label: "Open access" } }, { role: "read_only", identity: tokenCaps.identity },
+    { role: "read_only", identity: userCaps(ALICE).identity }, { role: "scoped", identity: userCaps(ALICE, "editor").identity },
+    userCaps(ALICE, "editor"), userCaps(ALICE, "viewer"), userCaps(ALICE.toUpperCase()), userCaps("a1"), userCaps(undefined), userCaps(null),
+    { role: "admin", identity: { kind: "read_only" } }, { role: "admin", identity: { kind: "admin_token" } }])
+    assert.equal(deploymentPrincipal(caps), null, JSON.stringify(caps));
+  // Storage keys are filed under the API address the page sends requests to, then the owner. sessionStorage is shared by
+  // every page of a site in this tab, and a dashboard can reach its API under a path (the Docker image serves it at /api).
+  const PAGE = "http://dash.test/console/", ROOT = "http://dash.test", PROXIED = "http://dash.test/vlite-b/api";
+  assert.equal(deploymentApiScope("", PAGE), ROOT);
+  assert.equal(deploymentApiScope("", "http://dash.test/console/index.html?tab=admin#tenants"), ROOT);
+  assert.equal(deploymentApiScope("/vlite-b/api", PAGE), PROXIED);
+  // Exactly the prefix the requests use (fetch resolves `${apiBase}/v1/...` against the page), never a guess about it.
+  assert.equal(deploymentApiScope("/vlite-b/api/", PAGE), `${PROXIED}/`);
+  assert.equal(deploymentApiScope("api", PAGE), "http://dash.test/console/api");
+  assert.equal(deploymentApiScope("https://api.test:8443/v", PAGE), "https://api.test:8443/v");
+  // No address can be established, so nothing is saved: no base or page, a page that is not http(s), or a base that
+  // carries credentials, a query or a fragment (these are never put in a key).
+  for (const [base, page] of [[undefined, PAGE], [null, PAGE], [1, PAGE], ["", undefined], ["", "about:blank"], ["", "file:///c/dash.html"],
+    ["https://user:pw@api.test/v", PAGE], ["https://token@api.test/v", PAGE], ["/api?key=secret", PAGE], ["/api#x", PAGE], ["javascript:void 0;//", PAGE]])
+    assert.equal(deploymentApiScope(base, page), null, `${base} @ ${page}`);
+  const keyIn = (scope, who, id) => `${STORE}${encodeURIComponent(scope)}/${who}.${id}`;
+  assert.equal(keyIn(ROOT, "admin_token", A), `${STORE}http%3A%2F%2Fdash.test/admin_token.${A}`);
+  assert.equal(deploymentCancelOwner(keyIn(ROOT, `user:${ALICE}`, A), ROOT), `user:${ALICE}`);
+  assert.equal(deploymentCancelOwner(keyIn(ROOT, "admin_token", A), ROOT), "admin_token");
+  assert.equal(deploymentCancelOwner(keyIn(PROXIED, "admin_token", A), PROXIED), "admin_token");
+  // Another API address's keys are not this page's (undefined): never read and never deleted, whatever they hold.
+  for (const key of [keyIn(PROXIED, `user:${ALICE}`, A), keyIn(PROXIED, "admin_token", A), keyIn(PROXIED, "user:nope", A), `${STORE}${encodeURIComponent(PROXIED)}/`,
+    keyIn(`${ROOT}/`, "admin_token", A)])
+    assert.equal(deploymentCancelOwner(key, ROOT), undefined, key);
+  // Unknown (null, deleted, never used): an older page's key filed under no address (the operation alone, or owner and
+  // operation), or a damaged key under this address.
+  for (const unknown of [`${STORE}${A}`, STORE, `${STORE}user:${ALICE}.${A}`, `${STORE}admin_token.${A}`, `${STORE}/admin_token.${A}`,
+    keyIn(ROOT, `user:${ALICE.toUpperCase()}`, A), keyIn(ROOT, `user:${ALICE}`, "nope"), `${STORE}${encodeURIComponent(ROOT)}/user:${ALICE}`,
+    `${STORE}${encodeURIComponent(ROOT)}/`, keyIn(ROOT, "open", A), keyIn(ROOT, "read_only_token", A), `${keyIn(ROOT, `user:${ALICE}`, A)}.x`])
+    assert.equal(deploymentCancelOwner(unknown, ROOT), null, unknown);
+  // A page that cannot establish its address owns no key, but still recognizes (and deletes) an older page's.
+  assert.equal(deploymentCancelOwner(keyIn(ROOT, "admin_token", A), null), undefined);
+  assert.equal(deploymentCancelOwner(`${STORE}admin_token.${A}`, null), null);
+  for (const other of ["vlite.theme", "", `x${STORE}admin_token.${A}`]) assert.equal(deploymentCancelOwner(other, ROOT), undefined, other);
+  // What the page says about a saved cancel's reach, by owner.
+  const aliceScope = deploymentCancelScope(`user:${ALICE}`, ROOT);
+  assert.match(aliceScope, /never a password or token[\s\S]*for the account that sent it[\s\S]*same account signed in again can resend it, as long as its session did not end[\s\S]*Signing out, or the session ending, deletes it[\s\S]*Another account signed in to this tab cannot resend it[\s\S]*plain text that anyone using this tab can read/);
+  assert.match(aliceScope, /under the API address this dashboard uses[\s\S]*a dashboard on this site that uses another API address neither resends nor deletes it/);
+  assert.doesNotMatch(aliceScope, /cannot see/);
+  assert.doesNotMatch(aliceScope, /bootstrap admin token/);
+  assert.match(deploymentCancelScope("admin_token", ROOT), /Everyone signed in with the bootstrap admin token counts as one account[\s\S]*rejected token counts as the session ending/);
+  assert.match(deploymentCancelScope(null, ROOT), /did not identify your account, so that cancel is not saved[\s\S]*a reload, a sign-out or another sign-in loses it/);
+  for (const who of [`user:${ALICE}`, "admin_token"])
+    assert.match(deploymentCancelScope(who, null), /could not tell which API address it uses, so that cancel is not saved[\s\S]*a reload, a sign-out or another sign-in loses it/);
+  assert.match(RELEASE_LOST, /for the account signed in now under this dashboard's API address/);
+  const savedBody = { idempotency_key: "k", expected_operation_generation: 4, expected_lifecycle_generation: 2 };
+  const saved = { operation: A, principal: `user:${ALICE}`, scope: ROOT, path: `/v1/admin/tenant-deployment-operations/${A}/cancel`, body: savedBody };
+  assert.deepEqual(plain(deploymentSavedCancel(saved, A, `user:${ALICE}`, ROOT)), plain(saved));
+  assert.equal(deploymentSavedCancel({ ...saved, body: { ...savedBody, expected_receipt: RC } }, A, `user:${ALICE}`, ROOT).body.expected_receipt, RC);
+  for (const bad of [null, { ...saved, operation: B }, { ...saved, path: "/v1/admin/tenants" }, { ...saved, body: { ...savedBody, extra: 1 } },
+    { ...saved, body: { ...savedBody, idempotency_key: "" } }, { ...saved, body: { ...savedBody, expected_operation_generation: "4" } },
+    { ...saved, principal: `user:${BOB}` }, { ...saved, principal: undefined }, { ...saved, principal: "admin_token" },
+    { ...saved, scope: PROXIED }, { ...saved, scope: `${ROOT}/` }, { ...saved, scope: undefined }])
+    assert.equal(deploymentSavedCancel(bad, A, `user:${ALICE}`, ROOT), null);
+  // Without a verified account or an API address there is nothing to match, so nothing is used (fails closed).
+  for (const who of [null, undefined, ""]) {
+    assert.equal(deploymentSavedCancel(saved, A, who, ROOT), null);
+    assert.equal(deploymentSavedCancel({ ...saved, principal: who }, A, who, ROOT), null);
+  }
+  for (const where of [null, undefined, ""]) {
+    assert.equal(deploymentSavedCancel(saved, A, `user:${ALICE}`, where), null);
+    assert.equal(deploymentSavedCancel({ ...saved, scope: where }, A, `user:${ALICE}`, where), null);
+  }
+
+  // The phase and kind tables match the server's enums, so a new server phase or kind fails here.
+  const camel = (name) => name.replace(/[A-Z]/g, (c, i) => (i ? "_" : "") + c.toLowerCase());
+  const variants = (source, name) => {
+    const body = source.match(new RegExp(`pub(?:\\([a-z]+\\))? enum ${name}\\s*\\{([\\s\\S]*?)\\n\\}`))?.[1];
+    assert.ok(body, `enum ${name} not found`);
+    return [...body.replace(/\/\/.*$/gm, "").replace(/#\[[^\]]*\]/g, "").matchAll(/^\s*([A-Z][A-Za-z]*)\s*(?:[,{(]|$)/gm)].map((m) => camel(m[1]));
+  };
+  assert.deepEqual(Object.keys(DEPLOY_KINDS).sort(), variants(sourceOf("src/server/control_state.rs"), "OperationKind").sort());
+  const terminal = variants(sourceOf("src/server/tenant_provisioning.rs"), "TerminalOutcome").sort();
+  assert.deepEqual(terminal, ["cancelled", "retired", "succeeded"]);
+  for (const phase of terminal) assert.equal(deploymentTerminal({ phase, observed: {} }), true, phase);
+  const admin = sourceOf("src/server/tenant_provisioning/admin.rs");
+  const render = admin.match(/let \(phase, next_step\) = match [\s\S]*?\n    \};/)?.[0];
+  assert.ok(render, "the phase match in admin.rs render() was not found");
+  const rendered = [...new Set([...render.matchAll(/=>\s*\(\s*"([a-z_]+)"/g)].map((m) => m[1]))].sort();
+  assert.deepEqual(Object.keys(DEPLOY_PHASES).sort(), rendered, "DEPLOY_PHASES must list exactly the phases admin.rs renders");
+  assert.deepEqual(Object.keys(DEPLOY_PHASES).filter((phase) => deploymentTerminal({ phase, observed: {} })).sort(), terminal);
+
+  // ---- Wiring against a fake backend ----
+  reset(); timers.length = 0;
+  const ctx = fakeCtx();
+  const caps = userCaps(ALICE);
+  ctx.caps = caps;
+  const tools = init(ctx);
+  tools.capabilities(caps);
+  const el = (id) => elements[`tenant-deployment-${id}`];
+  const FIELDS = ["operation", "name", "max-vectors", "resources", "secrets", "readers-tenant", "readers-mode", "readers-min", "readers-max", "readers-routing",
+    "retire-tenant", "retire-receipt", "retire-reason", ...["writer", "init", "reader", "scaling"].flatMap((p) => [`${p}-file`, `${p}-text`])];
+  const BUTTONS = ["check", "cancel", "create", "readers", "retire"];
+  const disabled = () => [...FIELDS, ...BUTTONS].filter((id) => el(id).disabled);
+  assert.deepEqual(disabled(), []);
+  assert.equal(ctx.calls.length, 0);
+  assert.equal(el("operation-status").textContent, "No operation selected.");
+  assert.match(el("operation-help").textContent, /^Check status reads/);
+  const listed = (ops = []) => ({ operations: ops, next_after: null });
+
+  // Create: a declined confirmation sends nothing.
+  el("name").value = "acme"; el("max-vectors").value = "1000";
+  el("writer-file").files = [file("writer.json", [...Buffer.from(W)])];
+  el("writer-file").change();
+  assert.match(el("writer-note").textContent, /^Using the file writer\.json \(25 bytes\) exactly as it is/);
+  el("init-text").value = I;
+  el("resources").value = "/subscriptions/s/a"; el("secrets").value = "archive-sas@3";
+  ctx.answer = false;
+  await el("create").click();
+  assert.equal(ctx.calls.length, 0);
+  assert.match(ctx.confirms.at(-1), /^Record a request to create tenant "acme"/);
+  assert.ok(ctx.confirms.at(-1).includes(nodeSha(W)));
+  assert.equal(el("create-message").textContent, "Nothing was sent.");
+  // An unknown outcome (503 or no answer) keeps the request key: the same button repeats the same request.
+  ctx.answer = true;
+  ctx.responses.push(fail(503, "operation_store_unavailable"));
+  await el("create").click();
+  const first = ctx.calls.at(-1);
+  assert.deepEqual([first.method, first.path, plain(first.options)], ["POST", "/v1/admin/tenant-deployments", {
+    data: false, inspectorSummary: { documents: 2, resources: 1, secret_versions: 1, profile_digests: [nodeSha(W), nodeSha(I)] },
+  }]);
+  assert.deepEqual(Object.keys(first.body), ["idempotency_key", "request", "contents"]);
+  assert.match(first.body.idempotency_key, uuid);
+  assert.deepEqual(plain(first.body.request), { kind: "create", name: "acme", max_vectors: 1000, writer_profile: nodeSha(W), initialization: nodeSha(I),
+    resources: ["/subscriptions/s/a"], secret_versions: ["archive-sas@3"] });
+  assert.deepEqual(plain(first.body.contents), [W, I]);
+  assert.match(el("create-message").textContent, /operation store could not be read[\s\S]*Select the same button again without changing anything/);
+  ctx.responses.push(new Error("network down"));
+  await el("create").click();
+  assert.equal(ctx.calls.at(-1).body.idempotency_key, first.body.idempotency_key);
+  assert.match(ctx.confirms.at(-1), /repeats your earlier request whose outcome is unknown, with the same request key/);
+  // Editing any field of the form makes the next submission a new request with a new key.
+  el("secrets").value = "archive-sas@4"; el("secrets").input();
+  ctx.responses.push(fail(400, "operation_request_invalid"));
+  await el("create").click();
+  const second = ctx.calls.at(-1).body.idempotency_key;
+  assert.notEqual(second, first.body.idempotency_key);
+  assert.doesNotMatch(ctx.confirms.at(-1), /repeats your earlier request/);
+  assert.match(el("create-message").textContent, /^HTTP 400: operation_request_invalid: x\nThe server refused a field/);
+  assert.doesNotMatch(el("create-message").textContent, /same button again/);
+  // A definite refusal discards the key, even when nothing was edited.
+  ctx.responses.push(fail(503, "operation_store_unavailable"));
+  await el("create").click();
+  const third = ctx.calls.at(-1).body.idempotency_key;
+  assert.notEqual(third, second);
+  // invalid_input (for example "tenant capacity reached") may follow a recorded request: the key stays for the same
+  // form, and the message says to fix the cause before resending instead of resending at once.
+  ctx.responses.push(fail(422, "invalid_input"));
+  await el("create").click();
+  assert.equal(ctx.calls.at(-1).body.idempotency_key, third);
+  assert.match(el("create-message").textContent, /^HTTP 422: invalid_input: x\nThe server may already have recorded[\s\S]*Resending does not help until the cause is fixed[\s\S]*without changing the form/);
+  assert.doesNotMatch(el("create-message").textContent, /without changing anything/);
+  // A 2xx answer that does not name a matching operation is an unknown outcome: the form and the key stay for an exact resend.
+  ctx.responses.push({ duplicate: false, operation: op(A, { kind: "retire" }) });
+  await el("create").click();
+  assert.equal(ctx.calls.at(-1).body.idempotency_key, third);
+  assert.match(el("create-message").textContent, /did not confirm this request[\s\S]*same button again/);
+  assert.equal(el("name").value, "acme");
+  // Success (here a duplicate): said plainly; the form clears; the operation box and the list show the result.
+  const hostile = "<img src=x onerror=alert(1)>";
+  const recorded = op(A, { next_step: hostile });
+  ctx.responses.push({ duplicate: true, operation: recorded }, listed([recorded]));
+  await el("create").click();
+  assert.equal(ctx.calls.at(-2).body.idempotency_key, third);
+  assert.equal(ctx.calls.at(-1).path, "/v1/admin/tenant-deployment-operations?limit=20");
+  assert.equal(el("create-message").textContent, [
+    "This was already recorded earlier with the same request key; nothing new was added.",
+    "Create tenant: Reserved, waiting for cloud execution",
+    `Next step: ${hostile}`,
+    `Operation ID: ${A} (now in the operation box below, where Cancel withdraws it)`,
+    `Tenant ID: ${T}`,
+  ].join("\n"));
+  assert.deepEqual([el("name").value, el("max-vectors").value, el("writer-file").files.length, el("init-text").value, el("resources").value, el("secrets").value,
+    el("writer-note").textContent], ["", "", 0, "", "", "", ""]);
+  assert.equal(el("operation").value, A);
+  assert.equal(el("operation-status").textContent, "Create tenant: Reserved, waiting for cloud execution");
+  assert.equal(el("operation-facts").hidden, false);
+  assert.equal(el("list").children.length, 1);
+  // The next create is a new request, and a fresh answer says it was recorded.
+  el("name").value = "beta"; el("writer-text").value = "{}"; el("init-text").value = "{}";
+  ctx.responses.push({ duplicate: false, operation: op(B, { phase: "accepted" }) }, listed());
+  await el("create").click();
+  assert.notEqual(ctx.calls.at(-2).body.idempotency_key, third);
+  assert.deepEqual(plain(ctx.calls.at(-2).body.contents), ["{}"]);
+  assert.match(el("create-message").textContent, /^Recorded\. Nothing was deployed \(cloud execution is switched off, OD-002\)\.\nCreate tenant: Recorded, nothing reserved yet\n/);
+  // Validation errors are shown in the form and send nothing.
+  const before = ctx.calls.length;
+  el("name").value = "acme";
+  await el("create").click();
+  assert.match(el("create-message").textContent, /Writer profile is required: choose the file or paste its text; no request sent/);
+  el("writer-file").files = [file("bin.dat", [0xff])];
+  el("init-text").value = "{}";
+  await el("create").click();
+  assert.match(el("create-message").textContent, /bin\.dat is not UTF-8 text/);
+  assert.equal(ctx.calls.length, before);
+  // Pasting replaces a chosen file (and says so).
+  el("writer-text").value = "{}"; el("writer-text").input();
+  assert.deepEqual([el("writer-file").files.length, el("writer-note").textContent], [0, "Using the pasted text instead of the file."]);
+
+  // Readers: profiles hidden and ignored when the tenant should have no readers.
+  el("readers-tenant").value = T; el("readers-min").value = "1"; el("readers-max").value = "2";
+  el("reader-text").value = R; el("scaling-file").files = [file("scale.json", [...Buffer.from(S)])];
+  el("readers-mode").value = "present"; el("readers-routing").value = "readers";
+  ctx.responses.push({ duplicate: false, operation: op(B, { kind: "set_readers", phase: "accepted" }) }, listed());
+  await el("readers").click();
+  assert.equal(ctx.calls.at(-2).path, `/v1/admin/tenant-deployments/${T}/readers`);
+  assert.deepEqual(plain(ctx.calls.at(-2).body.request.fleet), { state: "present", min_replicas: 1, max_replicas: 2, reader_profile: nodeSha(R), scaling_rule: nodeSha(S), read_routing: "readers" });
+  assert.deepEqual(plain(ctx.calls.at(-2).body.contents), [R, S]);
+  assert.deepEqual(plain(ctx.calls.at(-2).options.inspectorSummary), {
+    documents: 2, resources: 0, secret_versions: 0, profile_digests: [nodeSha(R), nodeSha(S)],
+  });
+  assert.match(ctx.confirms.at(-1), /ITEM-008/);
+  assert.match(el("readers-message").textContent, /^Recorded\. Nothing was deployed \(cloud execution is switched off, OD-002\)\.\nChange reader replicas: Recorded, nothing reserved yet/);
+  assert.deepEqual([el("readers-tenant").value, el("readers-min").value, el("readers-mode").value, el("readers-routing").value, el("scaling-file").files.length],
+    ["", "", "present", "writer_only", 0]);
+  el("readers-mode").value = "absent"; el("readers-mode").change();
+  assert.equal(el("readers-present").hidden, true);
+  el("readers-tenant").value = T;
+  el("reader-file").files = [{ name: "never.json", size: 2, arrayBuffer: async () => { throw new Error("must not be read"); } }];
+  ctx.responses.push({ duplicate: false, operation: op(B, { kind: "set_readers", phase: "accepted" }) }, listed());
+  await el("readers").click();
+  assert.deepEqual(plain([ctx.calls.at(-2).body.request, ctx.calls.at(-2).body.contents]), [{ kind: "set_readers", tenant_id: T, fleet: { state: "absent" } }, []]);
+  assert.equal(el("readers-present").hidden, false);
+
+  // "Use this operation" fills the operation, tenant and receipt in; Retire then quotes that receipt.
+  const finished = op(A, { phase: "succeeded", receipt_digest: RC, observed: { journal_steps: 5, uncertain_steps: 0, terminal: true } });
+  ctx.responses.push(listed([finished]));
+  await el("refresh").click();
+  const item = el("list").children[0];
+  assert.deepEqual(item.children[1].children.at(-1).children.map((cell) => cell.textContent), ["Receipt (needed to retire this tenant)", RC]);
+  const use = item.children[2];
+  assert.equal(use.textContent, "Use this operation");
+  // Elements made by the page fake record downloads on click(), so run the button's listener directly.
+  assert.equal(use.listeners.length, 1);
+  await use.listeners[0]();
+  assert.deepEqual([el("operation").value, el("readers-tenant").value, el("retire-tenant").value, el("retire-receipt").value], [A, T, T, RC]);
+  assert.match(el("operation-message").textContent, /^Filled in operation a{32} and its tenant ID c{32} in the Readers and Retire forms, with its receipt\./);
+  el("retire-reason").value = "customer left";
+  ctx.responses.push({ duplicate: false, operation: op(B, { kind: "retire", phase: "accepted" }) }, listed());
+  await el("retire").click();
+  assert.equal(ctx.calls.at(-2).path, `/v1/admin/tenant-deployments/${T}/retire`);
+  assert.deepEqual(plain(ctx.calls.at(-2).body), { idempotency_key: ctx.calls.at(-2).body.idempotency_key, contents: [],
+    request: { kind: "retire", tenant_id: T, expected_receipt: RC, reason: "customer left", data_disposition: "retain" } });
+  assert.match(ctx.confirms.at(-1), /retire tenant c{32}\?[\s\S]*All data is kept/);
+  assert.deepEqual([el("retire-tenant").value, el("retire-receipt").value, el("retire-reason").value], ["", "", ""]);
+  // A refusal of the retirement is explained in its form.
+  el("retire-tenant").value = T; el("retire-receipt").value = RC; el("retire-reason").value = "again";
+  ctx.responses.push(fail(409, "retirement_in_progress"));
+  await el("retire").click();
+  assert.match(el("retire-message").textContent, /retirement of this tenant already started/);
+  // Using an operation without a receipt empties the receipt box, so another tenant is never paired with this receipt.
+  const otherTenant = "e".repeat(32);
+  ctx.responses.push(listed([op(B, { tenant_id: otherTenant })]));
+  await el("refresh").click();
+  await el("list").children[0].children[2].listeners[0]();
+  assert.deepEqual([el("retire-tenant").value, el("retire-receipt").value], [otherTenant, ""]);
+  assert.match(el("operation-message").textContent, /it has no receipt, so the Retire receipt box was emptied/);
+
+  // Cancel reads the current status first, names the operation in the confirmation, then quotes the fresh tokens.
+  el("operation").value = ` ${A.toUpperCase()} `; el("operation").input();
+  assert.equal(el("cancel").disabled, false);
+  ctx.answer = false;
+  ctx.responses.push({ operation: op(A, { operation_generation: 7, lifecycle_generation: 3 }) });
+  const sentBefore = ctx.calls.length;
+  await el("cancel").click();
+  assert.deepEqual(plain(ctx.calls.slice(sentBefore)), [{ method: "GET", path: `/v1/admin/tenant-deployment-operations/${A}`, options: { data: false } }]);
+  assert.match(ctx.confirms.at(-1), /^Cancel operation a{32}\?\nIt is: Create tenant for tenant c{32}, now Reserved/);
+  assert.equal(el("operation-message").textContent, "Nothing was sent.");
+  ctx.answer = true;
+  const cancelled = op(A, { phase: "cancelled", operation_generation: 8, observed: { journal_steps: 3, uncertain_steps: 0, terminal: true } });
+  ctx.responses.push({ operation: op(A, { operation_generation: 7, lifecycle_generation: 3 }) }, { action: "cancel", operation: cancelled }, listed([cancelled]));
+  await el("cancel").click();
+  const cancel = ctx.calls.at(-2);
+  assert.deepEqual([ctx.calls.at(-3).method, cancel.method, cancel.path], ["GET", "POST", `/v1/admin/tenant-deployment-operations/${A}/cancel`]);
+  assert.match(cancel.body.idempotency_key, uuid);
+  assert.deepEqual(plain(cancel.body), { idempotency_key: cancel.body.idempotency_key, expected_operation_generation: 7, expected_lifecycle_generation: 3 });
+  assert.match(el("operation-message").textContent, /^Cancelled\. Cloud execution is switched off \(OD-002\), so nothing in Azure was touched\.\nCreate tenant: Cancelled\n/);
+  // An ended operation cannot be cancelled: the button is disabled while its ID is in the box.
+  assert.equal(el("cancel").disabled, true);
+  assert.match(el("operation-help").textContent, /has ended, so it cannot be cancelled/);
+  // Check status of an ended operation says so; a click on Cancel that still arrives sends no cancel.
+  ctx.responses.push({ operation: cancelled });
+  await el("check").click();
+  assert.equal(el("operation-message").textContent, "This operation has ended; it cannot be cancelled.");
+  ctx.responses.push({ operation: cancelled });
+  const sent = ctx.calls.length;
+  await el("cancel").click();
+  assert.deepEqual(ctx.calls.slice(sent).map((call) => call.method), ["GET"]);
+  assert.match(el("operation-message").textContent, /already ended, so there is nothing to cancel\. Nothing was sent\./);
+
+  // Stale tokens: explained, the next Cancel reads fresh ones and uses a new key.
+  el("operation").value = B; el("operation").input();
+  assert.equal(el("cancel").disabled, false);
+  ctx.responses.push({ operation: op(B) }, fail(409, "operation_generation_stale"));
+  await el("cancel").click();
+  const staleKey = ctx.calls.at(-1).body.idempotency_key;
+  assert.match(el("operation-message").textContent, /^HTTP 409: operation_generation_stale: x\nThe operation changed after its status was read[\s\S]*Select Check status/);
+  ctx.responses.push({ operation: op(B, { operation_generation: 9 }) }, fail(503, "operation_store_unavailable"));
+  await el("cancel").click();
+  const unknown = ctx.calls.at(-1).body;
+  assert.notEqual(unknown.idempotency_key, staleKey);
+  assert.equal(unknown.expected_operation_generation, 9);
+  assert.match(el("operation-message").textContent, /same button again/);
+  // After an unknown outcome, Cancel re-reads the status but repeats the exact earlier cancel (same key, same tokens).
+  const half = op(B, { phase: "cancelling", operation_generation: 10 });
+  ctx.responses.push({ operation: half }, { action: "cancel", operation: half }, listed());
+  await el("cancel").click();
+  assert.deepEqual(plain(ctx.calls.at(-2).body), plain(unknown));
+  assert.match(ctx.confirms.at(-1), /repeats your earlier cancel whose outcome is unknown/);
+  assert.match(el("operation-message").textContent, /^Cancellation started but is not finished\. Select Cancel again to finish it\./);
+  // ...and the cancel after that is new again.
+  ctx.responses.push({ operation: half }, fail(409, "transition_unavailable"));
+  await el("cancel").click();
+  assert.notEqual(ctx.calls.at(-1).body.idempotency_key, unknown.idempotency_key);
+  assert.equal(ctx.calls.at(-1).body.expected_operation_generation, 10);
+  assert.match(el("operation-message").textContent, /That change is not possible for this operation now/);
+
+  // The server seals a cancel before releasing the reservation; if the release fails, the exact earlier cancel finishes it.
+  const E = "e".repeat(32), stored = keyIn(ROOT, `user:${ALICE}`, E);
+  const releasing = op(E, { phase: "cancelled", operation_generation: 5, observed: { journal_steps: 3, uncertain_steps: 0, terminal: true, reserved: true } });
+  el("operation").value = E; el("operation").input();
+  // An answer naming another operation is an unknown outcome: the cancel stays saved.
+  ctx.responses.push({ operation: op(E) }, { action: "cancel", operation: op(B) });
+  await el("cancel").click();
+  const sealed = plain(ctx.calls.at(-1).body);
+  assert.match(el("operation-message").textContent, /did not confirm the cancel[\s\S]*same button again/);
+  assert.deepEqual(JSON.parse(session.get(stored)).body, sealed);
+  // The saved record holds only the operation, its owner, the API address, the path and the cancel body: no password or token.
+  assert.deepEqual(Object.keys(JSON.parse(session.get(stored))).sort(), ["body", "operation", "path", "principal", "scope"]);
+  assert.equal(JSON.parse(session.get(stored)).principal, `user:${ALICE}`);
+  assert.equal(JSON.parse(session.get(stored)).scope, ROOT);
+  ctx.responses.push({ operation: op(E) }, { action: "cancel", operation: releasing }, listed());
+  await el("cancel").click();
+  assert.deepEqual(plain(ctx.calls.at(-2).body), sealed);
+  assert.equal(el("operation-message").textContent.split("\n")[0], `${RELEASE_PENDING} Select Cancel again to resend the same cancel and finish the release.`);
+  assert.equal(el("operation-message").textContent.split("\n").at(-1), deploymentCancelScope(`user:${ALICE}`, ROOT));
+  assert.equal(el("cancel").disabled, false);
+  assert.match(el("operation-help").textContent, /Select Cancel to resend[\s\S]*for the account that sent it/);
+  // The saved cancel survives losing the page's memory (this tab's sessionStorage keeps it).
+  el("operation").value = B; el("operation").input(); el("operation").value = E; el("operation").input();
+  ctx.responses.push({ operation: releasing });
+  await el("check").click();
+  assert.match(el("operation-message").textContent, /Select Cancel to resend your earlier cancel exactly[\s\S]*for the account that sent it/);
+  const released = op(E, { phase: "cancelled", operation_generation: 6, observed: { journal_steps: 4, uncertain_steps: 0, terminal: true, reserved: false } });
+  ctx.responses.push({ operation: releasing }, { action: "cancel", operation: released }, listed());
+  await el("cancel").click();
+  assert.match(ctx.confirms.at(-1), /^Finish cancelling operation e{32}\?/);
+  assert.deepEqual(plain(ctx.calls.at(-2).body), sealed);
+  assert.match(el("operation-message").textContent, /^Cancelled\./);
+  assert.equal(session.has(stored), false);
+  assert.equal(el("cancel").disabled, true);
+  // Without the earlier cancel there is no resend; the page says so and sends nothing.
+  const lost = "1".repeat(32);
+  el("operation").value = lost; el("operation").input();
+  ctx.responses.push({ operation: { ...releasing, operation_id: lost } });
+  await el("check").click();
+  assert.equal(el("operation-message").textContent, RELEASE_LOST);
+  assert.equal(el("cancel").disabled, true);
+  assert.ok(el("operation-help").textContent.includes(RELEASE_LOST));
+  const noSend = ctx.calls.length;
+  ctx.responses.push({ operation: { ...releasing, operation_id: lost } });
+  await el("cancel").click();
+  assert.deepEqual(ctx.calls.slice(noSend).map((call) => call.method), ["GET"]);
+  assert.equal(el("operation-message").textContent, RELEASE_LOST);
+  // A malformed ID or status sends nothing further.
+  el("operation").value = "nope"; el("operation").input();
+  const quiet = ctx.calls.length;
+  await el("cancel").click();
+  await el("check").click();
+  assert.equal(ctx.calls.length, quiet);
+  assert.match(el("operation-message").textContent, /Operation ID must be the 32-character ID/);
+  el("operation").value = B;
+  ctx.responses.push({ operation: op(A) });
+  await el("cancel").click();
+  assert.deepEqual(ctx.calls.slice(quiet).map((call) => call.method), ["GET"]);
+  assert.match(el("operation-message").textContent, /unexpected operation status/);
+
+  // A saved cancel belongs to the verified account that sent it. Another account signed in to this tab can neither resend
+  // nor delete it; leaving the page keeps it for a reload; signing out or the session ending deletes it; unknown records go.
+  const F = "f".repeat(32), G = "9".repeat(32), H = "8".repeat(32), J = "7".repeat(32), K = "6".repeat(32), M = "4".repeat(32), N = "3".repeat(32);
+  const keyOf = (who, id) => keyIn(ROOT, who, id);
+  const stillReserved = (id) => op(id, { phase: "cancelled", operation_generation: 5, observed: { journal_steps: 3, uncertain_steps: 0, terminal: true, reserved: true } });
+  const nowReleased = (id) => op(id, { phase: "cancelled", operation_generation: 6, observed: { journal_steps: 4, uncertain_steps: 0, terminal: true, reserved: false } });
+  const signIn = (next, c = ctx, t = tools) => { c.caps = next; t.capabilities(next); };
+  async function leaveReleasePending(id, c = ctx) {
+    el("operation").value = id; el("operation").input();
+    c.responses.push({ operation: op(id) }, { action: "cancel", operation: stillReserved(id) }, listed());
+    await el("cancel").click();
+    assert.equal(el("operation-message").textContent.split("\n")[0], `${RELEASE_PENDING} Select Cancel again to resend the same cancel and finish the release.`);
+    return plain(c.calls.at(-2).body);
+  }
+  async function checkShows(id, c = ctx) {
+    el("operation").value = id; el("operation").input();
+    c.responses.push({ operation: stillReserved(id) });
+    await el("check").click();
+    return el("operation-message").textContent;
+  }
+  async function resend(id, c = ctx) {
+    el("operation").value = id; el("operation").input();
+    c.responses.push({ operation: stillReserved(id) }, { action: "cancel", operation: nowReleased(id) }, listed());
+    await el("cancel").click();
+    assert.match(c.confirms.at(-1), /^Finish cancelling operation/);
+    assert.match(el("operation-message").textContent, /^Cancelled\./);
+    return plain(c.calls.at(-2).body);
+  }
+  const aliceF = keyOf(`user:${ALICE}`, F);
+  const aliceBody = await leaveReleasePending(F);
+  assert.ok(session.has(aliceF));
+  // Leaving the page (pagehide) keeps it for a reload.
+  tools.disconnect({ sessionEnded: false });
+  assert.ok(session.has(aliceF));
+  // Bob signs in to the same tab: Alice's cancel is neither offered nor sent, and it stays saved for her.
+  signIn(userCaps(BOB));
+  assert.equal(await checkShows(F), RELEASE_LOST);
+  assert.equal(el("cancel").disabled, true);
+  const bobSent = ctx.calls.length;
+  ctx.responses.push({ operation: stillReserved(F) });
+  await el("cancel").click();
+  assert.deepEqual(ctx.calls.slice(bobSent).map((call) => call.method), ["GET"]);
+  assert.equal(el("operation-message").textContent, RELEASE_LOST);
+  assert.ok(session.has(aliceF));
+  // Bob's own cancel is saved under Bob.
+  const bobG = keyOf(`user:${BOB}`, G);
+  await leaveReleasePending(G);
+  assert.ok(session.has(bobG));
+  // Bob's session ends (sign-out, or a rejected session): his cancel and every unknown record (an older page's key under no
+  // API address, with or without an owner, or a damaged key) are deleted; Alice's cancel, another API address's cancels
+  // and unrelated keys stay.
+  const legacy = `${STORE}${F}`, legacyOwned = `${STORE}user:${BOB}.${F}`, damaged = keyOf("user:nope", F), elsewhere = keyIn(PROXIED, `user:${BOB}`, G);
+  const legacyValue = JSON.stringify({ operation: F, path: `/v1/admin/tenant-deployment-operations/${F}/cancel`, body: aliceBody });
+  session.set(legacy, legacyValue); session.set(legacyOwned, legacyValue); session.set(damaged, "{}"); session.set(elsewhere, session.get(bobG));
+  session.set("vlite.other", "kept");
+  tools.disconnect({ sessionEnded: true });
+  assert.deepEqual([...session.keys()].sort(), [aliceF, elsewhere, "vlite.other"].sort());
+  session.delete(elsewhere);
+  // Any sign-in deletes unknown records as well, so an older page's unowned cancel is never used.
+  session.set(legacy, legacyValue);
+  // Alice signs in again (her session never ended): her saved cancel resends exactly and is then deleted.
+  signIn(userCaps(ALICE));
+  assert.equal(session.has(legacy), false);
+  assert.match(await checkShows(F), /Select Cancel to resend your earlier cancel exactly/);
+  assert.deepEqual(await resend(F), aliceBody);
+  assert.equal(session.has(aliceF), false);
+  // Signing out deletes her saved cancel: signed in again, she can no longer resend it.
+  const aliceH = keyOf(`user:${ALICE}`, H);
+  await leaveReleasePending(H);
+  assert.ok(session.has(aliceH));
+  tools.disconnect({ sessionEnded: true });
+  assert.equal(session.has(aliceH), false);
+  signIn(userCaps(ALICE));
+  assert.equal(await checkShows(H), RELEASE_LOST);
+  // Refresh session first clears the page (no options), then finds the session ended (401): that still deletes it.
+  const aliceJ = keyOf(`user:${ALICE}`, J);
+  await leaveReleasePending(J);
+  tools.disconnect();
+  assert.ok(session.has(aliceJ));
+  tools.disconnect({ sessionEnded: true });
+  assert.equal(session.has(aliceJ), false);
+  // The bootstrap admin token is one account for everyone who holds it. A page load with no password session deletes
+  // the accounts' cancels only; after a reload, signing in with the token again resends the token's cancel exactly.
+  signIn(tokenCaps);
+  const tokenK = keyOf("admin_token", K);
+  const tokenBody = await leaveReleasePending(K);
+  assert.ok(session.has(tokenK));
+  assert.equal(el("operation-message").textContent.split("\n").at(-1), deploymentCancelScope("admin_token", ROOT));
+  session.set(aliceF, session.get(tokenK));
+  const aliceElsewhere = keyIn(PROXIED, `user:${ALICE}`, F);
+  session.set(aliceElsewhere, session.get(tokenK));
+  tools.forgetAccountCancels();
+  assert.deepEqual([...session.keys()].sort(), [tokenK, aliceElsewhere, "vlite.other"].sort());
+  session.delete(aliceElsewhere);
+  tools.disconnect({ sessionEnded: false });
+  signIn(tokenCaps);
+  assert.deepEqual(await resend(K), tokenBody);
+  assert.equal(session.has(tokenK), false);
+  // A rejected token or a sign-out ends the token's session too, and deletes its cancels.
+  await leaveReleasePending(M);
+  assert.ok(session.has(keyOf("admin_token", M)));
+  tools.disconnect({ sessionEnded: true });
+  assert.equal(session.has(keyOf("admin_token", M)), false);
+  // A role without a verified account (fails closed): the cancel is kept only in the page's memory, never saved, and says so.
+  signIn({ role: "admin", features: {}, routes: [] });
+  assert.deepEqual(disabled(), []);
+  const keysBefore = [...session.keys()];
+  const memoryBody = await leaveReleasePending(N);
+  assert.deepEqual([...session.keys()], keysBefore);
+  assert.equal(el("operation-message").textContent.split("\n").at(-1), deploymentCancelScope(null, ROOT));
+  assert.deepEqual(await resend(N), memoryBody);
+  session.delete("vlite.other");
+  signIn(caps);
+
+  // Gating: reader, tenant-scoped and open-access sign-ins get every control disabled with the reason, and clicks send nothing.
+  for (const [locked, reason] of [
+    [{ role: "read_only", features: {}, routes: [] }, /requires a super admin/],
+    [{ role: "scoped", scope: { tenant: "t" }, features: {}, routes: [] }, /requires a super admin/],
+    [{ role: "admin", identity: { kind: "open", label: "Open access" }, features: {}, routes: [] }, /needs configured admin authentication/],
+  ]) {
+    ctx.caps = locked;
+    tools.capabilities(locked);
+    assert.deepEqual(disabled(), [...FIELDS, ...BUTTONS]);
+    assert.match(el("operation-help").textContent, reason);
+    const count = ctx.calls.length;
+    el("name").value = "acme"; el("writer-text").value = "{}"; el("init-text").value = "{}"; el("operation").value = A;
+    for (const id of BUTTONS) await el(id).click();
+    assert.equal(ctx.calls.length, count);
+    assert.match(el("create-message").textContent, reason);
+    assert.match(el("operation-message").textContent, reason);
+  }
+  assert.match(availability({ role: "read_only", features: {}, routes: [] }, true).tenantDeployments.reason, /HA gateway/);
+  // The HA gateway refuses the submission itself; that is explained, not retried.
+  ctx.caps = caps;
+  tools.capabilities(caps);
+  assert.deepEqual(disabled(), []);
+  assert.equal(el("operation-status").textContent, "No operation selected.");
+  el("readers-tenant").value = T; el("readers-mode").value = "absent";
+  ctx.responses.push(fail(403, "gateway_tenant_required"));
+  await el("readers").click();
+  assert.match(el("readers-message").textContent, /HA gateway does not serve admin routes/);
+  assert.doesNotMatch(el("readers-message").textContent, /same button again/);
+
+  // Sign-out clears every form, message, choice and the operation box, and drops pending keys.
+  el("name").value = "acme"; el("writer-file").files = [file("writer.json", [123, 125])]; el("writer-file").change();
+  el("init-text").value = "{}"; el("retire-reason").value = "r"; el("readers-mode").value = "absent"; el("readers-present").hidden = true;
+  el("readers-routing").value = "readers"; el("operation").value = A;
+  ctx.responses.push(fail(503, "operation_store_unavailable"));
+  await el("create").click();
+  const pendingKey = ctx.calls.at(-1).body.idempotency_key;
+  ctx.responses.push({ operation: op(A) });
+  await el("check").click();
+  tools.disconnect();
+  assert.deepEqual(FIELDS.filter((id) => !["readers-mode", "readers-routing"].includes(id) && el(id).value !== ""), []);
+  assert.deepEqual([el("readers-mode").value, el("readers-routing").value, el("readers-present").hidden, el("writer-file").files.length], ["present", "writer_only", false, 0]);
+  assert.deepEqual(["create-message", "readers-message", "retire-message", "operation-message", "writer-note"].map((id) => el(id).textContent), ["", "", "", "", ""]);
+  assert.deepEqual([el("operation-status").textContent, el("operation-facts").hidden], ["No operation selected.", true]);
+  assert.deepEqual(disabled(), [...FIELDS, ...BUTTONS]);
+  // After signing in again the same create is a new request.
+  tools.capabilities(caps);
+  el("name").value = "acme"; el("writer-file").files = [file("writer.json", [123, 125])]; el("init-text").value = "{}";
+  ctx.responses.push(fail(503, "operation_store_unavailable"));
+  await el("create").click();
+  assert.notEqual(ctx.calls.at(-1).body.idempotency_key, pendingKey);
+  // A late answer after sign-out is dropped.
+  ctx.responses.push(() => { tools.disconnect(); return { duplicate: false, operation: op(A) }; });
+  await el("create").click();
+  assert.equal(el("create-message").textContent, "");
+  assert.equal(el("operation-status").textContent, "No operation selected.");
+
+  // ---- One site, two API addresses ----
+  // sessionStorage belongs to the site (scheme, host and port) and the tab, not to one dashboard: the Docker image sends
+  // its requests under /api, and one site can serve dashboards for two servers under two paths. A saved cancel is read,
+  // resent and deleted only by a page that sends its requests to the same API address.
+  for (const key of [...session.keys()]) if (key.startsWith(STORE)) session.delete(key);
+  const cancelKeys = () => [...session.keys()].filter((key) => key.startsWith(STORE)).sort();
+  // A page load: the same markup, a new page with its own apiBase, and nothing known about who is signed in yet.
+  const page = (apiBase) => { reset(); timers.length = 0; const c = fakeCtx(); c.apiBase = apiBase; return { c, t: init(c) }; };
+  const SHARED = "5".repeat(32), LATER = "2".repeat(32), TOKEN_OP = "c5".repeat(16), ALICE_OP = "d4".repeat(16);
+  const rootKey = (who, id) => keyIn(ROOT, who, id), proxiedKey = (who, id) => keyIn(PROXIED, who, id);
+  const aliceRoot = rootKey(`user:${ALICE}`, SHARED), aliceProxied = proxiedKey(`user:${ALICE}`, SHARED);
+  // Dashboard A sends its requests to the site root. Alice leaves SHARED release-pending there; then the tab moves on.
+  const A1 = page("");
+  signIn(userCaps(ALICE), A1.c, A1.t);
+  const rootBody = await leaveReleasePending(SHARED, A1.c);
+  assert.deepEqual(cancelKeys(), [aliceRoot]);
+  assert.equal(JSON.parse(session.get(aliceRoot)).scope, ROOT);
+  assert.equal(el("operation-message").textContent.split("\n").at(-1), deploymentCancelScope(`user:${ALICE}`, ROOT));
+  const rootSaved = session.get(aliceRoot);
+  A1.t.disconnect({ sessionEnded: false });
+  // Dashboard B, on the same site and in the same tab, sends its requests under /vlite-b/api. The same account checking
+  // the same operation ID is not offered A's cancel, and Cancel sends only the status read.
+  const B1 = page("/vlite-b/api");
+  signIn(userCaps(ALICE), B1.c, B1.t);
+  assert.equal(await checkShows(SHARED, B1.c), RELEASE_LOST);
+  assert.equal(el("cancel").disabled, true);
+  const bSent = B1.c.calls.length;
+  B1.c.responses.push({ operation: stillReserved(SHARED) });
+  await el("cancel").click();
+  assert.deepEqual(B1.c.calls.slice(bSent).map((call) => call.method), ["GET"]);
+  assert.equal(el("operation-message").textContent, RELEASE_LOST);
+  // B's own cancel for the same operation ID and account is filed under B's address; A's saved copy is untouched.
+  const proxiedBody = await leaveReleasePending(SHARED, B1.c);
+  assert.notEqual(proxiedBody.idempotency_key, rootBody.idempotency_key);
+  assert.deepEqual(cancelKeys(), [aliceRoot, aliceProxied].sort());
+  assert.equal(JSON.parse(session.get(aliceProxied)).scope, PROXIED);
+  assert.equal(el("operation-message").textContent.split("\n").at(-1), deploymentCancelScope(`user:${ALICE}`, PROXIED));
+  assert.equal(session.get(aliceRoot), rootSaved);
+  // Every key names the address in encoded form and nothing else: no query, fragment or user information.
+  for (const key of cancelKeys()) assert.match(key, /^vlite\.tenant-deployment\.cancel\.http%3A%2F%2Fdash\.test(%2Fvlite-b%2Fapi)?\/user:[0-9a-f]{32}\.[0-9a-f]{32}$/);
+  // Reloading B: the same account resends B's own cancel exactly, and only B's copy is deleted.
+  B1.t.disconnect({ sessionEnded: false });
+  const B2 = page("/vlite-b/api");
+  signIn(userCaps(ALICE), B2.c, B2.t);
+  assert.match(await checkShows(SHARED, B2.c), /Select Cancel to resend your earlier cancel exactly/);
+  assert.deepEqual(await resend(SHARED, B2.c), proxiedBody);
+  assert.deepEqual(cancelKeys(), [aliceRoot]);
+  // Nothing B does deletes A's records, whatever their owner: B's sign-in, its account purge, its sign-out and a token
+  // rejected on B leave A's saved cancels (and A's damaged key) alone, and B's own go. A key from an older page, filed
+  // under no address, cannot be attributed and is deleted by any dashboard.
+  const rootToken = rootKey("admin_token", LATER), rootDamaged = rootKey("user:nope", LATER), oldFormat = `${STORE}admin_token.${LATER}`;
+  for (const key of [rootToken, rootDamaged, oldFormat]) session.set(key, rootSaved);
+  signIn(userCaps(ALICE), B2.c, B2.t);
+  assert.deepEqual(cancelKeys(), [aliceRoot, rootDamaged, rootToken].sort());
+  await leaveReleasePending(LATER, B2.c);
+  assert.ok(session.has(proxiedKey(`user:${ALICE}`, LATER)));
+  B2.t.forgetAccountCancels();
+  assert.deepEqual(cancelKeys(), [aliceRoot, rootDamaged, rootToken].sort());
+  const proxiedToken = proxiedKey("admin_token", LATER), proxiedDamaged = proxiedKey("user:nope", LATER);
+  session.set(proxiedToken, rootSaved); session.set(proxiedDamaged, rootSaved);
+  B2.t.disconnect({ sessionEnded: true });
+  assert.deepEqual(cancelKeys(), [aliceRoot, proxiedToken, rootDamaged, rootToken].sort());
+  const B3 = page("/vlite-b/api");
+  B3.t.disconnect();
+  B3.t.disconnect({ sessionEnded: true, rejectedToken: true });
+  assert.deepEqual(cancelKeys(), [aliceRoot, rootDamaged, rootToken].sort());
+  // Reloading A: Alice resends A's cancel exactly; the damaged key under A's address is deleted at sign-in.
+  const A2 = page("");
+  signIn(userCaps(ALICE), A2.c, A2.t);
+  assert.deepEqual(cancelKeys(), [aliceRoot, rootToken].sort());
+  assert.match(await checkShows(SHARED, A2.c), /Select Cancel to resend your earlier cancel exactly/);
+  assert.deepEqual(await resend(SHARED, A2.c), rootBody);
+  assert.deepEqual(cancelKeys(), [rootToken]);
+  session.delete(rootToken);
+
+  // ---- A token rejected before the page knew who was signed in ----
+  // Alice and the bootstrap admin token each leave a cancel release-pending on A, and the tab reloads.
+  const aliceOp = rootKey(`user:${ALICE}`, ALICE_OP), tokenOp = rootKey("admin_token", TOKEN_OP);
+  const aliceOpBody = await leaveReleasePending(ALICE_OP, A2.c);
+  A2.t.disconnect({ sessionEnded: false });
+  const A3 = page("");
+  signIn(tokenCaps, A3.c, A3.t);
+  await leaveReleasePending(TOKEN_OP, A3.c);
+  A3.t.disconnect({ sessionEnded: false });
+  assert.deepEqual(cancelKeys(), [aliceOp, tokenOp].sort());
+  const elsewhereToken = proxiedKey("admin_token", TOKEN_OP), unknownRoot = rootKey("user:nope", TOKEN_OP), oldToken = `${STORE}admin_token.${TOKEN_OP}`;
+  for (const key of [elsewhereToken, unknownRoot, oldToken]) session.set(key, session.get(tokenOp));
+  // A fresh page: connect first clears the page (no options), then the typed token is refused (401) before
+  // capabilities() ever ran. The token's cancels on this address go, with every unattributable key; Alice's cancel
+  // (her password session was not what was refused) and the other address's records stay.
+  const A4 = page("");
+  A4.t.disconnect();
+  assert.deepEqual(cancelKeys(), [aliceOp, elsewhereToken, oldToken, tokenOp, unknownRoot].sort());
+  A4.t.disconnect({ sessionEnded: true, rejectedToken: true });
+  assert.deepEqual(cancelKeys(), [aliceOp, elsewhereToken].sort());
+  // Signed in with the right token, nothing is offered: the release is reported lost, and Cancel only reads the status.
+  signIn(tokenCaps, A4.c, A4.t);
+  assert.equal(await checkShows(TOKEN_OP, A4.c), RELEASE_LOST);
+  const tokenSent = A4.c.calls.length;
+  A4.c.responses.push({ operation: stillReserved(TOKEN_OP) });
+  await el("cancel").click();
+  assert.deepEqual(A4.c.calls.slice(tokenSent).map((call) => call.method), ["GET"]);
+  // Alice, whose session never ended, still resends hers exactly after signing in again.
+  signIn(userCaps(ALICE), A4.c, A4.t);
+  assert.deepEqual(await resend(ALICE_OP, A4.c), aliceOpBody);
+  assert.deepEqual(cancelKeys(), [elsewhereToken]);
+  // A sign-out on a fresh page that never learned who was signed in deletes every unattributable key on this
+  // address and the older pages' keys, but no account's cancel (it cannot tell whose session that sign-out ended).
+  session.set(tokenOp, session.get(elsewhereToken)); session.set(aliceOp, session.get(elsewhereToken));
+  session.set(unknownRoot, "{}"); session.set(oldToken, "{}"); session.set(`${STORE}${TOKEN_OP}`, "{}");
+  const A5 = page("");
+  A5.t.disconnect({ sessionEnded: true });
+  assert.deepEqual(cancelKeys(), [aliceOp, elsewhereToken, tokenOp].sort());
+  // The rejected-token purge needs exactly true; anything else is an ordinary session end.
+  for (const notTrue of [false, "yes", 1]) {
+    page("").t.disconnect({ sessionEnded: true, rejectedToken: notTrue });
+    assert.ok(session.has(tokenOp), String(notTrue));
+  }
+  // Leaving the page keeps everything, even if a rejection is claimed.
+  page("").t.disconnect({ sessionEnded: false, rejectedToken: true });
+  assert.ok(session.has(tokenOp));
+  for (const key of cancelKeys()) session.delete(key);
+
+  // ---- An API address the page cannot establish ----
+  // If apiBase holds user information, a query or a fragment (or does not resolve), nothing is saved, read or deleted
+  // under any address; the cancel lives only in the page's memory and the page says so.
+  for (const base of ["https://user:pw@api.test/v", "/vlite-b/api?key=secret"]) {
+    const kept = [rootKey(`user:${ALICE}`, ALICE_OP), proxiedKey(`user:${ALICE}`, ALICE_OP)];
+    for (const key of kept) session.set(key, rootSaved);
+    const U = page(base);
+    signIn(userCaps(ALICE), U.c, U.t);
+    const memoryBody = await leaveReleasePending(ALICE_OP, U.c);
+    assert.deepEqual(cancelKeys(), kept.sort(), base);
+    assert.equal(el("operation-message").textContent.split("\n").at(-1), deploymentCancelScope(`user:${ALICE}`, null));
+    assert.deepEqual(await resend(ALICE_OP, U.c), memoryBody);
+    U.t.forgetAccountCancels();
+    U.t.disconnect({ sessionEnded: true, rejectedToken: true });
+    assert.deepEqual(cancelKeys(), kept.sort(), base);
+    for (const key of kept) session.delete(key);
+  }
 }

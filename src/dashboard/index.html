@@ -746,7 +746,7 @@
   </section>
   <section id="admin-tenant-deployments" class="wide">
     <h2>Tenant deployments</h2>
-    <p>Shows recorded tenant deployment requests (create, reader replicas, move, retire) and where each one stands. This view only reads: it changes nothing.</p>
+    <p>Record a request to create a tenant, change its reader replicas or retire it, and see where each request stands. Recording is all that happens today: nothing is deployed, routed, started or stopped in Azure, because cloud execution is not available yet (OD-002). Every request asks you to confirm first.</p>
     <p>Off unless the server starts with <code>--tenant-deployments-file</code>. Needs a super admin signed in to the server directly; the HA gateway refuses admin routes.</p>
     <p id="tenant-deployment-status" class="compaction-status" role="status" aria-live="polite" data-tone="idle">Tenant deployment operations not loaded.</p>
     <ol id="tenant-deployment-list" hidden></ol>
@@ -756,6 +756,69 @@
     </div>
     <p id="tenant-deployment-help" class="field-help">Sign in to use this.</p>
     <pre id="tenant-deployment-result" aria-live="polite"></pre>
+    <fieldset class="compaction-schedule td-form">
+      <legend>Check or cancel an operation</legend>
+      <label>Operation ID (32 letters and digits: select <strong>Use this operation</strong> in the list above, or copy it from a result below)<input id="tenant-deployment-operation" data-admin maxlength="32" spellcheck="false" autocomplete="off" aria-describedby="tenant-deployment-operation-help"></label>
+      <p id="tenant-deployment-operation-status" class="compaction-status" role="status" aria-live="polite">No operation selected.</p>
+      <dl id="tenant-deployment-operation-facts" class="compaction-facts" hidden></dl>
+      <div class="compaction-actions">
+        <button id="tenant-deployment-check" data-admin type="button" class="secondary" aria-describedby="tenant-deployment-operation-help">Check status</button>
+        <button id="tenant-deployment-cancel" data-admin type="button" class="danger" aria-describedby="tenant-deployment-operation-help">Cancel operation</button>
+      </div>
+      <p id="tenant-deployment-operation-help" class="field-help">Sign in to use this.</p>
+      <p id="tenant-deployment-operation-message" class="td-message" role="status" aria-live="polite"></p>
+    </fieldset>
+    <fieldset class="compaction-schedule td-form">
+      <legend>Create a tenant</legend>
+      <p class="field-help">Adds the tenant on this server now, under a new random ID and with no route, and records a request to deploy it. Each Create request adds another tenant record right away; it counts toward the server's tenant limit and stays even if the request is later cancelled. You need two files from whoever plans the deployment: the writer profile and the initialization settings. Their format is not final yet (OD-006); the server stores them exactly as given and does not check them now.</p>
+      <div class="compaction-grid">
+        <label>Tenant name (required, up to 64 characters; accented letters and emoji count as more than one; names need not be unique)<input id="tenant-deployment-name" data-admin maxlength="64" autocomplete="off"></label>
+        <label>Vector limit (a whole number above 0; leave blank for no limit)<input id="tenant-deployment-max-vectors" data-admin inputmode="numeric" placeholder="No limit" autocomplete="off"></label>
+        <label>Writer profile file (JSON that describes the Azure container apps for this tenant; it must not contain secrets)<input id="tenant-deployment-writer-file" data-admin type="file" accept=".json,application/json,text/plain"></label>
+        <label>…or paste the writer profile<textarea id="tenant-deployment-writer-text" data-admin rows="3" spellcheck="false"></textarea></label>
+        <p id="tenant-deployment-writer-note" class="field-help" aria-live="polite"></p>
+        <label>Initialization settings file (how the new tenant's database starts)<input id="tenant-deployment-init-file" data-admin type="file" accept=".json,application/json,text/plain"></label>
+        <label>…or paste the initialization settings<textarea id="tenant-deployment-init-text" data-admin rows="3" spellcheck="false"></textarea></label>
+        <p id="tenant-deployment-init-note" class="field-help" aria-live="polite"></p>
+        <label>Azure resource IDs this tenant will use (optional, one per line, for example <code>/subscriptions/…/resourceGroups/…/providers/Microsoft.App/containerApps/…</code>)<textarea id="tenant-deployment-resources" data-admin rows="2" spellcheck="false"></textarea></label>
+        <label>Secret versions (optional, one per line as name@version, for example <code>archive-sas@3</code>; a reference only, never the secret itself)<textarea id="tenant-deployment-secrets" data-admin rows="2" spellcheck="false"></textarea></label>
+      </div>
+      <p class="field-help">Choosing a file sends its exact bytes, so its SHA-256 matches <code>sha256sum</code> or <code>Get-FileHash</code>. Pasted text is sent with plain line breaks (LF). The confirmation shows each SHA-256 before anything is sent.</p>
+      <button id="tenant-deployment-create" data-admin type="button">Record create request</button>
+      <p id="tenant-deployment-create-message" class="td-message" role="status" aria-live="polite"></p>
+    </fieldset>
+    <fieldset class="compaction-schedule td-form">
+      <legend>Change reader replicas</legend>
+      <p class="field-help">Reader replicas are read-only copies of a tenant that can take search traffic off its writer. They are not available yet (ITEM-008): the request is recorded but will not start any replica.</p>
+      <div class="compaction-grid">
+        <label>Tenant ID (32 letters and digits: <strong>Use this operation</strong> on the tenant's create request fills it in)<input id="tenant-deployment-readers-tenant" data-admin maxlength="32" spellcheck="false" autocomplete="off"></label>
+        <label>Reader replicas<select id="tenant-deployment-readers-mode" data-admin><option value="present">Run reader replicas</option><option value="absent">No reader replicas (remove them all)</option></select></label>
+      </div>
+      <div id="tenant-deployment-readers-present" class="compaction-grid">
+        <label>Fewest readers (0 or more)<input id="tenant-deployment-readers-min" data-admin inputmode="numeric" autocomplete="off"></label>
+        <label>Most readers (1 or more, at least the fewest)<input id="tenant-deployment-readers-max" data-admin inputmode="numeric" autocomplete="off"></label>
+        <label>Where searches go<select id="tenant-deployment-readers-routing" data-admin><option value="writer_only">Writer only (recommended; readers stand by)</option><option value="readers">Readers (recorded only; not acted on yet)</option></select></label>
+        <label>Reader profile file (describes the reader apps)<input id="tenant-deployment-reader-file" data-admin type="file" accept=".json,application/json,text/plain"></label>
+        <label>…or paste the reader profile<textarea id="tenant-deployment-reader-text" data-admin rows="3" spellcheck="false"></textarea></label>
+        <p id="tenant-deployment-reader-note" class="field-help" aria-live="polite"></p>
+        <label>Scaling rule file (when to add or remove readers)<input id="tenant-deployment-scaling-file" data-admin type="file" accept=".json,application/json,text/plain"></label>
+        <label>…or paste the scaling rule<textarea id="tenant-deployment-scaling-text" data-admin rows="3" spellcheck="false"></textarea></label>
+        <p id="tenant-deployment-scaling-note" class="field-help" aria-live="polite"></p>
+      </div>
+      <button id="tenant-deployment-readers" data-admin type="button">Record reader request</button>
+      <p id="tenant-deployment-readers-message" class="td-message" role="status" aria-live="polite"></p>
+    </fieldset>
+    <fieldset class="compaction-schedule td-form">
+      <legend>Retire a tenant</legend>
+      <p class="field-help">When it runs, retiring removes the tenant's route and stops its apps. No data is deleted. It needs the receipt of the tenant's latest finished operation: select <strong>Use this operation</strong> on it, or check its status and copy "Receipt". No operation can finish until cloud execution exists, so there is no receipt to use yet.</p>
+      <div class="compaction-grid">
+        <label>Tenant ID (32 letters and digits)<input id="tenant-deployment-retire-tenant" data-admin maxlength="32" spellcheck="false" autocomplete="off"></label>
+        <label>Receipt (64 letters and digits)<input id="tenant-deployment-retire-receipt" data-admin maxlength="64" spellcheck="false" autocomplete="off"></label>
+        <label>Reason (required, up to 512 characters; stored with the request)<input id="tenant-deployment-retire-reason" data-admin maxlength="512" autocomplete="off"></label>
+      </div>
+      <button id="tenant-deployment-retire" data-admin type="button" class="danger">Record retirement request</button>
+      <p id="tenant-deployment-retire-message" class="td-message" role="status" aria-live="polite"></p>
+    </fieldset>
   </section>
   <section id="admin-token-management" class="wide">
     <h2>Admin tokens and recent activity</h2>

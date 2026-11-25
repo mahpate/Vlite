@@ -787,12 +787,88 @@ Operation records live under `<prefix>tenant-operations/` beside the
 control-state object. Routes, bodies and errors are listed in the
 [API reference](API.md#managed-tenant-deployments-intent-only-opt-in-off-by-default).
 
-**Dashboard (read only).** A super administrator signed in to the server
-directly can list the operations and their phases under **Administration →
-Users & access → Tenant deployments**, 20 at a time. The panel submits
-nothing. It stays locked with open development access (no admin token) and
-through the HA gateway, which refuses admin routes. Use the CLI or REST
-routes above to submit or cancel.
+**Dashboard.** A super administrator signed in to the server directly can
+list the operations and their phases under **Administration → Users &
+access → Tenant deployments**, 20 at a time. The same panel can also
+submit `create`, `readers` and `retire` intents, check an operation's status
+and `cancel` it. Like the routes above, it only records the request. Cloud
+execution stays switched off (OD-002), so nothing is deployed, routed,
+started or stopped in Azure, and reader fleets stay blocked until ITEM-008. Every
+submission asks for confirmation first, and each field explains where its
+value comes from:
+
+- Profiles are chosen as files or pasted. The browser computes their
+  SHA-256 digests and sends the exact text in `contents`. The request
+  inspector shows only counts and profile digests for the submission body,
+  not the documents, Azure resource names or secret-version references.
+  If authentication ends, the dashboard clears the inspector.
+- **Use this operation** in the list fills in the operation, the tenant and,
+  when one exists, the retirement receipt.
+- Cancel always reads the latest status first and sends the tokens it just
+  read. A stale token is explained, and **Check status** reads it again.
+- A cancel seals the operation before it releases the reservation. If the
+  release fails, status shows `cancelled` with `observed.reserved` still
+  true. Only an exact resend of that cancel (same account, same key)
+  finishes the release; a new key is refused (`operation_terminal`). So the
+  panel saves each cancel it sends in this browser tab's `sessionStorage`,
+  filed under the API address the dashboard sends its requests to, then the
+  account the server verified at sign-in: a user account by its ID, or the
+  bootstrap admin token (everyone using that token counts as one account). A
+  role alone never counts as an account. The record holds the operation ID,
+  the request key and the values it quoted, never a password or token. It is
+  plain text, though, so anyone using the tab can read it until it is
+  deleted.
+  - **Same account after a reload:** **Cancel** resends it exactly. A password
+    session that has not ended resumes by itself; a bootstrap token user
+    types the token again.
+  - **Another account in the same tab** cannot resend it. The panel says this
+    tab has no saved cancel for the account signed in now. The first
+    account's record stays until that account signs out or its session ends.
+  - **Another dashboard on the same site** cannot resend or delete it.
+    `sessionStorage` is shared by every page of a site in a tab, and one site
+    can serve dashboards for different servers. For example, the Docker image
+    reaches its API at `/api`, and another dashboard could use a different
+    path. So records are filed by the exact API address the requests go to:
+    scheme, host, port and path. The address never includes credentials, a
+    query or a fragment. If the dashboard cannot work out that address (or
+    the address includes any of those), the cancel is not saved.
+  - **Deleted** when its account signs out, and when its session is seen to
+    end: a 401 (expired or revoked session, rejected token), a typed token
+    replacing this browser's password session, or a page load that finds no
+    password session (user accounts only). A typed token refused with a 401
+    (even one without a JSON body) also deletes the bootstrap admin token's
+    records for this API address, even if the dashboard had not yet learned
+    who signed in. Closing the tab deletes it too. On every sign-in and
+    sign-out, including one where the dashboard does not know who was signed
+    in, the panel deletes and never uses records it cannot attribute to an
+    account, such as ones saved by an older version of the page, or damaged
+    ones.
+  - **No verified account or no API address:** the cancel is not saved; it is
+    kept only while the operation stays selected on the page.
+  - If the saved cancel is gone (another tab or browser, a sign-out or an
+    ended session), the panel says to report the operation ID to the server
+    operator.
+- Each **Create** adds a tenant record at once. The record counts toward the
+  tenant limit and stays even if the request is later cancelled.
+
+Network errors, 408, 429, 5xx, or any code not on the settled list keep the
+key: selecting the same button again resends the unchanged request with the
+same key, so it is recorded only once. A success answer that does not name
+the requested operation or tenant is also treated as unknown. Settled codes
+discard the key. Some of them (for example `tenant_id_conflict`) can follow a
+recorded request, because a resend repeats the same refusal; their
+explanation says the request may stay recorded and to check **Load
+operations**. `invalid_input` also keeps the key, because the request may be
+recorded before the server refuses to add its tenant record. Resending at
+once fails the same way, so the explanation says to fix the cause first and
+then select the same button without changing the form. For `tenant capacity
+reached`, the server already holds 1,024 tenant records, deleted tenants
+included: report it to the server operator. Editing the form starts a new
+request. The panel
+stays locked with open development access (no admin token), for reader and
+tenant-scoped sign-ins, and through the HA gateway, which refuses admin
+routes. `resume` is available only through the CLI or REST; migration and
+the other actions stay excluded (below).
 
 **Create.** Submit `{"idempotency_key", "request": {"kind": "create", ...},
 "contents": [...]}`. `contents` holds the exact text of every profile it

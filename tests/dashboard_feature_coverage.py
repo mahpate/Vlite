@@ -202,7 +202,8 @@ ADMIN_SPECIAL = {
     "list-backups", "cred-list", "cred-table", "backup-verify", "backup-drill",
     "tenant-save-settings", "tenant-suspend", "tenant-resume", "replication-export",
     "obs-refresh", "webhook-list", "tenant-list", "compaction-refresh", "compaction-cancel", "cloud-backup-unpin",
-    "tenant-deployment-refresh",
+    "tenant-deployment-refresh", "tenant-deployment-create", "tenant-deployment-readers", "tenant-deployment-retire",
+    "tenant-deployment-check", "tenant-deployment-cancel",
 }
 ADMIN_DYNAMIC = {
     "/v1/admin/tenants/{id}": '`/v1/admin/tenants/${value}`',
@@ -289,6 +290,40 @@ chain("GET", "/v1/admin/tenant-deployment-operations", "tenant-deployment-refres
     ("async function tdLoad(mark, after)", 'ctx.api("GET", deploymentListPath(after)'),
     ("function deploymentListPath(after = null, limit = DEPLOY_PAGE)", 'return `${DEPLOY_OPERATIONS}?limit=${limit}${after === null ? "" : `&after=${after}`}`'),
     ("const DEPLOY_OPERATIONS =", '"/v1/admin/tenant-deployment-operations"'),
+), "admin-tools.js")
+# Create, readers and retire build a submission, confirm it and post it through tdSubmit with its idempotency key.
+SUBMIT = ("async function tdSubmit(mark, form, build)",
+          'ctx.api("POST", submission.path, { idempotency_key: key, request, contents }, { data: false, inspectorSummary }')
+chain("POST", "/v1/admin/tenant-deployments", "tenant-deployment-create", (
+    ('on(TD("create"),', 'tdSubmit(mark, "tdCreate", async () => deploymentCreateSubmission('),
+    SUBMIT,
+    ("function deploymentCreateSubmission(form)", "path: DEPLOY_SUBMIT, request,"),
+    ("const DEPLOY_SUBMIT =", '"/v1/admin/tenant-deployments"'),
+), "admin-tools.js")
+chain("POST", "/v1/admin/tenant-deployments/{tenant}/readers", "tenant-deployment-readers", (
+    ('on(TD("readers"),', 'tdSubmit(mark, "tdReaders",'),
+    ('on(TD("readers"),', "return deploymentReadersSubmission("),
+    SUBMIT,
+    ("function deploymentReadersSubmission(form)", "const path = `/v1/admin/tenant-deployments/${tenant}/readers`"),
+), "admin-tools.js")
+chain("POST", "/v1/admin/tenant-deployments/{tenant}/retire", "tenant-deployment-retire", (
+    ('on(TD("retire"),', 'tdSubmit(mark, "tdRetire", async () => deploymentRetireSubmission('),
+    SUBMIT,
+    ("function deploymentRetireSubmission(form)", "path: `/v1/admin/tenant-deployments/${tenant}/retire`"),
+), "admin-tools.js")
+# Check status reads one operation; Cancel reads it again for fresh tokens before posting the cancel action.
+READ_OPERATION = ("async function tdRead(mark, id)", 'ctx.api("GET", `/v1/admin/tenant-deployment-operations/${id}`')
+chain("GET", "/v1/admin/tenant-deployment-operations/{operation}", "tenant-deployment-check", (
+    ('on(TD("check"),', "const op = await tdRead(mark, id)"),
+    READ_OPERATION,
+), "admin-tools.js")
+chain("POST", "/v1/admin/tenant-deployment-operations/{operation}/{action}", "tenant-deployment-cancel", (
+    ('on(TD("cancel"),', "const op = await tdRead(mark, id)"),
+    READ_OPERATION,
+    ('on(TD("cancel"),', "deploymentCancelRequest(op, idempotencyKey())"),
+    ('on(TD("cancel"),', 'ctx.api("POST", pending.path, pending.body'),
+    ("function deploymentCancelRequest(op, key)", "path: `/v1/admin/tenant-deployment-operations/${op.operation_id}/cancel`"),
+    ("function deploymentCancelRequest(op, key)", "expected_operation_generation: op.operation_generation"),
 ), "admin-tools.js")
 
 # Collection management, resumable import and index lifecycle.
@@ -544,6 +579,8 @@ def checker_regressions(sources, scripts, html):
          'deleting ? "DELETE" : "PUT"', 'deleting ? "PUT" : "DELETE"'),
         ("rest:POST " + GRAPH + "/nodes/get",
          '"get-node": { path: "nodes/get"', '"get-node": { path: "edges/get"'),
+        ("rest:POST /v1/admin/tenant-deployment-operations/{operation}/{action}",
+         "${op.operation_id}/cancel`", "${op.operation_id}/resume`"),
     ):
         script = INVENTORY[key].script
         assert sources[script].count(before) == 1, f"Update mutation fixture: {before}"

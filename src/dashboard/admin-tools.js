@@ -715,7 +715,8 @@
     return { enabled: true, acknowledge_unqualified: true, ...(revision ? { expected_revision: revision } : {}) };
   }
 
-  // ---- Tenant deployments (Administration > Users): read-only list of recorded operations (EPIC-011) ----
+  // ---- Tenant deployments (Administration > Users): recorded operations, plus create, readers, retire and cancel (EPIC-011) ----
+  // Nothing here deploys anything: the server only records intents while cloud execution is blocked (OD-002).
   const DEPLOY_OPERATIONS = "/v1/admin/tenant-deployment-operations";
   const DEPLOY_PAGE = 20;
   const DEPLOY_KINDS = { create: "Create tenant", set_readers: "Change reader replicas", migrate: "Move tenant", retire: "Retire tenant" };
@@ -732,19 +733,67 @@
   // Refusals that mean "not available here", not a failure: shown as the panel status.
   const DEPLOY_BLOCKED = {
     tenant_deployments_not_configured: "Tenant deployments are off on this server. They need the server started with --tenant-deployments-file. Nothing is wrong with your sign-in.",
-    read_only: "Read-only credentials cannot view tenant deployments. Sign in as a super admin.",
+    read_only: "Read-only credentials cannot use tenant deployments. Sign in as a super admin.",
     forbidden_scope: "This credential cannot use admin routes. Sign in as a super admin.",
-    gateway_tenant_required: "The HA gateway does not serve admin routes. Sign in to the server directly to view tenant deployments.",
+    gateway_tenant_required: "The HA gateway does not serve admin routes. Sign in to the server directly to use tenant deployments.",
     not_found: "This server does not offer tenant deployments (an older version, or the HA gateway). Sign in to an up-to-date server directly.",
   };
+  // One plain explanation per refusal code the tenant deployment routes can answer (kept in sync with the server by tests).
   const DEPLOY_HINTS = {
     ...DEPLOY_BLOCKED,
     admin_auth_required: "Sign in with a super-admin account or the bootstrap admin token.",
+    admin_dir_busy: "Another process (the server or a CLI command) holds this admin directory. Use either the server or the CLI, not both at once.",
+    tenants_disabled: "Create needs tenants switched on: the server must run with admin token authentication and an admin directory (VLITE_ADMIN_DIR). Nothing was recorded.",
     invalid_query: "The page request was not accepted. Select Load operations to start again from the first page.",
-    operation_store_unavailable: "The operation store could not be read. Nothing changed; try again shortly.",
-    operation_indeterminate: "The operation store did not give a definite answer. Nothing changed; try again shortly.",
+    invalid_json: "The server could not read the request, so nothing was recorded. Reload the page and try again.",
+    invalid_input: "The server may already have recorded the request, but it could not add the tenant record; the first line says why (for example, the tenant limit is reached). Resending the same request fails the same way until that is fixed.",
+    internal_error: "The server hit an internal error. Select Load operations to see whether anything was recorded, and check the server log.",
+    operation_store_unavailable: "The operation store could not be read or written right now. Try again shortly.",
+    operation_indeterminate: "The operation store did not give a definite answer. Try again shortly.",
     operation_state_invalid: "A stored operation record is damaged. Nothing changed; check the server log.",
+    operation_input_unavailable: "A profile file stored with this operation is missing or damaged. Do not edit operation records by hand; check the server log.",
+    operation_not_found: "No operation with this ID is recorded on this server. Copy the ID from the list (Use this operation) and try again.",
+    tenant_deployment_action_unknown: "This server does not offer that operation action. Nothing was recorded.",
+    operation_request_invalid: "The server refused a field (the first line says which). Nothing was recorded. Fix the form and submit again.",
+    operation_request_conflict: "This request key was already used for a different request, so nothing new was recorded. Submit again: the dashboard then uses a new key.",
+    action_request_conflict: "This cancel's request key was already used with different details, so nothing was recorded. Select Check status, then Cancel again.",
+    operation_generation_stale: "The operation changed after its status was read, so nothing was recorded. Select Check status to read it again, then Cancel again if you still want to.",
+    tenant_id_conflict: "A different or deleted tenant already has the ID this request chose, so no tenant was added. The request itself stays recorded (Load operations lists it) but reserves nothing and does nothing. Select Create again: the dashboard then sends a new request, which picks a new ID.",
+    tenants_commit_indeterminate: "The tenant record was written, but the server could not confirm it is safely stored. Select Load operations and refresh the Tenants list to see whether it is there, then select the same button again: it repeats the same request key, so the tenant is added at most once.",
+    lifecycle_conflict: "Another change to this tenant happened at the same moment. Try again shortly.",
+    pin_scope_unproven: "Reader replicas are not available yet (ITEM-008), so this cannot run. The recorded request stays as it is; Cancel withdraws it.",
+    retirement_required: "This tenant is already active, so Cancel cannot undo it. Use Retire tenant instead (it keeps all data).",
+    operation_terminal: "This operation has already finished or was withdrawn, so it cannot change any more. Nothing changed; select Check status to see how it ended.",
+    operation_cancelled: "Cancellation was already requested for this operation, so it will not go ahead.",
+    operation_not_terminal: "The operation has not finished yet. Check its status and wait, or cancel it.",
+    operation_terminal_conflict: "The operation's stored outcome does not match the tenant's lifecycle. Nothing changed; check the server log.",
+    operation_not_provisionable: "This operation does not hold a reservation of an unrouted tenant, so it cannot run. Nothing changed.",
+    operation_journal_conflict: "The operation's step record changed at the same moment. Check its status, then try again.",
+    operation_step_conflict: "The operation's recorded step does not match. Check its status, then try again.",
+    prior_action_unknown: "An earlier step's outcome is not known yet. Nothing new runs until it is settled; check the server log.",
+    cleanup_pending: "An earlier step still needs cleaning up before the operation can end. Do not edit records by hand; check the server log.",
+    readers_in_progress: "A reader change for this tenant already started and must be finished first. The cancel may stay recorded on the server, but it changed nothing.",
+    retirement_in_progress: "The retirement of this tenant already started and must be finished first. The cancel may stay recorded on the server, but it changed nothing.",
+    withdrawal_capacity: "The server already keeps the maximum number of withdrawn requests (1,024), so it cannot withdraw this one. The cancel may stay recorded on the server, but it changed nothing.",
+    transition_unavailable: "That change is not possible for this operation now. For example, a create that has not reserved its tenant yet cannot be cancelled. Nothing was recorded.",
+    irreversible_ack_required: "This action is irreversible and needs an explicit acknowledgement. The dashboard does not offer it; nothing was recorded.",
+    lifecycle_anchor_changed: "The tenant's lifecycle changed after this operation was planned. Nothing changed; check its status.",
+    lifecycle_not_reserved: "The operation does not hold this tenant's reservation. Nothing changed; check its status.",
+    lifecycle_reserved: "Another operation holds this tenant right now. Wait for it to finish or cancel it, then try again.",
+    lifecycle_transition_unavailable: "The tenant's current routing does not allow this change. Nothing changed.",
+    retirement_receipt_mismatch: "The receipt does not match the tenant's current route. Copy the receipt from the tenant's latest finished operation (Check status shows it), then submit a new retirement.",
+    control_state_missing: "The control-state object named in --tenant-deployments-file does not exist yet. Initialize it first (see the HA guide).",
+    control_state_unavailable: "The control-state store could not be reached. Try again shortly.",
+    control_state_indeterminate: "The control-state store did not give a definite answer. Try again shortly.",
+    control_state_conflict: "The control state changed at the same moment. Try again shortly.",
+    control_state_invalid: "The stored control state is damaged. Nothing changed; check the server log.",
+    control_state_stale: "The server read an older control state than it already saw. Try again shortly; if it keeps happening, check the server log.",
+    control_state_regressed: "The stored control state went backwards. Nothing changed; check the server log.",
+    control_state_generation_mismatch: "The stored control state does not match its generation. Nothing changed; check the server log.",
   };
+  const DEPLOY_RETRY = "The server may already have recorded this, or part of it. Select the same button again without changing anything: it repeats the same request key, so the server records it at most once and finishes what it started. If you change anything first, it counts as a new request.";
+  // invalid_input may also follow a recorded request, so the key is kept; but resending at once fails the same way.
+  const DEPLOY_RETRY_AFTER_FIX = "Resending does not help until the cause is fixed. \"tenant capacity reached\" means the server already holds 1,024 tenant records; deleted tenants still count, so deleting one does not free a slot: report it to the server operator. This page keeps the request key: once the cause is fixed, select the same button again without changing the form. That repeats the same request key, so the request is recorded at most once and the server finishes what it started. Changing the form first sends a new request; the earlier one then stays listed under Load operations, reserving nothing.";
   const OPERATION_ID = /^[0-9a-f]{32}$/;
   function deploymentListPath(after = null, limit = DEPLOY_PAGE) {
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error("The page size must be 1 to 100.");
@@ -775,16 +824,27 @@
     const steps = Number.isSafeInteger(observed.journal_steps)
       ? `${observed.journal_steps}${Number.isSafeInteger(observed.uncertain_steps) && observed.uncertain_steps > 0 ? ` (${observed.uncertain_steps} not confirmed)` : ""}`
       : "--";
+    const facts = [
+      ["Request", deploymentRequest(o.kind, o.desired)],
+      ["Next step", text(o.next_step)],
+      ["Requested", utcTime(o.created_unix_ms)],
+      ["Operation ID", text(o.operation_id)],
+      ["Tenant ID", text(o.tenant_id)],
+      ["Recorded steps", steps],
+    ];
+    const receipt = typeof o.receipt_digest === "string" && /^[0-9a-f]{64}$/.test(o.receipt_digest) ? o.receipt_digest : null;
+    if (receipt) facts.push(["Receipt (needed to retire this tenant)", receipt]);
     return {
       headline: `${deployLabel(DEPLOY_KINDS, o.kind)}: ${deployLabel(DEPLOY_PHASES, o.phase)}`,
-      facts: [
-        ["Request", deploymentRequest(o.kind, o.desired)],
-        ["Next step", text(o.next_step)],
-        ["Requested", utcTime(o.created_unix_ms)],
-        ["Operation ID", text(o.operation_id)],
-        ["Tenant ID", text(o.tenant_id)],
-        ["Recorded steps", steps],
-      ],
+      facts,
+      operation: typeof o.operation_id === "string" && OPERATION_ID.test(o.operation_id) ? o.operation_id : null,
+      tenant: typeof o.tenant_id === "string" && OPERATION_ID.test(o.tenant_id) ? o.tenant_id : null,
+      receipt,
+      kind: typeof o.kind === "string" ? o.kind : null,
+      phase: typeof o.phase === "string" ? o.phase : null,
+      terminal: deploymentTerminal(o),
+      reserved: observed.reserved === true,
+      releasePending: deploymentReleasePending(o),
     };
   }
   // `after` is the position this page was read from; the next position must move forward or paging could loop.
@@ -801,11 +861,331 @@
   function deploymentExplain(error) {
     const message = String(error?.message ?? error);
     const code = typeof error?.code === "string" ? error.code : "";
-    const hint = error?.status === 404 ? DEPLOY_BLOCKED.not_found
-      : code && Object.hasOwn(DEPLOY_HINTS, code) ? DEPLOY_HINTS[code]
-      : code ? "This view only reads, so nothing changed. Select Load operations to try again; if it keeps failing, check the server log for this code."
+    const hint = code && code !== "not_found" && Object.hasOwn(DEPLOY_HINTS, code) ? DEPLOY_HINTS[code]
+      : error?.status === 404 ? DEPLOY_BLOCKED.not_found
+      : code ? "The dashboard has no explanation for this code. Select Load operations to see what is recorded; if it keeps failing, check the server log for this code."
       : "";
-    return hint ? `${message}\n${hint}` : message;
+    const retry = error?.deployRetry !== true ? "" : code === "invalid_input" ? DEPLOY_RETRY_AFTER_FIX : DEPLOY_RETRY;
+    return [message, hint, retry].filter(Boolean).join("\n");
+  }
+
+  // SHA-256 (FIPS 180-4) in plain JS: crypto.subtle only exists on HTTPS or localhost, and the
+  // dashboard is also served over plain HTTP. Profiles are at most 1 MiB, so speed does not matter.
+  const SHA_K = new Uint32Array([
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+  ]);
+  const SHA_H = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
+  // Lowercase hex SHA-256 of a string (as UTF-8) or of a Uint8Array.
+  function sha256Hex(input) {
+    const data = typeof input === "string" ? new TextEncoder().encode(input) : input;
+    if (!(data instanceof Uint8Array)) throw new TypeError("sha256Hex needs a string or a Uint8Array");
+    const length = data.length;
+    const total = Math.ceil((length + 9) / 64) * 64;
+    const block = new Uint8Array(total);
+    block.set(data);
+    block[length] = 0x80;
+    const view = new DataView(block.buffer);
+    view.setUint32(total - 8, Math.floor(length / 0x20000000));
+    view.setUint32(total - 4, (length * 8) >>> 0);
+    const h = Uint32Array.from(SHA_H);
+    const w = new Uint32Array(64);
+    const ror = (x, n) => (x >>> n) | (x << (32 - n));
+    for (let offset = 0; offset < total; offset += 64) {
+      for (let i = 0; i < 16; i++) w[i] = view.getUint32(offset + i * 4);
+      for (let i = 16; i < 64; i++) {
+        const s0 = ror(w[i - 15], 7) ^ ror(w[i - 15], 18) ^ (w[i - 15] >>> 3);
+        const s1 = ror(w[i - 2], 17) ^ ror(w[i - 2], 19) ^ (w[i - 2] >>> 10);
+        w[i] = (w[i - 16] + s0 + w[i - 7] + s1) | 0;
+      }
+      let [a, b, c, d, e, f, g, k] = h;
+      for (let i = 0; i < 64; i++) {
+        const t1 = (k + (ror(e, 6) ^ ror(e, 11) ^ ror(e, 25)) + ((e & f) ^ (~e & g)) + SHA_K[i] + w[i]) | 0;
+        const t2 = ((ror(a, 2) ^ ror(a, 13) ^ ror(a, 22)) + ((a & b) ^ (a & c) ^ (b & c))) | 0;
+        k = g; g = f; f = e; e = (d + t1) | 0; d = c; c = b; b = a; a = (t1 + t2) | 0;
+      }
+      h[0] += a; h[1] += b; h[2] += c; h[3] += d; h[4] += e; h[5] += f; h[6] += g; h[7] += k;
+    }
+    return Array.from(h, (x) => x.toString(16).padStart(8, "0")).join("");
+  }
+
+  // ---- Building tenant deployment submissions (pure, so tests can check the exact bodies) ----
+  const DEPLOY_SUBMIT = "/v1/admin/tenant-deployments";
+  const DEPLOY_CONTENT_MAX = 1048576;
+  const DEPLOY_LIST_MAX = 64;
+  const U32_MAX = 4294967295;
+  const HEX64 = /^[0-9a-f]{64}$/;
+  const NO_EFFECT = "This only records the request on this server. Cloud execution is switched off (OD-002), so nothing is deployed, routed, started or stopped in Azure.";
+  const READERS_BLOCKED = "Reader replicas also wait for ITEM-008, so a reader fleet will not start either.";
+  // Mirrors the server's text check: not empty, at most `max` UTF-8 bytes, no control characters.
+  function deploymentText(value, label, max = 2048) {
+    const text = typeof value === "string" ? value.trim() : "";
+    if (text === "") throw new Error(`${label} is required; no request sent`);
+    if (LONE_SURROGATE.test(text)) throw new Error(`${label} contains invalid Unicode; no request sent`);
+    if (CONTROL.test(text)) throw new Error(`${label} must not contain tabs, line breaks or other control characters; no request sent`);
+    const bytes = utf8Length(text);
+    if (bytes > max) throw new Error(`${label} is ${bytes} bytes; at most ${max} are allowed. No request sent`);
+    return text;
+  }
+  // One entry per line; blank lines are ignored and an empty box means an empty list.
+  function deploymentLines(value, label) {
+    const lines = String(value ?? "").split(/\r\n|\n|\r/).map((line) => line.trim()).filter(Boolean);
+    if (lines.length > DEPLOY_LIST_MAX) throw new Error(`${label} has ${lines.length} lines; at most ${DEPLOY_LIST_MAX} are allowed. No request sent`);
+    return lines.map((line, i) => deploymentText(line, `${label} line ${i + 1}`));
+  }
+  // The exact profile text the server stores, and the SHA-256 of its UTF-8 bytes.
+  function deploymentContent(text, label) {
+    if (typeof text !== "string" || text === "") throw new Error(`${label} is required: choose the file or paste its text; no request sent`);
+    if (text.trim() === "") throw new Error(`${label} contains only spaces or blank lines: choose the file or paste its text; no request sent`);
+    if (LONE_SURROGATE.test(text)) throw new Error(`${label} contains invalid Unicode; no request sent`);
+    const bytes = new TextEncoder().encode(text);
+    if (bytes.length > DEPLOY_CONTENT_MAX) throw new Error(`${label} is ${bytes.length} bytes; at most ${DEPLOY_CONTENT_MAX} (1 MiB) are allowed. No request sent`);
+    return { text, bytes: bytes.length, digest: sha256Hex(bytes) };
+  }
+  // Each distinct text once: the server refuses repeated contents.
+  const deploymentContents = (items) => [...new Map(items.map((item) => [item.digest, item.text])).values()];
+  const contentLine = (label, item) => `${label}: ${item.bytes} bytes, SHA-256 ${item.digest}`;
+  const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+  function deploymentCreateSubmission(form) {
+    const name = tenantName(form?.name);
+    const limit = maxVectors(form?.maxVectors ?? "");
+    if (limit === 0) throw new Error("Vector limit must be blank (no limit) or a whole number above 0; no request sent");
+    const writer = deploymentContent(form?.writer, "Writer profile");
+    const initialization = deploymentContent(form?.initialization, "Initialization settings");
+    const resources = deploymentLines(form?.resources, "Azure resources");
+    const secrets = deploymentLines(form?.secrets, "Secret versions");
+    const request = {
+      kind: "create", name, ...(limit === null ? {} : { max_vectors: limit }),
+      writer_profile: writer.digest, initialization: initialization.digest, resources, secret_versions: secrets,
+    };
+    return {
+      path: DEPLOY_SUBMIT, request, contents: deploymentContents([writer, initialization]),
+      confirm: [
+        `Record a request to create tenant "${name}" (vector limit ${limit === null ? "none" : limit})?`,
+        "The server adds the tenant now under a new random ID, with no route, and reserves it for this request. Each new Create request adds another tenant record now, which counts toward the tenant limit and stays even if the request is later cancelled.",
+        NO_EFFECT,
+        contentLine("Writer profile", writer),
+        contentLine("Initialization settings", initialization),
+        `${plural(resources.length, "Azure resource", "Azure resources")} and ${plural(secrets.length, "secret version", "secret versions")} listed.`,
+        "Cancel on this operation later releases the reservation; the tenant record itself stays.",
+      ].join("\n"),
+    };
+  }
+  function replicas(value, label, min) {
+    const text = typeof value === "string" ? value.trim() : String(value ?? "");
+    if (!/^[0-9]+$/.test(text) || Number(text) < min || Number(text) > U32_MAX) throw new Error(`${label} must be a whole number from ${min} to ${U32_MAX}; no request sent`);
+    return Number(text);
+  }
+  function deploymentReadersSubmission(form) {
+    const tenant = tenantId(form?.tenant);
+    const path = `/v1/admin/tenant-deployments/${tenant}/readers`;
+    const withdraw = "Cancel on this operation withdraws the request while it is still waiting.";
+    if (form?.mode === "absent") {
+      return {
+        path, request: { kind: "set_readers", tenant_id: tenant, fleet: { state: "absent" } }, contents: [],
+        confirm: [`Record a request to remove all reader replicas from tenant ${tenant}?`, NO_EFFECT, withdraw].join("\n"),
+      };
+    }
+    if (form?.mode !== "present") throw new Error("Choose whether the tenant should have reader replicas; no request sent");
+    const min = replicas(form?.min, "Minimum readers", 0);
+    const max = replicas(form?.max, "Maximum readers", 1);
+    if (min > max) throw new Error("Minimum readers must not be more than maximum readers; no request sent");
+    const routing = form?.routing ?? "writer_only";
+    if (routing !== "writer_only" && routing !== "readers") throw new Error("Choose where reads go; no request sent");
+    const reader = deploymentContent(form?.reader, "Reader profile");
+    const scaling = deploymentContent(form?.scaling, "Scaling rule");
+    return {
+      path,
+      request: {
+        kind: "set_readers", tenant_id: tenant,
+        fleet: { state: "present", min_replicas: min, max_replicas: max, reader_profile: reader.digest, scaling_rule: scaling.digest, read_routing: routing },
+      },
+      contents: deploymentContents([reader, scaling]),
+      confirm: [
+        `Record a request for ${min} to ${max} reader replicas on tenant ${tenant}, with reads going to ${routing === "readers" ? "the readers" : "the writer only"}?`,
+        NO_EFFECT, READERS_BLOCKED,
+        contentLine("Reader profile", reader),
+        contentLine("Scaling rule", scaling),
+        withdraw,
+      ].join("\n"),
+    };
+  }
+  function deploymentRetireSubmission(form) {
+    const tenant = tenantId(form?.tenant);
+    const receipt = typeof form?.receipt === "string" ? form.receipt.trim().toLowerCase() : "";
+    if (!HEX64.test(receipt)) throw new Error("Receipt must be the 64-character receipt shown on the tenant's latest finished operation; no request sent");
+    const reason = deploymentText(form?.reason, "Reason", 512);
+    return {
+      path: `/v1/admin/tenant-deployments/${tenant}/retire`,
+      request: { kind: "retire", tenant_id: tenant, expected_receipt: receipt, reason, data_disposition: "retain" },
+      contents: [],
+      confirm: [
+        `Record a request to retire tenant ${tenant}?`,
+        "When it runs, retiring removes the tenant's route and stops its apps. All data is kept.",
+        NO_EFFECT,
+        `Reason: ${reason}`,
+        "Cancel on this operation withdraws the request while it is still waiting.",
+      ].join("\n"),
+    };
+  }
+  const deploymentTerminal = (op) => object(op) && (["succeeded", "cancelled", "retired"].includes(op.phase) || op.observed?.terminal === true);
+  // Cancel seals the outcome first and then releases the tenant; if the release failed, only an exact
+  // resend of that same cancel (same key and body, same signed-in account) finishes it.
+  const deploymentReleasePending = (op) => object(op) && op.phase === "cancelled" && object(op.observed) && op.observed.reserved === true;
+  // The cancel body quotes the tokens from the status just read, so a change in between is refused, not overridden.
+  function deploymentCancelRequest(op, key) {
+    if (!object(op) || typeof op.operation_id !== "string" || !OPERATION_ID.test(op.operation_id)
+      || !Number.isSafeInteger(op.operation_generation) || !Number.isSafeInteger(op.lifecycle_generation)) {
+      throw new Error("The server sent an unexpected operation status. Select Check status to read it again; nothing was sent.");
+    }
+    return {
+      path: `/v1/admin/tenant-deployment-operations/${op.operation_id}/cancel`,
+      body: {
+        idempotency_key: key,
+        expected_operation_generation: op.operation_generation,
+        expected_lifecycle_generation: op.lifecycle_generation,
+        ...(typeof op.receipt_digest === "string" ? { expected_receipt: op.receipt_digest } : {}),
+      },
+    };
+  }
+  const CANCEL_EFFECT = {
+    accepted: "It is recorded but nothing is reserved yet, so cancelling withdraws it for good.",
+    reserved: "It holds the tenant's reservation; cancelling releases it. For a create, the tenant record stays.",
+    cancelling: "Cancellation already started; this finishes it.",
+  };
+  function deploymentCancelConfirm(op, retrying) {
+    const view = deploymentView(op);
+    return [
+      `Cancel operation ${view.operation}?`,
+      `It is: ${deployLabel(DEPLOY_KINDS, op.kind)} for tenant ${view.tenant ?? "--"}, now ${deployLabel(DEPLOY_PHASES, op.phase)}.`,
+      CANCEL_EFFECT[op.phase] ?? "The server decides whether it can still be cancelled.",
+      "This only records the cancellation on this server. Cloud execution is switched off (OD-002), so nothing is deployed, routed, started or stopped in Azure.",
+      ...(retrying ? ["This repeats your earlier cancel whose outcome is unknown, with the same request key, so it counts once."] : []),
+    ].join("\n");
+  }
+  const RELEASE_PENDING = "This operation is cancelled, but the server has not released the tenant's reservation yet (the release step failed after the cancel was recorded).";
+  function deploymentReleaseConfirm(op) {
+    return [
+      `Finish cancelling operation ${deploymentView(op).operation}?`,
+      RELEASE_PENDING,
+      "This resends your earlier cancel exactly, with the same request key, so the server only finishes releasing the reservation. Cloud execution is switched off (OD-002), so nothing in Azure is touched.",
+    ].join("\n");
+  }
+  // Without the saved cancel the dashboard cannot resend it, and a new cancel is refused because the operation ended.
+  const RELEASE_LOST = `${RELEASE_PENDING} Only an exact resend of that cancel (same signed-in account, same request key) releases it, and this browser tab has no saved copy for the account signed in now under this dashboard's API address. A saved cancel stays only in the tab that sent it, only for the account that sent it, only for a dashboard using the same API address, and only until that account signs out or its session ends (both delete it). If another account sent it from this tab and its session has not ended, that account can sign in here again to resend it. A new cancel is refused because the operation has ended. Nothing else releases it today (the command-line tool cannot resend a dashboard's cancel either), so the tenant stays reserved: report the operation ID to the server operator.`;
+  // Saved cancels (sessionStorage) are filed by API address, then owner:
+  // TD_CANCEL_STORE + encodeURIComponent(address) + "/" + principal + "." + operation ID.
+  const TD_CANCEL_STORE = "vlite.tenant-deployment.cancel.";
+  // The API address the page's requests go to: `${apiBase}/v1/...` resolved against the page, as fetch resolves it,
+  // minus the "/v1/". sessionStorage is shared by every page of a site in a tab, and one site can serve dashboards for
+  // several servers under different paths (the Docker image proxies its API at /api), so this, not the server's role
+  // or a guess about prefixes, is what keeps their saved cancels apart. Null when it cannot be established, or when the
+  // base carries credentials, a query or a fragment (never put in a key): then nothing is saved, read or deleted.
+  function deploymentApiScope(apiBase, pageUrl) {
+    if (typeof apiBase !== "string" || typeof pageUrl !== "string") return null;
+    let url;
+    try { url = new URL(`${apiBase}/v1/`, pageUrl); } catch { return null; }
+    if ((url.protocol !== "http:" && url.protocol !== "https:") || url.username || url.password || url.search || url.hash
+      || !url.pathname.endsWith("/v1/")) return null;
+    return url.origin + url.pathname.slice(0, -"/v1/".length);
+  }
+  // An owner is the account the server verified for the sign-in, named as the server's actor is: a user account by
+  // its ID, or the bootstrap admin token. A role alone, open access or any other identity is no account (null).
+  const TD_PRINCIPAL = /^(user:[0-9a-f]{32}|admin_token)$/;
+  function deploymentPrincipal(caps) {
+    if (!object(caps) || caps.role !== "admin" || !object(caps.identity)) return null;
+    const who = caps.identity;
+    if (who.kind === "user") return who.account_role === "super_admin" && typeof who.user_id === "string" && /^[0-9a-f]{32}$/.test(who.user_id) ? `user:${who.user_id}` : null;
+    return who.kind === "super_admin" ? "admin_token" : null;
+  }
+  // The owner named by a storage key, for a page whose API address is `scope`: undefined for keys this page does not
+  // own (not a cancel key, or one filed under another API address, which is never read or deleted here); null for a
+  // cancel key whose owner cannot be read (an older page's key filed under no address, or a damaged key under this
+  // address), which is deleted, never used. A page without an address owns no key but still deletes older pages' keys.
+  function deploymentCancelOwner(key, scope) {
+    if (typeof key !== "string" || !key.startsWith(TD_CANCEL_STORE)) return undefined;
+    const rest = key.slice(TD_CANCEL_STORE.length), slash = rest.indexOf("/");
+    if (slash <= 0) return null;
+    if (typeof scope !== "string" || rest.slice(0, slash) !== encodeURIComponent(scope)) return undefined;
+    const own = rest.slice(slash + 1), dot = own.lastIndexOf(".");
+    return dot > 0 && TD_PRINCIPAL.test(own.slice(0, dot)) && OPERATION_ID.test(own.slice(dot + 1)) ? own.slice(0, dot) : null;
+  }
+  // What the page says about how far a cancel it keeps reaches, for its owner and the page's API address.
+  function deploymentCancelScope(principal, scope) {
+    if (typeof principal !== "string" || !TD_PRINCIPAL.test(principal)) return "The server did not identify your account, so that cancel is not saved: it is kept only while this operation stays selected on this page, and a reload, a sign-out or another sign-in loses it.";
+    if (typeof scope !== "string" || scope === "") return "The dashboard could not tell which API address it uses, so that cancel is not saved: it is kept only while this operation stays selected on this page, and a reload, a sign-out or another sign-in loses it.";
+    return [
+      "This tab saves that cancel (the operation ID, its request key and the values it quoted; never a password or token) for the account that sent it.",
+      "After a reload, the same account signed in again can resend it, as long as its session did not end. Signing out, or the session ending, deletes it, so finish the release first.",
+      "Another account signed in to this tab cannot resend it, but until it is deleted the saved copy is plain text that anyone using this tab can read.",
+      "It is filed under the API address this dashboard uses; a dashboard on this site that uses another API address neither resends nor deletes it.",
+      ...(principal === "admin_token" ? ["Everyone signed in with the bootstrap admin token counts as one account, and a rejected token counts as the session ending."] : []),
+    ].join(" ");
+  }
+  // A saved cancel is used only by its owner under the API address it was sent to, and only if it is exactly the shape
+  // this page sends for that operation.
+  function deploymentSavedCancel(value, id, principal, scope) {
+    if (typeof principal !== "string" || !TD_PRINCIPAL.test(principal) || typeof scope !== "string" || scope === "") return null;
+    if (!object(value) || value.principal !== principal || value.scope !== scope || value.operation !== id || value.path !== `/v1/admin/tenant-deployment-operations/${id}/cancel`) return null;
+    const body = value.body;
+    if (!object(body) || typeof body.idempotency_key !== "string" || body.idempotency_key === ""
+      || !Number.isSafeInteger(body.expected_operation_generation) || !Number.isSafeInteger(body.expected_lifecycle_generation)
+      || (body.expected_receipt !== undefined && typeof body.expected_receipt !== "string")
+      || Object.keys(body).some((k) => !["idempotency_key", "expected_operation_generation", "expected_lifecycle_generation", "expected_receipt"].includes(k))) return null;
+    return { operation: id, principal, scope, path: value.path, body };
+  }
+  // A 2xx answer must name the operation that was asked for before the saved request is dropped.
+  function deploymentAck(value, expect = {}) {
+    const op = value?.operation;
+    if (!object(op) || typeof op.operation_id !== "string" || !OPERATION_ID.test(op.operation_id)) return null;
+    if (expect.operation !== undefined && op.operation_id !== expect.operation) return null;
+    if (expect.kind !== undefined && op.kind !== expect.kind) return null;
+    if (expect.tenant !== undefined && op.tenant_id !== expect.tenant) return null;
+    return op;
+  }
+  // Codes where repeating the same key can never help: either nothing was recorded, or the server keeps the
+  // record but a resend refuses the same way (tenant_id_conflict, operation_terminal and the cancel refusals
+  // after its action record; their hints say so). The key is discarded. Any other failure may have recorded
+  // the request part-way, so the same key is kept for an exact retry.
+  const DEPLOY_SETTLED = new Set([
+    "admin_auth_required", "read_only", "forbidden_scope", "gateway_tenant_required", "not_found", "invalid_json",
+    "tenant_deployments_not_configured", "tenants_disabled", "operation_request_invalid", "operation_request_conflict",
+    "tenant_id_conflict", "tenant_deployment_action_unknown", "operation_not_found", "action_request_conflict",
+    "operation_generation_stale", "retirement_required", "operation_terminal", "transition_unavailable",
+    "irreversible_ack_required", "pin_scope_unproven", "readers_in_progress", "retirement_in_progress", "withdrawal_capacity",
+  ]);
+  function deploymentRetryable(error) {
+    const status = error?.status;
+    if (!Number.isInteger(status) || status === 408 || status === 429 || status >= 500) return true;
+    return status !== 404 && !DEPLOY_SETTLED.has(error?.code);
+  }
+  // Form fields of the tenant deployment forms (cleared on sign-out) and where each form reports.
+  const TD = (name) => `tenant-deployment-${name}`;
+  const TD_PROFILES = ["writer", "init", "reader", "scaling"];
+  const TD_FIELDS = ["operation", "name", "max-vectors", "resources", "secrets", "readers-tenant", "readers-mode", "readers-min", "readers-max",
+    "readers-routing", "retire-tenant", "retire-receipt", "retire-reason", ...TD_PROFILES.flatMap((p) => [`${p}-file`, `${p}-text`])].map(TD);
+  const TD_BUTTONS = ["check", "cancel", "create", "readers", "retire"].map(TD);
+  const TD_NOTES = TD_PROFILES.map((p) => TD(`${p}-note`));
+  const TD_MESSAGES = { tdOperation: TD("operation-message"), tdCreate: TD("create-message"), tdReaders: TD("readers-message"), tdRetire: TD("retire-message") };
+  // Which form each field belongs to: editing a form discards its pending request key.
+  const TD_FORM_FIELDS = {
+    tdCreate: ["name", "max-vectors", "resources", "secrets", "writer-file", "writer-text", "init-file", "init-text"].map(TD),
+    tdReaders: ["readers-tenant", "readers-mode", "readers-min", "readers-max", "readers-routing", "reader-file", "reader-text", "scaling-file", "scaling-text"].map(TD),
+    tdRetire: ["retire-tenant", "retire-receipt", "retire-reason"].map(TD),
+  };
+  // Profile text from the chosen file (exact bytes, UTF-8 only) or else from the paste box.
+  async function deploymentProfileText(file, pasted, label) {
+    if (!file) return pasted;
+    if (!(file.size <= DEPLOY_CONTENT_MAX)) throw new Error(`${label}: ${file.name} is ${file.size} bytes; at most ${DEPLOY_CONTENT_MAX} (1 MiB) are allowed. No request sent`);
+    const buffer = await file.arrayBuffer();
+    try { return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(buffer); }
+    catch { throw new Error(`${label}: ${file.name} is not UTF-8 text. Choose the text file itself; no request sent`); }
   }
 
   function init(ctx) {
@@ -831,10 +1211,12 @@
       "cloud-backup-drill", "cloud-backup-restore", "cloud-backup-pin-reason", "cloud-backup-pin-reason-error", "cloud-backup-pin",
       "cloud-backup-pin-id", "cloud-backup-force", "cloud-backup-unpin", "cloud-backup-sets-help", "cloud-backup-result",
       "auto-failover-status", "auto-failover-facts", "auto-failover-refresh", "auto-failover-toggle", "auto-failover-help", "auto-failover-result",
-      "tenant-deployment-status", "tenant-deployment-list", "tenant-deployment-refresh", "tenant-deployment-next", "tenant-deployment-help", "tenant-deployment-result"];
+      "tenant-deployment-status", "tenant-deployment-list", "tenant-deployment-refresh", "tenant-deployment-next", "tenant-deployment-help", "tenant-deployment-result",
+      ...TD_FIELDS, ...TD_BUTTONS, ...TD_NOTES, ...Object.values(TD_MESSAGES), "tenant-deployment-readers-present", "tenant-deployment-operation-status",
+      "tenant-deployment-operation-facts", "tenant-deployment-operation-help"];
     for (const name of controls) if (!$(name)) throw new Error(`admin markup is missing control #${name}`);
     const OUTPUTS = { users: "user-result", tenants: "tenant-result", tls: "tls-result", replication: "replication-result", compaction: "compaction-result", cloudBackup: "cloud-backup-result", autoFailover: "auto-failover-result", tenantDeployments: "tenant-deployment-result" };
-    const TARGETS = { ...OUTPUTS, lifecycle: "tenant-result" };
+    const TARGETS = { ...OUTPUTS, lifecycle: "tenant-result", ...TD_MESSAGES };
     let epoch = 0;
     let segment = null;
     // Accounts from the last List users, by ID; Save sends only the fields that differ.
@@ -1478,11 +1860,79 @@
       afRender(value);
       show("auto-failover-result", enable ? "Automatic failover is on (not yet proven safe)." : "Automatic failover is off.");
     });
-    // Tenant deployments: read-only, paged by operation ID. Nothing loads until Load operations.
+    // Tenant deployments: the list is paged by operation ID and nothing loads until Load operations.
+    // The forms below it only record requests (create, readers, retire) or a cancel; each asks for confirmation first.
     let tdAfter = null, tdPage = 0;
+    // Request keys kept after an unknown outcome, so the same button repeats the same request: form -> { text, key }.
+    let tdPending = {};
+    // The cancel kept after an unknown outcome: { operation, principal, scope, path, body } (the body includes its key).
+    let tdCancelPending = null;
+    // The account the server verified for this sign-in (deploymentPrincipal), and the last one, so that a session found
+    // to have ended after the page already let go of it still deletes that account's saved cancels.
+    let tdPrincipal = null, tdLastPrincipal = null;
+    // The API address this page's requests go to (deploymentApiScope); saved cancels are filed and found under it only.
+    const tdScope = deploymentApiScope(ctx.apiBase, globalThis.document?.baseURI ?? globalThis.location?.href);
+    // Each sent cancel is also kept in this tab's sessionStorage under its API address and account (it holds only the
+    // operation ID, the key and the quoted values), so a cancel whose release step failed can still be resent exactly
+    // after a reload by the same account through the same API address. Without a verified account or an API address
+    // nothing is read or written: the cancel stays in memory only.
+    const tdCancelKey = (principal, id) => `${TD_CANCEL_STORE}${encodeURIComponent(tdScope)}/${principal}.${id}`;
+    const tdCancelSaved = (id) => {
+      if (!tdPrincipal || !tdScope) return null;
+      try { return deploymentSavedCancel(JSON.parse(globalThis.sessionStorage?.getItem(tdCancelKey(tdPrincipal, id)) ?? "null"), id, tdPrincipal, tdScope); }
+      catch { return null; }
+    };
+    const tdCancelForget = (id) => {
+      if (!tdPrincipal || !tdScope) return;
+      try { globalThis.sessionStorage?.removeItem(tdCancelKey(tdPrincipal, id)); } catch { /* storage unavailable */ }
+    };
+    function tdCancelKeep(pending) {
+      tdCancelPending = pending;
+      if (!pending.principal || !pending.scope || pending.scope !== tdScope) return;
+      try { globalThis.sessionStorage?.setItem(tdCancelKey(pending.principal, pending.operation), JSON.stringify(pending)); } catch { /* storage unavailable */ }
+    }
+    function tdCancelDrop(id) {
+      if (tdCancelPending?.operation === id) tdCancelPending = null;
+      tdCancelForget(id);
+    }
+    const tdCancelSavedFor = (id) => (tdCancelPending?.operation === id ? tdCancelPending : tdCancelSaved(id));
+    const tdResendHelp = (saved, sep) => `${RELEASE_PENDING} Select Cancel to resend your earlier cancel exactly; that finishes the release.${sep}${deploymentCancelScope(saved.principal, saved.scope)}`;
+    // Deletes this API address's saved cancels whose owner ends(owner), and every cancel key whose owner cannot be read
+    // (an older page's or a damaged key). Another API address's saved cancels are left alone.
+    function tdCancelSweep(ends) {
+      try {
+        const storage = globalThis.sessionStorage;
+        if (!storage) return;
+        const keys = [];
+        for (let i = 0; i < storage.length; i++) keys.push(storage.key(i));
+        for (const key of keys) {
+          const owner = deploymentCancelOwner(key, tdScope);
+          if (owner === null || (typeof owner === "string" && ends(owner))) storage.removeItem(key);
+        }
+      } catch { /* storage unavailable */ }
+    }
+    // The status last shown in the operation box.
+    let tdOp = null;
     function tdStatus(text, tone) {
       $("tenant-deployment-status").textContent = text;
       $("tenant-deployment-status").setAttribute?.("data-tone", tone);
+    }
+    const tdOperationField = () => $(TD("operation")).value.trim().toLowerCase();
+    function tdUse(view) {
+      if (!gates.tenantDeployments.allowed) return;
+      if (view.operation) {
+        if (tdCancelPending?.operation !== view.operation) tdCancelPending = null;
+        $(TD("operation")).value = view.operation;
+      }
+      if (view.tenant) {
+        for (const id of [TD("readers-tenant"), TD("retire-tenant")]) $(id).value = view.tenant;
+        delete tdPending.tdReaders; delete tdPending.tdRetire;
+      }
+      // A receipt left from another operation would pair this tenant with the wrong receipt.
+      if (view.receipt) $(TD("retire-receipt")).value = view.receipt;
+      else if (view.tenant) $(TD("retire-receipt")).value = "";
+      show(TD_MESSAGES.tdOperation, `Filled in operation ${view.operation ?? "--"}${view.tenant ? ` and its tenant ID ${view.tenant} in the Readers and Retire forms` : ""}${view.receipt ? ", with its receipt" : view.tenant ? " (it has no receipt, so the Retire receipt box was emptied)" : ""}. Select Check status or Cancel.`);
+      gateTenantDeployments();
     }
     const tdItem = (view) => {
       const item = document.createElement("li"), title = document.createElement("strong"), facts = document.createElement("dl");
@@ -1490,8 +1940,26 @@
       facts.className = "compaction-facts";
       facts.append(...view.facts.map(factRow));
       item.append(title, facts);
+      if (view.operation) {
+        const use = document.createElement("button");
+        use.type = "button";
+        use.className = "secondary";
+        use.textContent = "Use this operation";
+        use.setAttribute?.("aria-label", `Use operation ${view.operation}`);
+        use.addEventListener("click", () => tdUse(view));
+        item.append(use);
+      }
       return item;
     };
+    function tdShowOperation(op) {
+      const view = deploymentView(op);
+      tdOp = op;
+      $(TD("operation")).value = view.operation ?? "";
+      $(TD("operation-status")).textContent = view.headline;
+      cList(TD("operation-facts"), view.facts, factRow);
+      gateTenantDeployments();
+      return view;
+    }
     function gateTenantDeployments(offline = false) {
       const allowed = !offline && gates.tenantDeployments.allowed;
       $("tenant-deployment-refresh").disabled = !allowed;
@@ -1499,6 +1967,16 @@
       $("tenant-deployment-help").textContent = !allowed ? gates.tenantDeployments.reason
         : tdAfter !== null ? "Next page shows the operations after the last one listed."
         : `Load operations shows the first ${DEPLOY_PAGE}. Nothing loads automatically.`;
+      for (const id of [...TD_FIELDS, ...TD_BUTTONS]) $(id).disabled = !allowed;
+      const shown = tdOp !== null && tdOperationField() === tdOp.operation_id;
+      const releasing = shown && deploymentReleasePending(tdOp);
+      const resend = releasing && tdCancelSavedFor(tdOp.operation_id) !== null;
+      const ended = shown && !releasing && deploymentTerminal(tdOp);
+      $(TD("cancel")).disabled = !allowed || ended || (releasing && !resend);
+      $(TD("operation-help")).textContent = !allowed ? gates.tenantDeployments.reason
+        : releasing ? (resend ? tdResendHelp(tdCancelSavedFor(tdOp.operation_id), " ") : RELEASE_LOST)
+        : ended ? "This operation has ended, so it cannot be cancelled. Enter another operation ID to cancel a different one."
+        : "Check status reads the operation's current state. Cancel reads it again, shows what will be cancelled and asks you to confirm.";
     }
     function tdClear() {
       tdAfter = null; tdPage = 0;
@@ -1541,11 +2019,184 @@
       gateTenantDeployments();
       show("tenant-deployment-result", "");
     }
+    // After a change: reload the first page; a failure there is reported below the list, not as a failed change.
+    async function tdReload(mark) {
+      try { await tdLoad(mark, null); }
+      catch (error) { if (current(mark)) show("tenant-deployment-result", deploymentExplain(error)); }
+    }
     on("tenant-deployment-refresh", "tenantDeployments", (mark) => tdLoad(mark, null), deploymentExplain);
     on("tenant-deployment-next", "tenantDeployments", async (mark) => {
       if (tdAfter === null) throw new Error("Select Load operations first.");
       await tdLoad(mark, tdAfter);
     }, deploymentExplain);
+    const tdProfile = (name, label) => deploymentProfileText($(TD(`${name}-file`)).files?.[0], $(TD(`${name}-text`)).value, label);
+    function tdClearForm(form) {
+      for (const id of TD_FORM_FIELDS[form]) {
+        if (id === TD("readers-mode")) $(id).value = "present";
+        else if (id === TD("readers-routing")) $(id).value = "writer_only";
+        else $(id).value = "";
+      }
+      if (form === "tdReaders") $(TD("readers-present")).hidden = false;
+      for (const p of form === "tdCreate" ? ["writer", "init"] : form === "tdReaders" ? ["reader", "scaling"] : []) $(TD(`${p}-note`)).textContent = "";
+      delete tdPending[form];
+    }
+    // Records one request. The key is reused only while the exact same request is retried after an unknown outcome.
+    async function tdSubmit(mark, form, build) {
+      need("tenantDeployments");
+      const submission = await build();
+      if (!current(mark)) return;
+      const text = JSON.stringify([submission.path, submission.request, submission.contents]);
+      const retrying = tdPending[form]?.text === text;
+      const key = retrying ? tdPending[form].key : idempotencyKey();
+      const note = retrying ? "\nThis repeats your earlier request whose outcome is unknown, with the same request key, so it is recorded at most once." : "";
+      if (!await ctx.confirm(`${submission.confirm}${note}`)) { if (current(mark)) show(TD_MESSAGES[form], "Nothing was sent."); return; }
+      if (!current(mark)) return;
+      const entry = { text, key };
+      tdPending[form] = entry;
+      show(TD_MESSAGES[form], "Sending…");
+      const { request, contents } = submission;
+      const inspectorSummary = {
+        documents: contents.length, resources: request.resources?.length ?? 0, secret_versions: request.secret_versions?.length ?? 0,
+        profile_digests: [request.writer_profile, request.initialization, request.fleet?.reader_profile, request.fleet?.scaling_rule].filter(Boolean),
+      };
+      let value;
+      try { value = await ctx.api("POST", submission.path, { idempotency_key: key, request, contents }, { data: false, inspectorSummary }); }
+      catch (error) {
+        if (current(mark) && tdPending[form] === entry) {
+          if (deploymentRetryable(error)) error.deployRetry = true;
+          else delete tdPending[form];
+        }
+        throw error;
+      }
+      if (!current(mark)) return;
+      // An answer that does not name this request is an unknown outcome: the key stays for an exact resend.
+      const ack = deploymentAck(value, { kind: submission.request.kind, tenant: submission.request.tenant_id });
+      if (!ack) {
+        const error = new Error("The server's answer did not confirm this request (it did not name a matching operation).");
+        if (tdPending[form] === entry) error.deployRetry = true;
+        throw error;
+      }
+      if (tdPending[form] === entry) tdClearForm(form);
+      const view = tdShowOperation(ack);
+      show(TD_MESSAGES[form], [
+        value.duplicate === true ? "This was already recorded earlier with the same request key; nothing new was added." : "Recorded. Nothing was deployed (cloud execution is switched off, OD-002).",
+        view.headline,
+        `Next step: ${typeof ack.next_step === "string" ? ack.next_step : "--"}`,
+        `Operation ID: ${view.operation ?? "--"} (now in the operation box below, where Cancel withdraws it)`,
+        `Tenant ID: ${view.tenant ?? "--"}`,
+      ].join("\n"));
+      await tdReload(mark);
+    }
+    on(TD("create"), "tdCreate", (mark) => tdSubmit(mark, "tdCreate", async () => deploymentCreateSubmission({
+      name: $(TD("name")).value, maxVectors: $(TD("max-vectors")).value,
+      writer: await tdProfile("writer", "Writer profile"), initialization: await tdProfile("init", "Initialization settings"),
+      resources: $(TD("resources")).value, secrets: $(TD("secrets")).value,
+    })), deploymentExplain);
+    on(TD("readers"), "tdReaders", (mark) => tdSubmit(mark, "tdReaders", async () => {
+      const present = $(TD("readers-mode")).value === "present";
+      return deploymentReadersSubmission({
+        tenant: $(TD("readers-tenant")).value, mode: $(TD("readers-mode")).value,
+        min: $(TD("readers-min")).value, max: $(TD("readers-max")).value, routing: $(TD("readers-routing")).value,
+        reader: present ? await tdProfile("reader", "Reader profile") : "", scaling: present ? await tdProfile("scaling", "Scaling rule") : "",
+      });
+    }), deploymentExplain);
+    on(TD("retire"), "tdRetire", (mark) => tdSubmit(mark, "tdRetire", async () => deploymentRetireSubmission({
+      tenant: $(TD("retire-tenant")).value, receipt: $(TD("retire-receipt")).value, reason: $(TD("retire-reason")).value,
+    })), deploymentExplain);
+    function tdOperationId() {
+      const id = tdOperationField();
+      if (!OPERATION_ID.test(id)) throw new Error("Operation ID must be the 32-character ID from the list (Use this operation fills it in) or from a result above; nothing was sent");
+      return id;
+    }
+    // Always reads the operation first: Cancel must quote its current tokens.
+    async function tdRead(mark, id) {
+      const value = await ctx.api("GET", `/v1/admin/tenant-deployment-operations/${id}`, undefined, { data: false });
+      if (!current(mark)) return null;
+      if (!object(value?.operation) || value.operation.operation_id !== id) throw new Error("The server sent an unexpected operation status. Select Check status to try again.");
+      tdShowOperation(value.operation);
+      return value.operation;
+    }
+    on(TD("check"), "tdOperation", async (mark) => {
+      need("tenantDeployments");
+      const id = tdOperationId();
+      const op = await tdRead(mark, id);
+      if (!op) return;
+      if (deploymentReleasePending(op)) {
+        const saved = tdCancelSavedFor(id);
+        show(TD_MESSAGES.tdOperation, saved ? tdResendHelp(saved, "\n") : RELEASE_LOST);
+        return;
+      }
+      show(TD_MESSAGES.tdOperation, deploymentTerminal(op) ? "This operation has ended; it cannot be cancelled." : `Next step: ${typeof op.next_step === "string" ? op.next_step : "--"}`);
+    }, deploymentExplain);
+    on(TD("cancel"), "tdOperation", async (mark) => {
+      need("tenantDeployments");
+      const id = tdOperationId();
+      show(TD_MESSAGES.tdOperation, "Reading the operation's current status first…");
+      const op = await tdRead(mark, id);
+      if (!op) return;
+      const saved = tdCancelSavedFor(id);
+      const releasing = deploymentReleasePending(op);
+      if (releasing && !saved) { show(TD_MESSAGES.tdOperation, RELEASE_LOST); return; }
+      if (!releasing && deploymentTerminal(op)) {
+        tdCancelDrop(id);
+        show(TD_MESSAGES.tdOperation, "This operation has already ended, so there is nothing to cancel. Nothing was sent.");
+        return;
+      }
+      const pending = saved ?? { operation: id, principal: tdPrincipal, scope: tdScope, ...deploymentCancelRequest(op, idempotencyKey()) };
+      if (!await ctx.confirm(releasing ? deploymentReleaseConfirm(op) : deploymentCancelConfirm(op, saved !== null))) { if (current(mark)) show(TD_MESSAGES.tdOperation, "Nothing was sent."); return; }
+      if (!current(mark)) return;
+      tdCancelKeep(pending);
+      show(TD_MESSAGES.tdOperation, "Sending the cancel…");
+      let value;
+      try { value = await ctx.api("POST", pending.path, pending.body, { data: false }); }
+      catch (error) {
+        if (current(mark) && tdCancelPending === pending) {
+          if (deploymentRetryable(error)) error.deployRetry = true;
+          else tdCancelDrop(id);
+        }
+        if (error?.code === "operation_generation_stale" && current(mark)) focusAfterRun(TD("check"));
+        throw error;
+      }
+      if (!current(mark)) return;
+      // Keep the saved cancel until the answer names this operation and its reservation is released.
+      const ack = deploymentAck(value, { operation: id });
+      if (!ack) {
+        const error = new Error("The server's answer did not confirm the cancel (it did not name this operation).");
+        if (tdCancelPending === pending) error.deployRetry = true;
+        throw error;
+      }
+      const stillReserved = deploymentReleasePending(ack);
+      if (!stillReserved) tdCancelDrop(id);
+      const view = tdShowOperation(ack);
+      show(TD_MESSAGES.tdOperation, [
+        stillReserved ? `${RELEASE_PENDING} Select Cancel again to resend the same cancel and finish the release.`
+          : ack.phase === "cancelling" ? "Cancellation started but is not finished. Select Cancel again to finish it."
+          : ack.phase === "cancelled" ? "Cancelled. Cloud execution is switched off (OD-002), so nothing in Azure was touched." : "The server answered:",
+        view.headline,
+        `Next step: ${typeof ack.next_step === "string" ? ack.next_step : "--"}`,
+        ...(stillReserved ? [deploymentCancelScope(pending.principal, pending.scope)] : []),
+      ].join("\n"));
+      await tdReload(mark);
+    }, deploymentExplain);
+    // Choosing a file replaces the pasted text (and the other way round); any edit makes the next submission a new request.
+    for (const p of TD_PROFILES) {
+      $(TD(`${p}-file`)).addEventListener("change", () => {
+        const file = $(TD(`${p}-file`)).files?.[0];
+        if (file) $(TD(`${p}-text`)).value = "";
+        $(TD(`${p}-note`)).textContent = file ? `Using the file ${file.name} (${file.size} bytes) exactly as it is. Its SHA-256 appears in the confirmation before anything is sent.` : "";
+      });
+      $(TD(`${p}-text`)).addEventListener("input", () => {
+        if ($(TD(`${p}-file`)).files?.length) { $(TD(`${p}-file`)).value = ""; $(TD(`${p}-note`)).textContent = "Using the pasted text instead of the file."; }
+      });
+    }
+    for (const [form, ids] of Object.entries(TD_FORM_FIELDS)) {
+      for (const id of ids) for (const type of ["input", "change"]) $(id).addEventListener(type, () => { delete tdPending[form]; });
+    }
+    $(TD("readers-mode")).addEventListener("change", () => { $(TD("readers-present")).hidden = $(TD("readers-mode")).value !== "present"; });
+    $(TD("operation")).addEventListener("input", () => {
+      if (tdCancelPending?.operation !== tdOperationField()) tdCancelPending = null;
+      gateTenantDeployments();
+    });
     function gate(offline = false) {
       gates = availability(ctx.capabilities(), !offline && ctx.connected());
       $("replication-export").disabled = !gates.replication.allowed;
@@ -1580,23 +2231,48 @@
       tdAfter = null; tdPage = 0;
       tdStatus("Tenant deployment operations not loaded.", "idle");
       cList("tenant-deployment-list", [], () => null);
+      tdPending = {}; tdCancelPending = null; tdOp = null;
+      $(TD("operation-status")).textContent = "No operation selected.";
+      cList(TD("operation-facts"), [], () => null);
+      for (const id of Object.values(TD_MESSAGES)) show(id, "");
       graphSupport(false);
       for (const id of Object.values(OUTPUTS)) show(id, "");
     }
     return {
       capabilities(caps) {
         reset();
+        // Saved cancels are used only by the account the server verified now; unreadable (older or damaged) ones are deleted.
+        tdPrincipal = tdLastPrincipal = deploymentPrincipal(caps);
+        tdCancelSweep(() => false);
         gates = availability(caps, ctx.connected());
         for (const [area, id] of Object.entries(OUTPUTS)) if (!gates[area].allowed) show(id, gates[area].reason);
         gate();
         if (gates.compaction.allowed) cRefresh(epoch, true);
       },
-      disconnect() {
+      // sessionEnded: the account signed out or its session was found to have ended, so its saved cancels are deleted.
+      // Otherwise (another sign-in replacing this one, or the page closing) they stay for that account only.
+      // rejectedToken: the server refused the access token this page sent (app.js passes it only as true). The page may
+      // not have learned whose it was (refused before capabilities answered), so it counts as the bootstrap admin
+      // token's session ending too. Either way, keys whose owner cannot be read are deleted with them.
+      disconnect(options = {}) {
+        if (options?.sessionEnded === true) {
+          const who = tdPrincipal ?? tdLastPrincipal;
+          const token = options.rejectedToken === true;
+          tdCancelSweep((owner) => owner === who || (token && owner === "admin_token"));
+          tdLastPrincipal = null;
+        }
+        tdPrincipal = null;
         reset();
         $("replication-after").value = "";
         $("user-password").value = "";
+        // Sign-out forgets everything typed or chosen in the tenant deployment forms.
+        $(TD("operation")).value = "";
+        for (const form of Object.keys(TD_FORM_FIELDS)) tdClearForm(form);
         gate(true);
       },
+      // This browser's password session ended (or none exists), so every user account's saved cancels are deleted.
+      // The bootstrap admin token's are not: they end with its own sign-out or rejection.
+      forgetAccountCancels() { tdCancelSweep((owner) => owner.startsWith("user:")); },
       gate,
     };
   }
@@ -1605,7 +2281,11 @@
     username, password, userRole, userTenant, userId, userRequest, userChanges, userView, userList,
     formatBytes, compactionForm, compactionSettings, compactionOutcome, compactionView, idempotencyKey, COMPACTION_PHASES,
     cloudBackupForm, cloudBackupPolicy, cloudBackupView, cloudBackupSets, cloudBackupSetFacts, cloudRunOutcome, cloudRestoreOutcome, cloudInterval, cloudCollectionText, cloudDrillText,
-    autoFailoverView, autoFailoverRequest, deploymentListPath, deploymentRequest, deploymentView, deploymentList, deploymentBlocked, deploymentExplain } };
+    autoFailoverView, autoFailoverRequest, deploymentListPath, deploymentRequest, deploymentView, deploymentList, deploymentBlocked, deploymentExplain,
+    sha256Hex, deploymentContent, deploymentCreateSubmission, deploymentReadersSubmission, deploymentRetireSubmission, deploymentTerminal,
+    deploymentCancelRequest, deploymentCancelConfirm, deploymentRetryable, deploymentProfileText, DEPLOY_HINTS, DEPLOY_SETTLED,
+    deploymentReleasePending, deploymentReleaseConfirm, deploymentSavedCancel, deploymentAck, DEPLOY_PHASES, DEPLOY_KINDS, RELEASE_PENDING, RELEASE_LOST,
+    deploymentPrincipal, deploymentApiScope, deploymentCancelOwner, deploymentCancelScope, DEPLOY_RETRY_AFTER_FIX } };
   if (typeof window !== "undefined") window.VLiteAdminTools = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })();
