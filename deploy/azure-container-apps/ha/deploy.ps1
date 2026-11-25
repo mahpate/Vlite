@@ -255,7 +255,7 @@ function Assert-VLiteHaDeploymentParameters([hashtable]$Config) {
             -not $target.prefix -or -not $target.client_id -or $target.account -ne $Config.StorageAccount) {
             throw "$key requires an explicit managed-identity Blob target in the approved storage account."
         }
-        $allowed = @('account', 'container', 'coordination_container', 'prefix', 'auth', 'client_id')
+        $allowed = $script:VLiteHaBlobTargetFields
         if (@($target.Keys | Where-Object { $_ -notin $allowed }).Count) {
             throw "$key contains unsupported fields; shared keys and connection strings are prohibited."
         }

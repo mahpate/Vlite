@@ -45,10 +45,72 @@ enum Config {
     Observe(Observe),
     Analyze(Analyze),
     ClockSample(ClockSample),
+    ClockReference(ClockReference),
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ClockSample {}
+/// A bounded reference-clock endpoint for replica-initiated polling inside an
+/// isolated test environment. It supplies samples only, never qualification.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClockReference {
+    bind: String,
+    #[serde(default = "observe_duration")]
+    duration_secs: u64,
+}
+impl ClockReference {
+    fn validate(&self) -> std::result::Result<(), &'static str> {
+        if self.bind.parse::<std::net::SocketAddr>().is_err() {
+            return Err("clock_reference_bind_invalid");
+        }
+        if !(1..=7200).contains(&self.duration_secs) {
+            return Err("duration_secs_out_of_range");
+        }
+        Ok(())
+    }
+}
+fn reference_interval() -> u64 {
+    1000
+}
+/// Optional observer polling of a `clock_reference` endpoint. The URL is
+/// private configuration and never appears in evidence.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReferencePoll {
+    url: String,
+    #[serde(default = "reference_interval")]
+    interval_ms: u64,
+    #[serde(default = "timeout")]
+    timeout_ms: u64,
+}
+impl ReferencePoll {
+    fn validate(&self, duration_secs: u64) -> std::result::Result<(), &'static str> {
+        let url = reqwest::Url::parse(&self.url).map_err(|_| "clock_reference_url_invalid")?;
+        if !matches!(url.scheme(), "http" | "https")
+            || url.host_str().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+            || url.path() != "/clock"
+        {
+            return Err("clock_reference_url_invalid");
+        }
+        if !(100..=60000).contains(&self.interval_ms) {
+            return Err("clock_reference_interval_ms_out_of_range");
+        }
+        if !(10..=1000).contains(&self.timeout_ms) {
+            return Err("clock_reference_timeout_ms_out_of_range");
+        }
+        if duration_secs.saturating_mul(1000) / self.interval_ms + 1
+            > MAX_REFERENCE_EXCHANGES as u64
+        {
+            return Err("clock_reference_sample_limit");
+        }
+        Ok(())
+    }
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Run {
@@ -82,6 +144,7 @@ struct Observe {
     duration_secs: u64,
     #[serde(default = "timeout")]
     timeout_ms: u64,
+    clock_reference: Option<ReferencePoll>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -107,6 +170,207 @@ fn resolution() -> f64 {
     1.
 }
 const MAX_EXCHANGES: usize = 64;
+const MAX_REFERENCE_EXCHANGES: usize = 4096;
+const REFERENCE_SCHEMA: &str = "vlite-meas005-clock-reference/1";
+const REFERENCE_QUALIFICATION: &str = "diagnostic_only_motion_between_samples_unobserved";
+/// Absolute budget for reading one request head, measured from accept.
+const REFERENCE_CONNECTION_MS: u64 = 1000;
+/// Bound on theta = subject - reference from one replica-initiated exchange
+/// `[subject send, reference receive, reference reply, subject receive]`, all
+/// floor-rounded unix ms: theta lies in [s0 - r1 - 1, s3 - r2 + 1]. Returns
+/// None for orderings that no causal exchange can produce.
+fn reference_bounds(sample: &[u64; 4]) -> Option<(f64, f64)> {
+    let [s0, r1, r2, s3] = sample.map(|x| x as f64);
+    let bounds = (s0 - r1 - 1., s3 - r2 + 1.);
+    (s3 >= s0 && r2 >= r1 && bounds.0 <= bounds.1).then_some(bounds)
+}
+/// Serves `GET /clock` until `until`, one bounded connection at a time.
+/// Returns the number of clock replies written. The server is serial, so a
+/// connection waits behind at most one other connection's budget (reading
+/// is capped at `REFERENCE_CONNECTION_MS` from accept, writing at 1 s).
+fn serve_reference(
+    listener: std::net::TcpListener,
+    until: Instant,
+) -> std::result::Result<u64, &'static str> {
+    use std::io::{ErrorKind, Read, Write};
+    listener
+        .set_nonblocking(true)
+        .map_err(|_| "clock_reference_listener_failed")?;
+    let mut served = 0u64;
+    while Instant::now() < until {
+        let mut stream = match listener.accept() {
+            Ok((stream, _)) => stream,
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(1));
+                continue;
+            }
+            // One peer aborting its own connection must not stop the
+            // reference for every other replica.
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::ConnectionAborted
+                        | ErrorKind::ConnectionReset
+                        | ErrorKind::Interrupted
+                        | ErrorKind::TimedOut
+                ) =>
+            {
+                continue;
+            }
+            Err(_) => return Err("clock_reference_accept_failed"),
+        };
+        // Per-read timeouts alone let a slow, dripping client hold this
+        // serial server indefinitely, so reading has one absolute deadline.
+        let connection_deadline = Instant::now() + Duration::from_millis(REFERENCE_CONNECTION_MS);
+        let configured = stream.set_nonblocking(false).is_ok()
+            && stream
+                .set_write_timeout(Some(Duration::from_millis(1000)))
+                .is_ok();
+        let mut head = Vec::new();
+        let mut buffer = [0u8; 512];
+        while configured && head.len() <= 2048 && !head.windows(4).any(|w| w == b"\r\n\r\n") {
+            let remaining = connection_deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() || stream.set_read_timeout(Some(remaining)).is_err() {
+                break;
+            }
+            match stream.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => head.extend_from_slice(&buffer[..n]),
+            }
+        }
+        // Receive time is taken only after the full request head arrived.
+        let receive = now_ms();
+        let clock = head.windows(4).any(|w| w == b"\r\n\r\n")
+            && (head.starts_with(b"GET /clock HTTP/1.1\r\n")
+                || head.starts_with(b"GET /clock HTTP/1.0\r\n"));
+        let (status, body) = if clock {
+            let reply = now_ms();
+            (
+                "200 OK",
+                json!({"schema":REFERENCE_SCHEMA,"receive_unix_ms":receive,"reply_unix_ms":reply})
+                    .to_string(),
+            )
+        } else {
+            ("404 Not Found", "{}".to_string())
+        };
+        let written = stream.write_all(
+            format!(
+                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .as_bytes(),
+        );
+        if clock && written.is_ok() {
+            served += 1;
+        }
+    }
+    Ok(served)
+}
+/// One replica-initiated exchange; any transport, status or shape fault, or a
+/// causally impossible ordering, yields None (counted as a failure).
+fn poll_reference(client: &reqwest::blocking::Client, url: &str) -> Option<[u64; 4]> {
+    let send = now_ms();
+    let reply = request(client, url, "", "").ok()?;
+    let receive = now_ms();
+    if reply.status != 200 || reply.body["schema"] != REFERENCE_SCHEMA {
+        return None;
+    }
+    let sample = [
+        send,
+        reply.body["receive_unix_ms"].as_u64()?,
+        reply.body["reply_unix_ms"].as_u64()?,
+        receive,
+    ];
+    reference_bounds(&sample).map(|_| sample)
+}
+/// Sampled diagnostics only: the samples observe the offset at discrete
+/// points, so motion between samples stays unobserved and no continuity
+/// envelope is derived.
+fn reference_diagnostics(collected: &Value) -> Value {
+    if collected.is_null() {
+        return Value::Null;
+    }
+    let status = |status: &str| {
+        json!({"status":status,"continuity_envelope_ms":null,
+            "qualification":REFERENCE_QUALIFICATION})
+    };
+    let invalid = status("invalid");
+    let Some(exchanges) = collected["exchanges"]
+        .as_array()
+        .filter(|x| x.len() <= MAX_REFERENCE_EXCHANGES)
+    else {
+        return invalid;
+    };
+    // Every attempt either yields one exchange or counts as one failure.
+    let (Some(attempts), Some(failures)) = (
+        collected["attempts"].as_u64(),
+        collected["failures"].as_u64(),
+    ) else {
+        return invalid;
+    };
+    if failures > attempts || attempts - failures != exchanges.len() as u64 {
+        return invalid;
+    }
+    if exchanges.is_empty() {
+        let mut empty = status("no_samples");
+        empty["attempts"] = json!(attempts);
+        empty["failures"] = json!(failures);
+        return empty;
+    }
+    let mut samples = Vec::new();
+    for exchange in exchanges {
+        let field = |name: &str| exchange[name].as_u64();
+        let (Some(s0), Some(r1), Some(r2), Some(s3)) = (
+            field("subject_send_unix_ms"),
+            field("reference_receive_unix_ms"),
+            field("reference_reply_unix_ms"),
+            field("subject_receive_unix_ms"),
+        ) else {
+            return invalid;
+        };
+        let Some(bounds) = reference_bounds(&[s0, r1, r2, s3]) else {
+            return invalid;
+        };
+        // Polls are sequential, so a send before the previous receive means
+        // the subject's wall clock moved backward (evidence, not malformed).
+        if samples
+            .last()
+            .is_some_and(|(previous, _): &([u64; 4], _)| previous[3] > s0)
+        {
+            return status("subject_clock_stepped_backward");
+        }
+        samples.push(([s0, r1, r2, s3], bounds));
+    }
+    let midpoints: Vec<f64> = samples.iter().map(|(_, (l, u))| (l + u) / 2.).collect();
+    let lowest_upper = samples
+        .iter()
+        .map(|(_, b)| b.1)
+        .fold(f64::INFINITY, f64::min);
+    let highest_lower = samples
+        .iter()
+        .map(|(_, b)| b.0)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let gaps = samples.windows(2).map(|w| w[1].0[0] - w[0].0[0]).max();
+    let net = samples
+        .iter()
+        .map(|(s, _)| (s[3] - s[0]) as f64 - (s[2] - s[1]) as f64)
+        .reduce(f64::min);
+    let spread = midpoints
+        .iter()
+        .copied()
+        .reduce(f64::max)
+        .zip(midpoints.iter().copied().reduce(f64::min))
+        .map(|(max, min)| max - min);
+    json!({"status":"collected","samples":samples.len(),
+        "attempts":attempts,"failures":failures,
+        "first_subject_send_unix_ms":samples.first().map(|s| s.0[0]),
+        "last_subject_receive_unix_ms":samples.last().map(|s| s.0[3]),
+        "max_subject_gap_ms":gaps,"min_net_rtt_ms":net,
+        "sampled_midpoint_spread_ms":spread,
+        "constant_offset_contradicted":highest_lower > lowest_upper,
+        "continuity_envelope_ms":null,
+        "qualification":REFERENCE_QUALIFICATION})
+}
 const MUTATOR_DRIFT_ALLOWANCE_MS: f64 = 10.;
 /// One NTP-style exchange: t0/t3 on the reference clock, t1/t2 on the subject
 /// clock (subject receive/reply). Values are floor-rounded to `resolution_ms`.
@@ -608,6 +872,9 @@ fn observe(config: Observe) -> Result<Value> {
     bounded("interval_ms", config.interval_ms, 10, 5000)?;
     bounded("duration_secs", config.duration_secs, 1, 3540)?;
     bounded("timeout_ms", config.timeout_ms, 10, 1000)?;
+    if let Some(reference) = &config.clock_reference {
+        reference.validate(config.duration_secs)?;
+    }
     if !matches!(config.role.as_str(), "gateway" | "backend") {
         return Err("observer_role_invalid".into());
     }
@@ -705,6 +972,51 @@ fn observe(config: Observe) -> Result<Value> {
     let mut child = Owned(child);
     let start_utc = now_ms();
     let start = Instant::now();
+    // Reference polling runs on its own thread so its round trips never
+    // stretch the readiness sampling cadence. The guard stops the poller on
+    // every exit path, including early error returns below.
+    struct StopOnDrop(Arc<AtomicBool>);
+    impl Drop for StopOnDrop {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+    let reference_stop = StopOnDrop(Arc::new(AtomicBool::new(false)));
+    let reference = match &config.clock_reference {
+        Some(poll) => {
+            let reference_client = support::client(poll.timeout_ms)?;
+            let (url, interval) = (poll.url.clone(), Duration::from_millis(poll.interval_ms));
+            let (stop, window) = (
+                reference_stop.0.clone(),
+                Duration::from_secs(config.duration_secs),
+            );
+            Some(thread::spawn(move || {
+                let (mut exchanges, mut attempts, mut failures) = (Vec::new(), 0u64, 0u64);
+                while !stop.load(Ordering::SeqCst)
+                    && start.elapsed() < window
+                    && exchanges.len() < MAX_REFERENCE_EXCHANGES
+                {
+                    let began = Instant::now();
+                    attempts += 1;
+                    match poll_reference(&reference_client, &url) {
+                        Some([s0, r1, r2, s3]) => exchanges.push(json!({
+                            "subject_send_unix_ms":s0,"reference_receive_unix_ms":r1,
+                            "reference_reply_unix_ms":r2,"subject_receive_unix_ms":s3})),
+                        None => failures += 1,
+                    }
+                    while !stop.load(Ordering::SeqCst) && began.elapsed() < interval {
+                        thread::sleep(
+                            interval
+                                .saturating_sub(began.elapsed())
+                                .min(Duration::from_millis(50)),
+                        );
+                    }
+                }
+                (exchanges, attempts, failures)
+            }))
+        }
+        None => None,
+    };
     let mut events = Vec::new();
     let mut previous = Value::Null;
     let mut polls = 0u64;
@@ -776,13 +1088,24 @@ fn observe(config: Observe) -> Result<Value> {
     }
     let end_utc = now_ms();
     let elapsed_ms = start.elapsed().as_secs_f64() * 1000.;
+    reference_stop.0.store(true, Ordering::SeqCst);
+    let reference = match (reference, &config.clock_reference) {
+        (Some(handle), Some(poll)) => {
+            let (exchanges, attempts, failures) =
+                handle.join().map_err(|_| "clock_reference_poller_failed")?;
+            json!({"qualification":REFERENCE_QUALIFICATION,
+                "interval_ms":poll.interval_ms,"timeout_ms":poll.timeout_ms,
+                "attempts":attempts,"failures":failures,"limit":MAX_REFERENCE_EXCHANGES,
+                "exchanges":exchanges})
+        }
+        _ => Value::Null,
+    };
     drop(child);
     drop(runtime);
     if signal_failed.load(Ordering::SeqCst) {
         return Err("observer_signal_failed".into());
     }
-    Ok(
-        json!({"schema":"vlite-meas005-observer/1","qualification":"proposal_evidence_only",
+    let mut report = json!({"schema":"vlite-meas005-observer/1","qualification":"proposal_evidence_only",
         "source":provenance(),"replica":replica,"role":config.role,"app":app,"revision":revision,
         "identity_source":if platform_replica.is_some() {"ACA_environment"} else {"local_explicit"},
         "boot_id":boot,"owns_serving_child":true,"terminated_early":terminated_early,
@@ -793,8 +1116,13 @@ fn observe(config: Observe) -> Result<Value> {
         "requested":{"interval_ms":config.interval_ms,"duration_secs":config.duration_secs,"timeout_ms":config.timeout_ms},
         "limits":{"events":2048,"duration_secs":3540,"body_bytes":BODY_LIMIT},
         "uncertainty":{"clock_offset":"external_calibration_required","feed_poll_count":null,
-            "readiness_polls_are_not_Blob_GETs":true,"shutdown":"measurement_child_killed_and_reaped_at_end"}}),
-    )
+            "readiness_polls_are_not_Blob_GETs":true,"shutdown":"measurement_child_killed_and_reaped_at_end"}});
+    // Emitted only when configured so the existing gateway entrypoint shape
+    // (which does not yet forward clock_reference) is unchanged.
+    if !reference.is_null() {
+        report["clock_reference"] = reference;
+    }
+    Ok(report)
 }
 
 fn analyze(config: Analyze) -> Result<Value> {
@@ -1019,6 +1347,7 @@ fn analyze_with(config: Analyze, envelope: Option<f64>) -> Result<Value> {
             "successful_lower_ms":summary(&lower_values),"successful_upper_ms":summary(&upper_values),
             "readiness_polls":report["polls"],"readiness_failures":report["readiness_failures"],
             "max_sample_start_gap_ms":report["max_sample_start_gap_ms"],
+            "clock_reference_samples":reference_diagnostics(&report["clock_reference"]),
             "logical_feed_polls":null,"physical_blob_GETs":null}));
     }
     if !config.replicas.iter().any(|r| r.role == "gateway")
@@ -1049,6 +1378,21 @@ fn main() {
         Config::Run(config) => run(config),
         Config::Observe(config) => observe(config),
         Config::Analyze(config) => analyze(config),
+        Config::ClockReference(config) => {
+            config.validate()?;
+            let listener = std::net::TcpListener::bind(&config.bind)
+                .map_err(|_| "clock_reference_bind_failed")?;
+            let started = now_ms();
+            let served = serve_reference(
+                listener,
+                Instant::now() + Duration::from_secs(config.duration_secs),
+            )?;
+            Ok(
+                json!({"schema":REFERENCE_SCHEMA,"qualification":"proposal_evidence_only",
+                "source":provenance(),"start_unix_ms":started,"end_unix_ms":now_ms(),
+                "replies":served,"duration_secs":config.duration_secs}),
+            )
+        }
         Config::ClockSample(_) => {
             let before = now_ms();
             let mono = Instant::now();
@@ -1540,5 +1884,277 @@ mod tests {
         observer["start_unix_ms"] = json!(1200);
         std::fs::write(&config.replicas[0].report_file, observer.to_string()).unwrap();
         assert_eq!(verified(config, 0.)["complete"], false);
+    }
+
+    /// Subject (replica) clock = reference + theta; the replica initiates.
+    fn subject_exchange(at: f64, theta: f64, forward: f64, processing: f64, back: f64) -> [u64; 4] {
+        let receive = at + forward;
+        let reply = receive + processing;
+        [
+            (at + theta).floor() as u64,
+            receive.floor() as u64,
+            reply.floor() as u64,
+            (reply + back + theta).floor() as u64,
+        ]
+    }
+
+    #[test]
+    fn replica_initiated_exchange_bounds_true_offset_with_ms_quantization() {
+        for (theta, forward, back) in [(0., 0.4, 0.4), (250.7, 1.2, 9.9), (-75.3, 30., 0.1)] {
+            let sample = subject_exchange(1_000_000.5, theta, forward, 2.3, back);
+            let (lower, upper) = reference_bounds(&sample).unwrap();
+            assert!(
+                lower <= theta && theta <= upper,
+                "{theta} not in [{lower},{upper}]"
+            );
+            // The bound width is the net round trip plus two quantization steps.
+            assert!(upper - lower <= forward + back + 2. + 2.);
+        }
+        // Reply before receive, or receive before send: not an exchange.
+        assert_eq!(reference_bounds(&[10, 20, 19, 30]), None);
+        assert_eq!(reference_bounds(&[30, 20, 20, 29]), None);
+        // A reference that spent longer than the round trip is causally impossible.
+        assert_eq!(reference_bounds(&[10, 0, 20, 15]), None);
+    }
+
+    #[test]
+    fn reference_poll_config_is_bounded_and_never_exposes_the_url() {
+        let poll = |url: &str, interval_ms: u64| ReferencePoll {
+            url: url.into(),
+            interval_ms,
+            timeout_ms: 1000,
+        };
+        assert_eq!(
+            poll("http://ref.internal:8080/clock", 1000).validate(1200),
+            Ok(())
+        );
+        assert_eq!(
+            poll("https://ref.internal/clock", 865).validate(3540),
+            Ok(())
+        );
+        assert_eq!(
+            poll("https://ref.internal/clock", 864).validate(3540).err(),
+            Some("clock_reference_sample_limit")
+        );
+        assert_eq!(
+            poll("http://ref.internal/clock", 99).validate(10).err(),
+            Some("clock_reference_interval_ms_out_of_range")
+        );
+        for bad in [
+            "ftp://ref/clock",
+            "http://user:pw@ref/clock",
+            "http://ref/clock?sig=1",
+            "http://ref/clock#x",
+            "http://ref/other",
+            "not a url",
+        ] {
+            assert_eq!(
+                poll(bad, 1000).validate(10).err(),
+                Some("clock_reference_url_invalid")
+            );
+        }
+        let parsed: Config = serde_json::from_value(json!({"mode":"observe",
+            "server":{"program":"/bin/true","args":[]},"ready_url":"http://127.0.0.1:8080/ready",
+            "role":"gateway","clock_reference":{"url":"http://ref/clock"}}))
+        .unwrap();
+        let Config::Observe(observe) = parsed else {
+            panic!("observe")
+        };
+        let reference = observe.clock_reference.unwrap();
+        assert_eq!((reference.interval_ms, reference.timeout_ms), (1000, 1000));
+        assert!(
+            serde_json::from_value::<Config>(json!({"mode":"observe",
+            "server":{"program":"/bin/true","args":[]},"ready_url":"http://127.0.0.1:8080/ready",
+            "role":"gateway","clock_reference":{"url":"http://ref/clock","envelope_ms":1}}))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<Config>(
+                json!({"mode":"clock_reference","bind":"0.0.0.0:8080",
+                "duration_secs":10,"extra":1})
+            )
+            .is_err()
+        );
+        let bind = |bind: &str, duration_secs| ClockReference {
+            bind: bind.into(),
+            duration_secs,
+        };
+        assert_eq!(bind("0.0.0.0:8080", 3600).validate(), Ok(()));
+        assert_eq!(
+            bind("0.0.0.0:8080", 7201).validate().err(),
+            Some("duration_secs_out_of_range")
+        );
+        assert_eq!(
+            bind("ref:8080", 10).validate().err(),
+            Some("clock_reference_bind_invalid")
+        );
+    }
+
+    #[test]
+    fn reference_endpoint_answers_replica_polls_on_loopback() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            serve_reference(listener, Instant::now() + Duration::from_secs(3))
+        });
+        let client = client(1000).unwrap();
+        let sample = poll_reference(&client, &format!("http://{address}/clock")).unwrap();
+        // Same host clock: theta = 0 must lie in the bound.
+        let (lower, upper) = reference_bounds(&sample).unwrap();
+        assert!(lower <= 0. && 0. <= upper);
+        assert_eq!(
+            poll_reference(&client, &format!("http://{address}/other")),
+            None
+        );
+        assert_eq!(server.join().unwrap(), Ok(1));
+    }
+
+    #[test]
+    fn reference_endpoint_cuts_off_a_dripping_client() {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            serve_reference(listener, Instant::now() + Duration::from_secs(3))
+        });
+        // One byte every 200 ms never completes a head; a per-read timeout
+        // alone would hold the serial server for the whole 4 s drip.
+        let mut drip = std::net::TcpStream::connect(address).unwrap();
+        drip.write_all(b"G").unwrap();
+        thread::spawn(move || {
+            for _ in 0..20 {
+                thread::sleep(Duration::from_millis(200));
+                if drip.write_all(b"x").is_err() {
+                    break;
+                }
+            }
+        });
+        thread::sleep(Duration::from_millis(100));
+        let began = Instant::now();
+        let sample = poll_reference(&client(3000).unwrap(), &format!("http://{address}/clock"));
+        assert!(sample.is_some());
+        assert!(began.elapsed() < Duration::from_millis(2500));
+        assert_eq!(server.join().unwrap(), Ok(1));
+    }
+
+    #[test]
+    fn reference_diagnostics_separate_steps_empty_runs_and_miscounts() {
+        let exchange = |e: [u64; 4]| {
+            json!({"subject_send_unix_ms":e[0],"reference_receive_unix_ms":e[1],
+                "reference_reply_unix_ms":e[2],"subject_receive_unix_ms":e[3]})
+        };
+        let diagnose = |exchanges: Vec<Value>, attempts: Value, failures: Value| {
+            reference_diagnostics(
+                &json!({"attempts":attempts,"failures":failures,"exchanges":exchanges}),
+            )
+        };
+        // The second send precedes the first receive: the subject's clock
+        // stepped backward, which is evidence rather than malformed input.
+        let stepped = diagnose(
+            vec![
+                exchange([1000, 1000, 1001, 1010]),
+                exchange([1005, 1003, 1004, 1012]),
+            ],
+            json!(2),
+            json!(0),
+        );
+        assert_eq!(stepped["status"], "subject_clock_stepped_backward");
+        assert_eq!(stepped["continuity_envelope_ms"], Value::Null);
+        assert_eq!(stepped["qualification"], REFERENCE_QUALIFICATION);
+        let empty = diagnose(vec![], json!(3), json!(3));
+        assert_eq!(empty["status"], "no_samples");
+        assert_eq!(
+            (&empty["attempts"], &empty["failures"]),
+            (&json!(3), &json!(3))
+        );
+        assert_eq!(empty["qualification"], REFERENCE_QUALIFICATION);
+        let one = || vec![exchange([1000, 1000, 1001, 1010])];
+        assert_eq!(diagnose(one(), json!(1), json!(0))["status"], "collected");
+        for (attempts, failures) in [
+            (json!(2), json!(0)),
+            (json!(1), json!(2)),
+            (json!(-1), json!(0)),
+            (json!(1.5), json!(0)),
+            (Value::Null, json!(0)),
+            (json!(1), Value::Null),
+        ] {
+            assert_eq!(diagnose(one(), attempts, failures)["status"], "invalid");
+        }
+    }
+
+    fn with_reference(config: &Analyze, samples: Value, attempts: u64, failures: u64) {
+        for replica in &config.replicas {
+            let mut observer: Value = read(&replica.report_file).unwrap();
+            observer["clock_reference"] = json!({"qualification":REFERENCE_QUALIFICATION,
+                "interval_ms":1000,"timeout_ms":1000,"attempts":attempts,"failures":failures,
+                "limit":MAX_REFERENCE_EXCHANGES,"exchanges":samples});
+            std::fs::write(&replica.report_file, observer.to_string()).unwrap();
+        }
+    }
+
+    #[test]
+    fn reference_samples_are_diagnostics_and_never_qualify_continuity() {
+        let root = tempfile::tempdir().unwrap();
+        let config = analysis_fixture(root.path(), 1, true);
+        let exchanges = [
+            [1000u64, 1000, 1001, 1010],
+            [2000, 1995, 1996, 2004],
+            [3000, 3002, 3002, 3008],
+        ];
+        with_reference(
+            &config,
+            json!(
+                exchanges
+                    .iter()
+                    .map(|e| json!({"subject_send_unix_ms":e[0],
+            "reference_receive_unix_ms":e[1],"reference_reply_unix_ms":e[2],
+            "subject_receive_unix_ms":e[3]}))
+                    .collect::<Vec<_>>()
+            ),
+            4,
+            1,
+        );
+        let report = analyze(config).unwrap();
+        assert_eq!(report["complete"], false);
+        for replica in report["replicas"].as_array().unwrap() {
+            assert_eq!(replica["clock_calibrated"], false);
+            assert!(
+                replica["clock_calibration"]["reasons"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("calibration_continuity_unbounded"))
+            );
+            let diagnostics = &replica["clock_reference_samples"];
+            assert_eq!(diagnostics["status"], "collected");
+            assert_eq!(diagnostics["samples"], 3);
+            assert_eq!(diagnostics["attempts"], 4);
+            assert_eq!(diagnostics["failures"], 1);
+            assert_eq!(diagnostics["max_subject_gap_ms"], 1000);
+            assert_eq!(diagnostics["min_net_rtt_ms"], 3.);
+            // Midpoints: 4.5, 6.5, 2 -> sampled spread 4.5 ms.
+            assert_eq!(diagnostics["sampled_midpoint_spread_ms"], 4.5);
+            // Bounds [-1,10], [4,9], [-3,7] intersect, so a constant offset is
+            // not contradicted; that is still not a continuity bound.
+            assert_eq!(diagnostics["constant_offset_contradicted"], false);
+            assert_eq!(diagnostics["continuity_envelope_ms"], Value::Null);
+            assert_eq!(diagnostics["qualification"], REFERENCE_QUALIFICATION);
+        }
+        // Malformed sample evidence is reported invalid rather than repaired.
+        let config = analysis_fixture(root.path(), 1, true);
+        with_reference(
+            &config,
+            json!([{"subject_send_unix_ms":10,"reference_receive_unix_ms":20,
+            "reference_reply_unix_ms":19,"subject_receive_unix_ms":30}]),
+            1,
+            0,
+        );
+        let report = analyze(config).unwrap();
+        assert_eq!(
+            report["replicas"][0]["clock_reference_samples"]["status"],
+            "invalid"
+        );
+        // Without collection the field is explicitly null.
+        let report = analyze(analysis_fixture(root.path(), 1, true)).unwrap();
+        assert!(report["replicas"][0]["clock_reference_samples"].is_null());
     }
 }

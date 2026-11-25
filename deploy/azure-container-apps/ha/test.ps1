@@ -132,8 +132,26 @@ Assert (Test-VLiteHaParameters $config) 'Valid fixture rejected.'
 $gatewayConfig = New-VLiteHaGatewayConfig $config
 $trustConfig = $config.Clone(); $trustConfig.Audience = $config.WriterAudience
 $trust = New-VLiteHaTrustConfig $trustConfig
-Assert-Keys $gatewayConfig (Get-RustFields (Get-RustSource @('src', 'server', 'gateway_mode.rs')) 'GatewayFile') 'Gateway Rust'
-Assert-Keys $trust (Get-RustFields (Get-RustSource @('src', 'server', 'gateway_trust.rs')) 'TrustFile') 'Trust Rust'
+# dashboard is the opt-in OD-004 sign-in block (default off, unqualified on
+# ACA); the HA template does not emit it.
+Assert-Keys $gatewayConfig @(Get-RustFields (Get-RustSource @('src', 'server', 'gateway_mode.rs')) 'GatewayFile' |
+    Where-Object { $_ -cne 'dashboard' }) 'Gateway Rust'
+# control_projection is the mutually exclusive tenant-projection alternative to
+# control_state (EPIC-003, default off); the HA template emits control_state.
+Assert-Keys $trust @(Get-RustFields (Get-RustSource @('src', 'server', 'gateway_trust.rs')) 'TrustFile' |
+    Where-Object { $_ -cne 'control_projection' }) 'Trust Rust'
+# Blob target field list (shared by deploy.ps1 and templates.ps1). endpoint is
+# the loopback-emulator override; HA targets are real accounts and never emit it.
+Assert ((@($script:VLiteHaBlobTargetFields | Sort-Object -CaseSensitive) -join ',') -ceq
+    (@(Get-RustFields (Get-RustSource @('src', 'server', 'cloud_backup.rs')) 'Target' |
+        Where-Object { $_ -cne 'endpoint' } | Sort-Object -CaseSensitive) -join ',')) 'Blob target Rust field set differs.'
+# Protected singleton names must match resource_id.rs SINGLETON.
+$singletonSource = Get-Content -Raw -LiteralPath (Get-RustSource @('src', 'server', 'tenant_provisioning', 'resource_id.rs'))
+$singletonMatch = [regex]::Match($singletonSource, 'const SINGLETON: \[&str; \d+\] = \[([^\]]*)\]')
+Assert $singletonMatch.Success 'Missing Rust SINGLETON constant.'
+$rustSingletons = @([regex]::Matches($singletonMatch.Groups[1].Value, '"([^"]*)"') | ForEach-Object { $_.Groups[1].Value })
+Assert ($rustSingletons.Count -gt 0 -and (@($rustSingletons | Sort-Object -CaseSensitive) -join ',') -ceq
+    (@($script:VLiteHaSingletonNames | Sort-Object -CaseSensitive) -join ',')) 'Protected singleton names differ from resource_id.rs SINGLETON.'
 Assert-Keys (New-VLiteHaReaderApplyConfig $config) @(
     'target_file', 'follower_dir', 'capacity_bytes', 'staleness_bound_ms', 'poll_interval_ms'
 ) 'Reader apply configuration'
@@ -141,6 +159,109 @@ $overCapacity = $config.Clone(); $overCapacity.ReaderCapacityBytes = 1073741825
 Assert-Throws { New-VLiteHaReaderApplyConfig $overCapacity } 'ReaderCapacityBytes'
 $overBound = $config.Clone(); $overBound.ReaderStalenessBoundMs = 3600001
 Assert-Throws { New-VLiteHaReaderApplyConfig $overBound } 'ReaderStalenessBoundMs'
+
+# Tenant-scoped reader storage grants (design-tenant-provisioning ITEM-008):
+# offline ABAC template only; effective Azure enforcement is unqualified.
+$grantSub = '00000000-0000-4000-8000-000000000001'
+$grantPrincipal = '00000000-0000-4000-8000-0000000000aa'
+$grantArgs = @{
+    SubscriptionId = $grantSub; ResourceGroup = 'test-rg'; Target = $config.ArchiveTarget.Clone()
+    PrincipalId = $grantPrincipal; SiblingPrefixes = @('test/other/', 'test/tenant-b/')
+}
+$grants = New-VLiteHaReaderStorageGrants @grantArgs
+$accountScope = "/subscriptions/$grantSub/resourceGroups/test-rg/providers/Microsoft.Storage/storageAccounts/teststorage/blobServices/default/containers"
+Assert ($grants.qualification -ceq 'offline_template_effective_access_unqualified') 'Grant template claimed qualification.'
+Assert ($grants.sibling_inventory -ceq 'operator_asserted_complete') 'Sibling inventory provenance drifted.'
+$pinRole = $grants.roleDefinition
+Assert ((@($pinRole.dataActions) -join ',') -ceq (@(
+    'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read',
+    'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/write',
+    'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/add/action',
+    'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/delete') -join ',')) 'Pin role data actions drifted.'
+Assert (@($pinRole.actions).Count -eq 0 -and @($pinRole.notActions).Count -eq 0) 'Pin role must have no control-plane actions (no container delete/write, no user delegation keys).'
+Assert ((@($pinRole.assignableScopes) -join ',') -ceq "/subscriptions/$grantSub/resourceGroups/test-rg") 'Pin role scope drifted.'
+Assert (@($grants.assignments).Count -eq 2) 'Expected exactly two reader grants.'
+$pinGrant = $grants.assignments[0]
+$dataGrant = $grants.assignments[1]
+Assert ($pinGrant.scope -ceq "$accountScope/test-coordination" -and $dataGrant.scope -ceq "$accountScope/test-data") 'Grant scopes drifted.'
+$roleIds = "/subscriptions/$grantSub/providers/Microsoft.Authorization/roleDefinitions"
+Assert ($pinRole.name -cmatch '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z' -and
+    $pinRole.roleName -ceq "VLite HA Reader Pin Writer $($pinRole.name.Substring(0, 8))") 'Pin role identity must be a GUID with a scope-unique name.'
+Assert ($pinGrant.roleDefinitionId -ceq "$roleIds/$($pinRole.name)" -and
+    $dataGrant.roleDefinitionId -ceq "$roleIds/2a2b9908-6ea1-4ae2-8e65-a410df84e7d1" -and
+    -not $pinGrant.Contains('roleDefinitionName') -and -not $dataGrant.Contains('roleDefinitionName')) 'Grant roles drifted (pin writer custom role; data container built-in Storage Blob Data Reader).'
+$again = New-VLiteHaReaderStorageGrants @grantArgs
+$otherGroupArgs = $grantArgs.Clone(); $otherGroupArgs.ResourceGroup = 'test-rg-2'
+$otherGroup = New-VLiteHaReaderStorageGrants @otherGroupArgs
+$caseGroupArgs = $grantArgs.Clone(); $caseGroupArgs.ResourceGroup = 'TEST-RG'
+Assert ($again.roleDefinition.name -ceq $pinRole.name -and
+    (New-VLiteHaReaderStorageGrants @caseGroupArgs).roleDefinition.name -ceq $pinRole.name) 'Pin role GUID must be deterministic per (case-insensitive) group scope.'
+Assert ($otherGroup.roleDefinition.name -cne $pinRole.name -and
+    $otherGroup.roleDefinition.roleName -cne $pinRole.roleName) 'Pin role identity must differ between resource groups.'
+# Reader grant assignment names: deterministic per (scope, principal, role) so
+# a rebuild addresses the same role assignments.
+$grantNames = @($grants.assignments | ForEach-Object { $_.name })
+Assert (@($grantNames | Where-Object { $_ -cmatch '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z' }).Count -eq 2 -and
+    $grantNames[0] -cne $grantNames[1]) 'Reader grant assignments need distinct GUID names.'
+Assert ((@($again.assignments | ForEach-Object { $_.name }) -join ',') -ceq ($grantNames -join ',') -and
+    (@((New-VLiteHaReaderStorageGrants @caseGroupArgs).assignments | ForEach-Object { $_.name }) -join ',') -ceq
+    ($grantNames -join ',')) 'Reader grant assignment names must be deterministic (case-insensitive scope).'
+$otherPrincipalArgs = $grantArgs.Clone(); $otherPrincipalArgs.PrincipalId = '00000000-0000-4000-8000-0000000000bb'
+$otherPrincipalNames = @((New-VLiteHaReaderStorageGrants @otherPrincipalArgs).assignments | ForEach-Object { $_.name })
+Assert (@($otherPrincipalNames | Where-Object { $_ -cin $grantNames }).Count -eq 0 -and
+    @($otherGroup.assignments | Where-Object { $_.name -cin $grantNames }).Count -eq 0) 'Reader grant assignment names must differ per principal and scope.'
+foreach ($grant in $grants.assignments) {
+    Assert ($grant.principalId -ceq $grantPrincipal -and $grant.principalType -ceq 'ServicePrincipal' -and
+        $grant.conditionVersion -ceq '2.0') 'Grant principal/condition version drifted.'
+    Assert ($grant.condition -cnotmatch "(?i)shared.?key|\bsas\b|\*") 'Grant condition mentions shared keys/SAS or wildcards.'
+}
+$blobs = 'Microsoft.Storage/storageAccounts/blobServices/containers/blobs'
+$containerName = "@Resource[Microsoft.Storage/storageAccounts/blobServices/containers:name] StringEquals"
+$path = "@Resource[$($blobs):path] StringStartsWith"
+$listPrefix = "@Request[$($blobs):prefix] StringStartsWith"
+$expectedPin = "((!(ActionMatches{'$blobs/write'}) AND !(ActionMatches{'$blobs/add/action'}) AND !(ActionMatches{'$blobs/delete'})) OR " +
+    "($containerName 'test-coordination' AND $path 'test/tenant/reader-pins/')) AND " +
+    "((!(ActionMatches{'$blobs/read'} AND NOT SubOperationMatches{'Blob.List'})) OR " +
+    "($containerName 'test-coordination' AND $path 'test/tenant/')) AND " +
+    "((!(ActionMatches{'$blobs/read'} AND SubOperationMatches{'Blob.List'})) OR " +
+    "($containerName 'test-coordination' AND $listPrefix 'test/tenant/'))"
+Assert ($pinGrant.condition -ceq $expectedPin) "Pin grant condition drifted: $($pinGrant.condition)"
+$expectedData = "((!(ActionMatches{'$blobs/read'} AND NOT SubOperationMatches{'Blob.List'})) OR " +
+    "($containerName 'test-data' AND $path 'test/tenant/')) AND " +
+    "((!(ActionMatches{'$blobs/read'} AND SubOperationMatches{'Blob.List'})) OR " +
+    "($containerName 'test-data' AND $listPrefix 'test/tenant/'))"
+Assert ($dataGrant.condition -ceq $expectedData) "Data grant condition drifted: $($dataGrant.condition)"
+foreach ($case in @(
+        @{ Field = 'SiblingPrefixes'; Value = @('test/'); Pattern = 'nest' },
+        @{ Field = 'SiblingPrefixes'; Value = @('test/tenant/a/'); Pattern = 'nest' },
+        @{ Field = 'SiblingPrefixes'; Value = @('test/tenant/'); Pattern = 'nest' },
+        @{ Field = 'SiblingPrefixes'; Value = @('bad'); Pattern = 'prefix' },
+        @{ Field = 'SubscriptionId'; Value = 'test-sub'; Pattern = 'SubscriptionId' },
+        @{ Field = 'PrincipalId'; Value = "x' OR 'a"; Pattern = 'PrincipalId' },
+        @{ Field = 'PrincipalId'; Value = "$grantPrincipal`n"; Pattern = 'PrincipalId' },
+        @{ Field = 'SubscriptionId'; Value = "$grantSub`n"; Pattern = 'SubscriptionId' },
+        @{ Field = 'ResourceGroup'; Value = "test-rg`n"; Pattern = 'ResourceGroup' },
+        @{ Field = 'SiblingPrefixes'; Value = @("test/other/`n"); Pattern = 'prefix' },
+        @{ Field = 'ResourceGroup'; Value = "rg'"; Pattern = 'ResourceGroup' })) {
+    $bad = $grantArgs.Clone(); $bad[$case.Field] = $case.Value
+    Assert-Throws { New-VLiteHaReaderStorageGrants @bad } $case.Pattern
+}
+foreach ($case in @(
+        @{ Key = 'prefix'; Value = "test/x' OR 'a/"; Pattern = 'prefix' },
+        @{ Key = 'prefix'; Value = 'test/../x/'; Pattern = 'prefix' },
+        @{ Key = 'prefix'; Value = 'test/tenant'; Pattern = 'prefix' },
+        @{ Key = 'auth'; Value = 'shared_key'; Pattern = 'managed_identity' },
+        @{ Key = 'shared_key_file'; Value = '/run/key'; Pattern = 'shared' },
+        @{ Key = 'container'; Value = 'test-coordination'; Pattern = 'distinct' },
+        @{ Key = 'account'; Value = 'Test_Storage'; Pattern = 'account' },
+        @{ Key = 'account'; Value = "teststorage`n"; Pattern = 'account' },
+        @{ Key = 'container'; Value = "test-data`n"; Pattern = 'container' },
+        @{ Key = 'prefix'; Value = "test/tenant/`n"; Pattern = 'prefix' })) {
+    $bad = $grantArgs.Clone(); $bad.Target = $config.ArchiveTarget.Clone(); $bad.Target[$case.Key] = $case.Value
+    Assert-Throws { New-VLiteHaReaderStorageGrants @bad } $case.Pattern
+}
+$noSiblings = $grantArgs.Clone(); $noSiblings.SiblingPrefixes = @()
+Assert ((New-VLiteHaReaderStorageGrants @noSiblings).assignments.Count -eq 2) 'An explicit empty sibling inventory must be accepted.'
 
 $templates = @{}
 foreach ($role in @('Gateway', 'Writer', 'Reader')) {
@@ -277,7 +398,7 @@ $refusals = @(
     @{ Key = 'ReaderSharedKeyFile'; Value = 'secret'; Error = 'managed identity' }
 )
 foreach ($key in @('Environment', 'GatewayName', 'WriterName', 'ReaderName', 'ShareName', 'WriterStorageName')) {
-    foreach ($name in @('vlite-app', 'vlite-env', 'vlite-data')) {
+    foreach ($name in $rustSingletons) {
         $refusals += @{ Key = $key; Value = $name; Error = 'singleton' }
     }
 }
@@ -305,6 +426,142 @@ $badSecrets = New-TestSecrets 'Gateway'; $badSecrets['admin-token'] = 'TEST-ONLY
 Assert-Throws { New-VLiteHaGatewayTemplate $config $environmentId $badSecrets 'g7-test' } 'extra secrets'
 $disabled = $config.Clone(); $disabled.EnableReaders = $false
 Assert-Throws { New-VLiteHaReaderTemplate $disabled $environmentId (New-TestSecrets 'Reader') 'g7-test' } 'EnableReaders'
+
+# Control worker ACA Job (design-tenant-provisioning ITEM-022, TEST-014): offline
+# render only. One manual, never-retried replica runs the worker verb once as a
+# dedicated identity with only its control-target projection; deploy.ps1 never
+# renders or applies it and the qualification gate still refuses.
+$workerConfig = $config.Clone()
+$workerConfig.WorkerJobName = 'test-worker'
+$workerConfig.WorkerIdentityId = "$groupId/providers/Microsoft.ManagedIdentity/userAssignedIdentities/test-worker"
+$workerConfig.WorkerCpu = 0.25
+$workerConfig.WorkerMemory = '0.5Gi'
+# Worker client IDs are Entra GUIDs; the shared fixture's placeholder IDs are
+# not, so the worker fixture carries GUID-valued control/archive client IDs.
+$controlClient = '00000000-0000-4000-8000-0000000000c1'
+$archiveClient = '00000000-0000-4000-8000-0000000000c2'
+$workerClient = '00000000-0000-4000-8000-0000000000c3'
+$workerConfig.ControlTarget = $config.ControlTarget.Clone(); $workerConfig.ControlTarget.client_id = $controlClient
+$workerConfig.ArchiveTarget = $config.ArchiveTarget.Clone(); $workerConfig.ArchiveTarget.client_id = $archiveClient
+function New-WorkerSecrets([hashtable]$Change = @{}) {
+    $target = $workerConfig.ControlTarget.Clone()
+    $target.client_id = $workerClient
+    foreach ($key in $Change.Keys) { $target[$key] = $Change[$key] }
+    @{ 'control-target-g7' = ($target | ConvertTo-Json -Compress) }
+}
+$job = New-VLiteHaWorkerJobTemplate $workerConfig $environmentId (New-WorkerSecrets)
+$jobProps = $job.properties
+$jobConfig = $jobProps.configuration
+Assert-Keys $job @('name', 'location', 'tags', 'identity', 'properties') 'Worker Job'
+Assert-Keys $jobProps @('environmentId', 'workloadProfileName', 'configuration', 'template') 'Worker Job properties'
+Assert-Keys $jobConfig @('triggerType', 'replicaTimeout', 'replicaRetryLimit', 'manualTriggerConfig', 'secrets') 'Worker Job configuration'
+Assert-Keys $jobConfig.manualTriggerConfig @('parallelism', 'replicaCompletionCount') 'Worker manual trigger'
+Assert ($job.name -ceq 'test-worker' -and $jobProps.environmentId -ceq $environmentId -and
+    $jobProps.workloadProfileName -ceq 'Consumption') 'Worker Job name/environment differs.'
+Assert ($jobConfig.triggerType -ceq 'Manual' -and $jobConfig.manualTriggerConfig.parallelism -eq 1 -and
+    $jobConfig.manualTriggerConfig.replicaCompletionCount -eq 1 -and
+    $jobConfig.replicaRetryLimit -eq 0) 'Worker Job must be one manual replica that is never retried.'
+Assert ($jobConfig.replicaTimeout -eq 1800) 'Worker replica timeout default differs.'
+Assert ($job.tags.vliteHaRole -ceq 'worker' -and $job.tags.vliteHaDeployment -ceq $config.DeploymentId -and
+    $job.tags.vliteHaProduction -ceq 'false') 'Worker ownership/evaluation tags missing.'
+$jobIdentities = @($job.identity.userAssignedIdentities.Keys)
+Assert ($job.identity.type -ceq 'UserAssigned' -and $jobIdentities.Count -eq 1 -and
+    $jobIdentities[0] -ceq $workerConfig.WorkerIdentityId) 'Worker Job must run as exactly its own identity.'
+foreach ($role in @('Gateway', 'Writer', 'Reader')) {
+    Assert (@($templates[$role].identity.userAssignedIdentities.Keys) -notcontains
+        $workerConfig.WorkerIdentityId) "$role holds the worker identity."
+    $shared = $workerConfig.Clone(); $shared.WorkerIdentityId = $config["${role}IdentityId"].ToUpperInvariant()
+    Assert-Throws { New-VLiteHaWorkerJobTemplate $shared $environmentId (New-WorkerSecrets) } 'no serving role'
+}
+$jobContainers = @($jobProps.template.containers)
+$jobContainer = $jobContainers[0]
+Assert ($jobContainers.Count -eq 1 -and $jobContainer.image -ceq $config.Image -and
+    ($jobContainer.command -join ' ') -ceq '/usr/local/bin/vlite-server') 'Worker image/command differs.'
+Assert (($jobContainer.args -join ' ') -ceq
+    'tenant-deployment work --target-file /run/vlite/control-target.json --object control.json --admin-dir /data') 'Worker invocation changed.'
+Assert ($jobContainer.env.Count -eq 0 -and -not $jobContainer.ContainsKey('probes')) 'Worker has environment variables or serving probes.'
+Assert ($jobContainer.resources.cpu -eq 0.25 -and $jobContainer.resources.memory -ceq '0.5Gi') 'Worker resources differ.'
+$adminSource = Get-Content -Raw -LiteralPath (Get-RustSource @('src', 'server', 'tenant_provisioning', 'admin.rs'))
+Assert ($adminSource.Contains('| work [--operation <id>] |') -and
+    $adminSource.Contains('--target-file <file> --object <name> --admin-dir <dir>')) 'Worker Job invokes a CLI the server does not parse.'
+Assert ((@($jobConfig.secrets.name) -join ',') -ceq 'control-target-g7') 'Worker secret allowlist differs.'
+$jobVolumes = @($jobProps.template.volumes)
+$jobProjection = @($jobVolumes | Where-Object { $_.storageType -ceq 'Secret' })
+Assert ($jobVolumes.Count -eq 2 -and $jobProjection.Count -eq 1 -and $jobProjection[0].secrets.Count -eq 1 -and
+    $jobProjection[0].secrets[0].secretRef -ceq 'control-target-g7' -and
+    $jobProjection[0].secrets[0].path -ceq 'control-target.json') 'Worker projects more than its control target.'
+Assert (@($jobVolumes | Where-Object { $_.storageType -ceq 'EmptyDir' -and $_.name -ceq 'vlite-data' }).Count -eq 1 -and
+    (@($jobContainer.volumeMounts | ForEach-Object { "$($_.volumeName)=$($_.mountPath)" }) -join ',') -ceq
+    'vlite-config=/run/vlite,vlite-data=/data') 'Worker admin directory is not the private EmptyDir.'
+Assert (($job | ConvertTo-Json -Depth 30) -notmatch
+    'AzureFile|admin-token|VLITE_ADMIN_DIR|VLITE_AUTH_TOKEN|shared_key|gw-seed|trust|archive|ingress') 'Worker Job carries serving or admin material.'
+$extra = New-WorkerSecrets; $extra['admin-token'] = 'TEST-ONLY-ADMIN'
+Assert-Throws { New-VLiteHaWorkerJobTemplate $workerConfig $environmentId $extra } 'extra secrets'
+Assert-Throws {
+    New-VLiteHaWorkerJobTemplate $workerConfig $environmentId @{ 'control-target-g6' = (New-WorkerSecrets)['control-target-g7'] }
+} 'only the control-target-g7'
+Assert-Throws { New-VLiteHaWorkerJobTemplate $workerConfig $environmentId @{ 'control-target-g7' = '{"account":' } } 'valid JSON'
+foreach ($change in @(
+    @{ shared_key_file = '/run/vlite/shared-key' }, @{ connection_string = 'TEST-ONLY' }, @{ auth = 'shared_key' },
+    @{ client_id = '' }, @{ client_id = 'not-a-guid' }, @{ client_id = $workerClient.ToUpperInvariant() },
+    @{ client_id = "$workerClient " }, @{ client_id = "{$workerClient}" }, @{ client_id = "$workerClient`n" },
+    @{ client_id = $controlClient }, @{ client_id = $controlClient.ToUpperInvariant() },
+    @{ client_id = $archiveClient }, @{ client_id = $archiveClient.ToUpperInvariant() },
+    @{ account = 'otherstorage' }, @{ prefix = 'test/other/' }, @{ container = 'test-data' }
+)) {
+    Assert-Throws { New-VLiteHaWorkerJobTemplate $workerConfig $environmentId (New-WorkerSecrets $change) } 'bound to the worker identity'
+}
+# Case-variant control/archive IDs are refused even when the config holds the
+# uppercase spelling, and an absent ArchiveTarget still renders.
+$upperClients = $workerConfig.Clone()
+$upperClients.ControlTarget = $workerConfig.ControlTarget.Clone(); $upperClients.ControlTarget.client_id = $controlClient.ToUpperInvariant()
+$upperClients.ArchiveTarget = $workerConfig.ArchiveTarget.Clone(); $upperClients.ArchiveTarget.client_id = $archiveClient.ToUpperInvariant()
+foreach ($client in @($controlClient, $archiveClient)) {
+    $target = $upperClients.ControlTarget.Clone(); $target.client_id = $client
+    Assert-Throws {
+        New-VLiteHaWorkerJobTemplate $upperClients $environmentId @{ 'control-target-g7' = ($target | ConvertTo-Json -Compress) }
+    } 'bound to the worker identity'
+}
+$noArchive = $workerConfig.Clone(); $noArchive.Remove('ArchiveTarget')
+Assert ((New-VLiteHaWorkerJobTemplate $noArchive $environmentId (New-WorkerSecrets @{ client_id = $archiveClient })).name -ceq 'test-worker') 'Worker Job without ArchiveTarget refused a distinct client ID.'
+# The emitted secret is the validated object: a duplicate JSON key cannot
+# smuggle a value past the checks.
+$emitted = ConvertFrom-Json -InputObject $jobConfig.secrets[0].value -AsHashtable
+Assert-Keys $emitted $script:VLiteHaBlobTargetFields 'Worker projection'
+Assert ($emitted.client_id -ceq $workerClient -and $emitted.prefix -ceq $workerConfig.ControlTarget.prefix) 'Worker projection lost its validated values.'
+$duplicate = (New-WorkerSecrets)['control-target-g7'] -replace '^\{', "{`"client_id`":`"$controlClient`","
+$dupJob = New-VLiteHaWorkerJobTemplate $workerConfig $environmentId @{ 'control-target-g7' = $duplicate }
+Assert (-not $dupJob.properties.configuration.secrets[0].value.Contains($controlClient) -and
+    $dupJob.properties.configuration.secrets[0].value.Contains($workerClient)) 'Worker projection re-emitted unvalidated duplicate-key JSON.'
+foreach ($case in @(
+    @('WorkerJobName', 'test-gateway', 'must differ'), @('WorkerJobName', 'test-ha-env', 'must differ'),
+    @('WorkerJobName', 'Test_Worker', 'lowercase ACA name'), @('WorkerJobName', 'vlite-app', 'lowercase ACA name'),
+    @('WorkerJobName', "test-worker`n", 'lowercase ACA name'),
+    @('WorkerIdentityId', "$($workerConfig.WorkerIdentityId)`n", 'user-assigned managed identity'),
+    @('WorkerIdentityId', 'test-worker', 'user-assigned managed identity'),
+    @('WorkerCpu', 3, 'WorkerCpu'), @('WorkerMemory', '1Gi', 'WorkerMemory'),
+    @('WorkerReplicaTimeoutSeconds', 299, 'integer'), @('WorkerReplicaTimeoutSeconds', 14401, 'integer'),
+    @('ControlTarget', 'test-control', 'Config.ControlTarget')
+)) {
+    $bad = $workerConfig.Clone(); $bad[$case[0]] = $case[1]
+    Assert-Throws { New-VLiteHaWorkerJobTemplate $bad $environmentId (New-WorkerSecrets) } $case[2]
+}
+foreach ($key in @('WorkerJobName', 'WorkerIdentityId', 'WorkerCpu', 'WorkerMemory')) {
+    $bad = $workerConfig.Clone(); $bad.Remove($key)
+    Assert-Throws { New-VLiteHaWorkerJobTemplate $bad $environmentId (New-WorkerSecrets) } 'is required'
+}
+$timed = $workerConfig.Clone(); $timed.WorkerReplicaTimeoutSeconds = 600
+Assert ((New-VLiteHaWorkerJobTemplate $timed $environmentId (New-WorkerSecrets)).properties.configuration.replicaTimeout -eq 600) 'Worker replica timeout ignored.'
+Assert-Throws {
+    New-VLiteHaWorkerJobTemplate $workerConfig ($environmentId -replace 'test-ha-env$', 'other-env') (New-WorkerSecrets)
+} 'EnvironmentId'
+$deploySource = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'deploy.ps1')
+Assert ($deploySource -notmatch 'New-VLiteHaWorkerJobTemplate|WorkerJobName|WorkerIdentityId|containerapp job|Microsoft\.App/jobs') 'deploy.ps1 must not render or apply the worker Job.'
+$templatesSource = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'templates.ps1')
+$fieldListLiteral = "'coordination_container',\s*'prefix',\s*'auth',\s*'client_id'"
+Assert ($deploySource -notmatch $fieldListLiteral -and
+    [regex]::Matches($templatesSource, $fieldListLiteral).Count -eq 1) 'Blob target field list must be defined once ($script:VLiteHaBlobTargetFields).'
+Assert-Throws { Assert-VLiteHaQualification $workerConfig } 'HA deployment is blocked'
 
 function Add-WriterRevision([string]$Revision, [bool]$Active) {
     $script:writerRevisions.Add($Revision)

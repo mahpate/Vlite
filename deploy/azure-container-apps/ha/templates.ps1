@@ -13,6 +13,24 @@
 # the reader-apply inputs. Trust builders take a role-specific Config.Audience.
 # SecretGeneration is a positive integer; Secrets contains exactly the role's
 # <prefix>-g<SecretGeneration> string values (see the explicit file map below).
+# The offline control-worker Job (New-VLiteHaWorkerJobTemplate, never applied by
+# deploy.ps1) also requires WorkerJobName/IdentityId/Cpu/Memory and ControlTarget,
+# accepts an optional WorkerReplicaTimeoutSeconds, and its Secrets hold only
+# control-target-g<SecretGeneration>.
+
+# Fields of the Rust Blob target (cloud_backup.rs Target, minus the
+# emulator-only endpoint); shared by every target check here and in deploy.ps1.
+$script:VLiteHaBlobTargetFields = @('account', 'container', 'coordination_container', 'prefix', 'auth', 'client_id')
+# Mirrors resource_id.rs SINGLETON; the harness checks parity.
+$script:VLiteHaSingletonNames = @('vlite-app', 'vlite-env', 'vlite-data')
+
+function Get-VLiteHaDeterministicGuid {
+    param([Parameter(Mandatory)][string]$Text)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try { $hash = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Text)) } finally { $sha.Dispose() }
+    ([guid]::new([byte[]]$hash[0..15])).ToString()
+}
+
 function Assert-VLiteHaKeys {
     param([hashtable]$Config, [string[]]$Keys)
     foreach ($key in $Keys) {
@@ -169,6 +187,23 @@ function New-VLiteHaReaderApplyConfig {
     }
 }
 
+# One explicit Consumption CPU/RAM pair for a role (Gateway, Writer, Reader or Worker).
+function Assert-VLiteHaResources {
+    param([hashtable]$Config, [string]$Role)
+    Assert-VLiteHaKeys $Config @("${Role}Cpu", "${Role}Memory")
+    $cpu = [double]0
+    if (-not [double]::TryParse([string]$Config["${Role}Cpu"],
+            [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$cpu) -or
+        $cpu -notin @(0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2)) {
+        throw "Config.${Role}Cpu must be an explicit Consumption CPU allocation from 0.25 to 2 in 0.25 increments."
+    }
+    $memory = ($cpu * 2).ToString('0.0#', [Globalization.CultureInfo]::InvariantCulture) + 'Gi'
+    $alternate = ($cpu * 2).ToString('0.##', [Globalization.CultureInfo]::InvariantCulture) + 'Gi'
+    if ($Config["${Role}Memory"] -cne $memory -and $Config["${Role}Memory"] -cne $alternate) {
+        throw "Config.${Role}Memory must be explicitly specified as $memory (Consumption CPU/RAM pair)."
+    }
+}
+
 function Test-VLiteHaParameters {
     [CmdletBinding()]
     param([Parameter(Mandatory)][hashtable]$Config)
@@ -191,7 +226,7 @@ function Test-VLiteHaParameters {
     # Check aliases too, so no incidental singleton name can be adopted.
     foreach ($key in @('Environment', 'EnvironmentName', 'AppName', 'GatewayName', 'WriterName',
             'ReaderName', 'ShareName', 'WriterShareName', 'WriterStorageName')) {
-        if ($Config.ContainsKey($key) -and $Config[$key] -in @('vlite-app', 'vlite-env', 'vlite-data')) {
+        if ($Config.ContainsKey($key) -and $Config[$key] -in $script:VLiteHaSingletonNames) {
             throw "Config.$key references a protected singleton name. The HA deployment cannot adopt or modify singleton resources."
         }
     }
@@ -250,18 +285,7 @@ function Test-VLiteHaParameters {
             $identity -inotmatch '^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft\.ManagedIdentity/userAssignedIdentities/[^/]+$') {
             throw "Config.${role}IdentityId must be an existing user-assigned managed identity resource ID."
         }
-        Assert-VLiteHaKeys $Config @("${role}Cpu", "${role}Memory")
-        $cpu = [double]0
-        if (-not [double]::TryParse([string]$Config["${role}Cpu"],
-                [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$cpu) -or
-            $cpu -notin @(0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2)) {
-            throw "Config.${role}Cpu must be an explicit Consumption CPU allocation from 0.25 to 2 in 0.25 increments."
-        }
-        $memory = ($cpu * 2).ToString('0.0#', [Globalization.CultureInfo]::InvariantCulture) + 'Gi'
-        $alternate = ($cpu * 2).ToString('0.##', [Globalization.CultureInfo]::InvariantCulture) + 'Gi'
-        if ($Config["${role}Memory"] -cne $memory -and $Config["${role}Memory"] -cne $alternate) {
-            throw "Config.${role}Memory must be explicitly specified as $memory (Consumption CPU/RAM pair)."
-        }
+        Assert-VLiteHaResources $Config $role
         Assert-VLiteHaInteger $Config "${role}TerminationGracePeriodSeconds" 1 3600
         Assert-VLiteHaInteger $Config "${role}StartupBudgetSeconds" 10 100
         if ([int]$Config["${role}StartupBudgetSeconds"] % 10 -ne 0) {
@@ -562,4 +586,263 @@ function New-VLiteHaReaderTemplate {
         [Parameter(Mandatory)][string]$Revision
     )
     New-VLiteHaAppTemplate -Config $Config -EnvironmentId $EnvironmentId -Secrets $Secrets -Revision $Revision -Role Reader
+}
+
+# Tenant-scoped reader storage grants (design-tenant-provisioning ITEM-008).
+# Pure builder: no I/O and no Azure call. It returns a custom data-plane-only
+# pin-writer role (no control-plane actions, so no container delete/write)
+# plus two condition-version-2.0 container-scoped assignments that confine one
+# reader identity to its own Blob prefix on the EXISTING storage account:
+# pin writes only under <prefix>reader-pins/ in the coordination container
+# (custom role), reads and prefixed lists only under <prefix> in both
+# containers (built-in Storage Blob Data Reader on the data container). User
+# delegation keys are a storage-account-level action, so container-scoped
+# assignments cannot mint them. Shared keys and SAS are refused. Prefixes are
+# a security boundary here ONLY because the conditions say so; Azure
+# enforcement of these exact conditions (and that the reader always lists with
+# a prefix) is NOT qualified offline. Readers are cooperative inside their own
+# tenant: any reader of a tenant can create or delete that tenant's pins.
+# SiblingPrefixes is the operator's asserted-complete inventory of other
+# tenant prefixes on the account (not discovered); nested/equal prefixes are
+# refused in either direction because StringStartsWith on 'a/' would also
+# match 'a/b/'. Target.client_id is accepted but unused: assignments bind the
+# principal object ID.
+function Assert-VLiteHaBlobPrefix {
+    param([string]$Prefix, [string]$Label)
+    # Same rule as cloud_backup.rs valid_prefix; also excludes quotes, so a
+    # prefix cannot alter the generated condition.
+    if ($Prefix -cnotmatch '^[a-z0-9._/-]{1,200}\z' -or -not $Prefix.EndsWith('/') -or
+        @($Prefix.TrimEnd('/').Split('/') | Where-Object { $_ -in @('', '.', '..') }).Count -or
+        $Prefix -eq '/') {
+        throw "$Label prefix must be 1..200 chars of [a-z0-9._/-], end with '/', with no empty, '.' or '..' segments."
+    }
+}
+
+function New-VLiteHaReaderStorageGrants {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$SubscriptionId,
+        [Parameter(Mandatory)][string]$ResourceGroup,
+        [Parameter(Mandatory)][hashtable]$Target,
+        [Parameter(Mandatory)][string]$PrincipalId,
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$SiblingPrefixes
+    )
+    # \z, not $: .NET '$' also matches before a trailing newline.
+    $guid = '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z'
+    if ($SubscriptionId -cnotmatch $guid) { throw 'SubscriptionId must be a lowercase GUID.' }
+    if ($PrincipalId -cnotmatch $guid) { throw 'PrincipalId must be a lowercase GUID (the reader identity principal).' }
+    if ($ResourceGroup -cnotmatch '^[A-Za-z0-9._-]{1,90}\z' -or $ResourceGroup.EndsWith('.')) {
+        throw 'ResourceGroup must be 1..90 chars of [A-Za-z0-9._-], not ending with a period.'
+    }
+    $allowed = $script:VLiteHaBlobTargetFields
+    if ($Target.ContainsKey('shared_key_file')) { throw 'Reader grants refuse shared_key_file; shared account keys are never used.' }
+    foreach ($key in $Target.Keys) {
+        if ($key -cnotin $allowed) { throw "Target.$key is not a reader target field." }
+    }
+    if ($Target.auth -cne 'managed_identity') { throw 'Target.auth must be managed_identity.' }
+    if ($Target.account -isnot [string] -or $Target.account -cnotmatch '^[a-z0-9]{3,24}\z') {
+        throw 'Target.account must be a storage account name (3..24 lowercase letters/digits).'
+    }
+    foreach ($field in @('container', 'coordination_container')) {
+        if ($Target[$field] -isnot [string] -or $Target[$field] -cnotmatch '^[a-z0-9](?!.*--)[a-z0-9-]{1,61}[a-z0-9]\z') {
+            throw "Target.$field must be a Blob container name."
+        }
+    }
+    if ($Target.container -ceq $Target.coordination_container) {
+        throw 'Target.container and Target.coordination_container must be distinct.'
+    }
+    $prefix = [string]$Target.prefix
+    Assert-VLiteHaBlobPrefix $prefix 'Target'
+    foreach ($sibling in $SiblingPrefixes) {
+        Assert-VLiteHaBlobPrefix $sibling 'Sibling'
+        if ($sibling.StartsWith($prefix, [StringComparison]::Ordinal) -or
+            $prefix.StartsWith($sibling, [StringComparison]::Ordinal)) {
+            throw "Sibling prefix '$sibling' and '$prefix' nest or are equal; a prefix condition cannot separate them."
+        }
+    }
+
+    $group = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup"
+    $containers = "$group/providers/Microsoft.Storage/storageAccounts/$($Target.account)/blobServices/default/containers"
+    $blobs = 'Microsoft.Storage/storageAccounts/blobServices/containers/blobs'
+    $name = '@Resource[Microsoft.Storage/storageAccounts/blobServices/containers:name] StringEquals'
+    $path = "@Resource[$($blobs):path] StringStartsWith"
+    $list = "@Request[$($blobs):prefix] StringStartsWith"
+    $read = { param($container)
+        "((!(ActionMatches{'$blobs/read'} AND NOT SubOperationMatches{'Blob.List'})) OR " +
+        "($name '$container' AND $path '$prefix')) AND " +
+        "((!(ActionMatches{'$blobs/read'} AND SubOperationMatches{'Blob.List'})) OR " +
+        "($name '$container' AND $list '$prefix'))"
+    }
+    $coordination = $Target.coordination_container
+    $writes = "!(ActionMatches{'$blobs/write'}) AND !(ActionMatches{'$blobs/add/action'}) AND !(ActionMatches{'$blobs/delete'})"
+    $pinCondition = "(($writes) OR " +
+        "($name '$coordination' AND $path '$($prefix)reader-pins/')) AND " + (& $read $coordination)
+    # Custom role names must be unique per Entra tenant and role IDs are GUIDs,
+    # so both derive deterministically from the (case-insensitive) group scope.
+    $roleGuid = Get-VLiteHaDeterministicGuid "vlite-ha-reader-pin-writer|$($group.ToLowerInvariant())"
+    $roleIds = "/subscriptions/$SubscriptionId/providers/Microsoft.Authorization/roleDefinitions"
+    # Assignment names are GUIDs too; deriving them from (scope, principal,
+    # role) makes a re-render address the same assignment instead of a new one.
+    $assignmentName = { param($scope, $role)
+        Get-VLiteHaDeterministicGuid "vlite-ha-reader-grant|$("$scope|$PrincipalId|$role".ToLowerInvariant())"
+    }
+    # Built-in Storage Blob Data Reader; its delegation-key action is
+    # account-level and unusable from this container scope.
+    $blobDataReader = '2a2b9908-6ea1-4ae2-8e65-a410df84e7d1'
+    [ordered]@{
+        schema = 'vlite-ha-reader-storage-grants/1'
+        qualification = 'offline_template_effective_access_unqualified'
+        sibling_inventory = 'operator_asserted_complete'
+        roleDefinition = [ordered]@{
+            name = $roleGuid
+            roleName = "VLite HA Reader Pin Writer $($roleGuid.Substring(0, 8))"
+            description = 'Data-plane only: blob read/write/add/delete, narrowed per assignment by ABAC conditions.'
+            actions = @(); notActions = @(); notDataActions = @()
+            dataActions = @("$blobs/read", "$blobs/write", "$blobs/add/action", "$blobs/delete")
+            assignableScopes = @($group)
+        }
+        assignments = @(
+            [ordered]@{
+                name = (& $assignmentName "$containers/$coordination" "$roleIds/$roleGuid")
+                roleDefinitionId = "$roleIds/$roleGuid"; scope = "$containers/$coordination"
+                principalId = $PrincipalId; principalType = 'ServicePrincipal'
+                conditionVersion = '2.0'; condition = $pinCondition
+            },
+            [ordered]@{
+                # Read-only role: the data container never accepts a reader write.
+                name = (& $assignmentName "$containers/$($Target.container)" "$roleIds/$blobDataReader")
+                roleDefinitionId = "$roleIds/$blobDataReader"; scope = "$containers/$($Target.container)"
+                principalId = $PrincipalId; principalType = 'ServicePrincipal'
+                conditionVersion = '2.0'; condition = (& $read $Target.container)
+            }
+        )
+    }
+}
+
+# Control worker ACA Job (design-tenant-provisioning ITEM-022, TEST-014).
+# Offline renderer only: no I/O and no Azure call; deploy.ps1 never applies it
+# and Assert-VLiteHaQualification still refuses every HA deployment. A manual
+# execution starts one replica (parallelism 1, one completion) that runs
+# `vlite-server tenant-deployment work` once: one claim, one attempt.
+# replicaRetryLimit is 0 because a retried replica would start a second
+# attempt; an unknown outcome stays recorded in the journal for an operator.
+# The Job runs as its own user-assigned identity, which no serving role may
+# hold, and mounts only its control-target projection (no seed, trust, archive
+# or admin material). The admin directory is the replica's EmptyDir, so the
+# audit log lasts one execution; the Blob journal is the durable record.
+function New-VLiteHaWorkerJobTemplate {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][hashtable]$Config,
+        [Parameter(Mandatory)][string]$EnvironmentId,
+        [Parameter(Mandatory)][hashtable]$Secrets
+    )
+    Test-VLiteHaParameters -Config $Config | Out-Null
+    Assert-VLiteHaControlConfig -Config $Config
+    $expectedEnvironmentId = "/subscriptions/$($Config.SubscriptionId)/resourceGroups/$($Config.ResourceGroup)/providers/Microsoft.App/managedEnvironments/$($Config.Environment)"
+    if (-not [string]::Equals($EnvironmentId, $expectedEnvironmentId, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'EnvironmentId must be the full resource ID matching Config.SubscriptionId, ResourceGroup and the new HA Environment.'
+    }
+    Assert-VLiteHaKeys $Config @('WorkerJobName', 'WorkerIdentityId')
+    $name = $Config.WorkerJobName
+    if ($name -isnot [string] -or $name.Length -lt 3 -or $name.Length -gt 32 -or
+        $name -cnotmatch '^[a-z][a-z0-9]*(?:-[a-z0-9]+)*\z' -or $name -cin $script:VLiteHaSingletonNames) {
+        throw 'Config.WorkerJobName must be a new lowercase ACA name of 3..32 characters, without consecutive or trailing hyphens.'
+    }
+    foreach ($key in @('Environment', 'GatewayName', 'WriterName', 'ReaderName')) {
+        if ($name -ceq $Config[$key]) { throw 'Config.WorkerJobName must differ from the environment and every serving app name.' }
+    }
+    $identity = $Config.WorkerIdentityId
+    if ($identity -isnot [string] -or
+        $identity -inotmatch '^/subscriptions/[^/\s]+/resourceGroups/[^/\s]+/providers/Microsoft\.ManagedIdentity/userAssignedIdentities/[^/\s]+\z') {
+        throw 'Config.WorkerIdentityId must be an existing user-assigned managed identity resource ID.'
+    }
+    foreach ($role in @('Gateway', 'Writer', 'Reader')) {
+        if ($Config["${role}IdentityId"] -is [string] -and
+            [string]::Equals($identity, $Config["${role}IdentityId"], [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Config.WorkerIdentityId must be a dedicated identity that no serving role (gateway, writer or reader) holds.'
+        }
+    }
+    Assert-VLiteHaResources $Config 'Worker'
+    $values = $Config.Clone()
+    if (-not $values.ContainsKey('WorkerReplicaTimeoutSeconds')) { $values.WorkerReplicaTimeoutSeconds = 1800 }
+    Assert-VLiteHaInteger $values 'WorkerReplicaTimeoutSeconds' 300 14400
+
+    $control = $Config['ControlTarget']
+    if ($control -isnot [hashtable]) { throw 'Config.ControlTarget must be the reviewed managed-identity control-state Blob target.' }
+    $secretName = "control-target-g$([int]$Config.SecretGeneration)"
+    if ($Secrets.Count -ne 1 -or -not $Secrets.ContainsKey($secretName) -or $Secrets[$secretName] -isnot [string] -or
+        [Text.Encoding]::UTF8.GetByteCount($Secrets[$secretName]) -gt 65536) {
+        throw "Worker Secrets must contain only the $secretName control-target projection; extra secrets (including admin credentials) are prohibited."
+    }
+    try {
+        $target = ConvertFrom-Json -InputObject $Secrets[$secretName] -AsHashtable -NoEnumerate -Depth 30 -ErrorAction Stop
+    } catch {
+        # Parser diagnostics can quote secret content; only report its purpose.
+        throw 'Worker control-target projection must be valid JSON; its contents are not logged.'
+    }
+    $fields = $script:VLiteHaBlobTargetFields
+    # Only the control and archive target client IDs are in the config; the
+    # worker client ID must differ from both (Entra GUIDs ignore case).
+    $knownClients = @($control['client_id'])
+    if ($Config['ArchiveTarget'] -is [hashtable]) { $knownClients += $Config.ArchiveTarget['client_id'] }
+    if ($target -isnot [hashtable] -or @($target.Keys | Where-Object { $_ -cnotin $fields }).Count -or
+        @($fields | Where-Object { $target[$_] -isnot [string] -or [string]::IsNullOrWhiteSpace($target[$_]) }).Count -or
+        $target.auth -cne 'managed_identity' -or
+        @($fields | Where-Object { $_ -cne 'client_id' -and $target[$_] -cne $control[$_] }).Count -or
+        $target.client_id -cnotmatch '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z' -or
+        @($knownClients | Where-Object {
+                $_ -is [string] -and [string]::Equals($target.client_id, $_, [StringComparison]::OrdinalIgnoreCase)
+            }).Count) {
+        throw 'Worker control-target projection must be Config.ControlTarget bound to the worker identity client_id (a lowercase GUID); shared keys, connection strings and the control or archive target client IDs are prohibited.'
+    }
+    # Emit the validated object, not the input text, so duplicate JSON keys
+    # cannot carry a value the checks above never saw.
+    $projection = $target | ConvertTo-Json -Compress -Depth 5
+
+    $identityAssignments = @{}
+    $identityAssignments[$identity] = @{}
+    @{
+        name = $name
+        location = $Config.Location
+        tags = @{
+            vliteHaDeployment = $Config.DeploymentId
+            vliteHaRole = 'worker'
+            vliteHaProduction = 'false'
+        }
+        identity = @{ type = 'UserAssigned'; userAssignedIdentities = $identityAssignments }
+        properties = @{
+            environmentId = $EnvironmentId
+            workloadProfileName = $Config.WorkloadProfileName
+            configuration = @{
+                triggerType = 'Manual'
+                replicaTimeout = [int]$values.WorkerReplicaTimeoutSeconds
+                replicaRetryLimit = 0
+                manualTriggerConfig = @{ parallelism = 1; replicaCompletionCount = 1 }
+                secrets = @(@{ name = $secretName; value = $projection })
+            }
+            template = @{
+                volumes = @(
+                    @{
+                        name = 'vlite-config'; storageType = 'Secret'
+                        secrets = @(@{ secretRef = $secretName; path = 'control-target.json' })
+                    },
+                    @{ name = 'vlite-data'; storageType = 'EmptyDir' }
+                )
+                containers = @(@{
+                    name = 'vlite'
+                    image = $Config.Image
+                    command = @('/usr/local/bin/vlite-server')
+                    args = @('tenant-deployment', 'work', '--target-file', $Config.ControlTargetFile,
+                        '--object', $Config.ControlObject, '--admin-dir', '/data')
+                    env = @()
+                    resources = @{ cpu = [double]$Config.WorkerCpu; memory = $Config.WorkerMemory }
+                    volumeMounts = @(
+                        @{ volumeName = 'vlite-config'; mountPath = '/run/vlite' },
+                        @{ volumeName = 'vlite-data'; mountPath = '/data' }
+                    )
+                })
+            }
+        }
+    }
 }

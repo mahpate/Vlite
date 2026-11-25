@@ -305,6 +305,15 @@ offered load, relax the late-drop rule or turn collected evidence into a pass.
 Every scheduled slot is started or in exactly one unsent
 bucket. Every started task is joined and counted; all response statuses,
 transport/body errors, semantic mismatches and schedule lateness are retained.
+Each window also groups failed or mismatching responses into at most 16
+diagnostic records, with an overflow count. A record includes status/error,
+an allowlisted content-type class, bounded body byte count, and (when the
+response body is available) its SHA-256 fingerprint; for an oversized body,
+the byte count is a 65537 sentinel and the fingerprint covers exactly the
+first 65536 bytes, regardless of HTTP chunk boundaries. Raw response bodies
+and arbitrary response headers are never exported. Fingerprints help
+distinguish repeated response bodies but do not identify which network hop
+generated them or establish a failure cause.
 Schedule lateness is measured when the async request task actually begins, not
 just when it is queued. Successful latency distributions include **only** HTTP 200, valid semantically
 matching bodies, using nearest rank; zero samples means null percentiles.
@@ -477,6 +486,25 @@ prevalidated precision. If no defensible exchange is available, supply
 `"calibration": null`, preserve generation/floor coverage, and expect
 `clock_unknown` timing. Do not estimate host offset from load-balanced HTTP RTT.
 
+### Transport feasibility
+
+The documented Azure CLI `az containerapp exec` command can select an exact
+replica, revision and container, but it is described as an SSH-like interactive
+shell; `--command` selects a shell startup command. The reference does not
+define a one-shot, noninteractive request/response contract, stdout framing,
+exit-status behavior or timestamping semantics for invoking `clock_sample`.
+Exact-replica selection alone is therefore insufficient to treat CLI exec as a
+validated four-timestamp exchange. Do not use it as calibration evidence until
+those semantics are independently established and tested
+([Azure CLI reference](https://learn.microsoft.com/en-us/cli/azure/containerapp?view=azure-cli-latest#az-containerapp-exec)).
+
+The alternative Blob-coordinated exchange would require observer identities to
+write calibration requests or replies; the current serving-role permission
+model grants only control-container reads. Do not broaden that grant implicitly.
+Until a noninteractive exact-replica exchange path and a defensible run-wide
+clock-motion envelope are both available, keep calibration null and all
+cross-clock timings `clock_unknown`.
+
 ### Cross-clock calibration protocol (offline analyzer; advisory)
 
 Each calibrated **subject** clock (every observer replica, plus the mutator for
@@ -539,6 +567,65 @@ Exchange evidence, policy and results:
   `drift_model:"endpoint_offsets_do_not_bound_interior_excursion"`,
   `continuity_envelope:"required_none_available_rejects_clock_unknown"` and
   `calibration_qualification:"advisory_unqualified_until_live_run"`.
+
+### Replica-initiated reference polling (offline; diagnostics only)
+
+The `ha-meas005` example now has a `clock_reference` mode and an optional
+observer `clock_reference` poll. Neither one is calibration evidence.
+
+**Reference endpoint.** `{"mode":"clock_reference","bind":"<ip:port>","duration_secs":1..=7200}`
+(default 1200) serves only `GET /clock`. Each reply is
+`{"receive_unix_ms","reply_unix_ms"}`. Any other request gets 404. Request
+heads are bounded and the endpoint emits a
+`vlite-meas005-clock-reference/1` report whose `replies` counts the clock
+replies written. The endpoint serves plain HTTP, one connection at a time:
+reading a request head is capped at 1 s from accept (a slow, dripping client
+cannot hold it longer) and writing at 1 s, so a poll can queue behind one
+other connection. A transient accept error (aborted, reset, interrupted or
+timed out) skips that connection rather than stopping the endpoint. Its
+1..=7200 s cap is longer than the observer's 1..=3540 s so one reference can
+outlive a run.
+
+**Observer poll.** The observer
+`clock_reference:{"url":"http(s)://<host>/clock","interval_ms":100..=60000 (default 1000),"timeout_ms":10..=1000 (default 1000)}`
+polls from the exact observer replica, so each sample is that replica's own
+clock. The URL must have no credentials, query or fragment, and the planned
+sample count is capped at 4096. The URL is never emitted. Each exchange is
+`{subject_send_unix_ms, reference_receive_unix_ms, reference_reply_unix_ms, subject_receive_unix_ms}`.
+It bounds `theta = subject - reference` to
+`[s0 - r1 - 1, s3 - r2 + 1]` at that instant, including millisecond
+truncation. Proxy or queueing delay (including waiting behind another
+connection on the serial endpoint) lies between the subject's send and
+receive, so it widens the bound but cannot move it off the true offset. An
+`https` URL needs a TLS-terminating proxy in front of the endpoint. The
+observe report contains `attempts`, `failures`, `limit` and the exchanges.
+The poller stops when observation ends or fails.
+
+**Analysis.** `analyze` reports each replica's `clock_reference_samples` as
+one of these values, every non-null one with `continuity_envelope_ms:null`
+and `qualification:"diagnostic_only_motion_between_samples_unobserved"`:
+
+- `null`, when the replica ran no poll.
+- `status:"no_samples"`, when every attempt failed (with `attempts` and
+  `failures`).
+- `status:"invalid"`, for malformed or causally impossible exchanges, more
+  than 4096 exchanges, or `attempts - failures` not equal to the exchange
+  count.
+- `status:"subject_clock_stepped_backward"`, when a send precedes the
+  previous exchange's receive. Polls are sequential, so this is evidence that
+  the replica's wall clock moved backward, not malformed input.
+- `status:"collected"`, which includes the sample, attempt and failure
+  counts, the maximum subject gap, the minimum net RTT, the spread of sampled
+  midpoints and `constant_offset_contradicted`.
+
+`continuity_envelope_ms` stays `null` in every case. Sampled points do not
+bound clock motion between samples, so every replica is still rejected with
+`calibration_continuity_unbounded`.
+
+**Still blocked.** The entrypoint does not forward `clock_reference`, and
+`measure-gateway.ps1` still records `ClockCalibrationUnavailable`. The reference
+host and its own clock, private network placement and a defensible run-wide
+continuity envelope are all unqualified.
 
 The analyzer fails closed. A rejected replica censors every sample as
 `clock_unknown`, is never counted in distributions, and makes the analysis

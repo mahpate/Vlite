@@ -3,6 +3,7 @@ mod support;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
@@ -31,6 +32,7 @@ fn timeout() -> u64 {
 fn recovery() -> u64 {
     180
 }
+const MAX_FAILURE_DIAGNOSTIC_GROUPS: usize = 16;
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -92,6 +94,59 @@ struct Outcome {
     semantic_match: bool,
     elapsed_ms: f64,
     schedule_delay_ms: f64,
+    diagnostic: Option<ResponseDiagnostic>,
+}
+
+struct ResponseDiagnostic {
+    content_type: &'static str,
+    body_bytes: usize,
+    body_sha256: Option<String>,
+    body_truncated: bool,
+}
+
+#[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
+struct FailureDiagnosticKey {
+    status: Option<u16>,
+    error: Option<&'static str>,
+    content_type: Option<&'static str>,
+    body_bytes: Option<usize>,
+    body_sha256: Option<String>,
+    body_truncated: bool,
+}
+
+fn content_type_class(headers: &reqwest::header::HeaderMap) -> &'static str {
+    let Some(value) = headers
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return "missing_or_invalid";
+    };
+    let media_type = value.split(';').next().unwrap_or("").trim();
+    if media_type.eq_ignore_ascii_case("application/json")
+        || media_type.to_ascii_lowercase().ends_with("+json")
+    {
+        "application_json"
+    } else if media_type.eq_ignore_ascii_case("text/plain") {
+        "text_plain"
+    } else if media_type.eq_ignore_ascii_case("text/html") {
+        "text_html"
+    } else {
+        "other"
+    }
+}
+
+fn record_failure_diagnostic(
+    groups: &mut BTreeMap<FailureDiagnosticKey, u64>,
+    unlisted_failures: &mut u64,
+    key: FailureDiagnosticKey,
+) {
+    if let Some(count) = groups.get_mut(&key) {
+        *count += 1;
+    } else if groups.len() < MAX_FAILURE_DIAGNOSTIC_GROUPS {
+        groups.insert(key, 1);
+    } else {
+        *unlisted_failures += 1;
+    }
 }
 
 async fn send(
@@ -111,7 +166,12 @@ async fn send(
         schedule_delay_ms: scheduled.map_or(0., |deadline| {
             start.saturating_duration_since(deadline).as_secs_f64() * 1000.
         }),
+        diagnostic: None,
     };
+    let mut response_content_type = None;
+    let mut response_body_bytes = None;
+    let mut response_body_truncated = false;
+    let mut diagnostic_body = None;
     let result = async {
         let mut response = client
             .get(url)
@@ -120,20 +180,55 @@ async fn send(
             .await
             .map_err(|_| "transport_error")?;
         outcome.status = Some(response.status().as_u16());
+        response_content_type = Some(content_type_class(response.headers()));
         let mut bytes = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(|_| "body_read_error")? {
-            if bytes.len() + chunk.len() > BODY_LIMIT {
+        loop {
+            let chunk = match response.chunk().await {
+                Ok(Some(chunk)) => chunk,
+                Ok(None) => break,
+                Err(_) => {
+                    response_body_bytes = Some(bytes.len());
+                    diagnostic_body = Some(bytes);
+                    return Err("body_read_error");
+                }
+            };
+            let remaining = BODY_LIMIT - bytes.len();
+            if chunk.len() > remaining {
+                bytes.extend_from_slice(&chunk[..remaining]);
+                response_body_bytes = Some(BODY_LIMIT + 1);
+                response_body_truncated = true;
+                diagnostic_body = Some(bytes);
                 return Err("body_too_large");
             }
             bytes.extend_from_slice(&chunk);
         }
-        let body: Value = serde_json::from_slice(&bytes).map_err(|_| "body_invalid_json")?;
+        response_body_bytes = Some(bytes.len());
+        let body: Value = match serde_json::from_slice(&bytes) {
+            Ok(body) => body,
+            Err(_) => {
+                diagnostic_body = Some(bytes);
+                return Err("body_invalid_json");
+            }
+        };
         outcome.semantic_match = body == *expected;
+        if outcome.status != Some(200) || !outcome.semantic_match {
+            diagnostic_body = Some(bytes);
+        }
         Ok::<_, &'static str>(())
     }
     .await;
     outcome.error = result.err();
     outcome.elapsed_ms = start.elapsed().as_secs_f64() * 1000.;
+    if outcome.status != Some(200) || outcome.error.is_some() || !outcome.semantic_match {
+        outcome.diagnostic = response_content_type.map(|content_type| ResponseDiagnostic {
+            content_type,
+            body_bytes: response_body_bytes.unwrap_or(0),
+            body_sha256: diagnostic_body
+                .as_deref()
+                .map(|body| format!("{:x}", Sha256::digest(body))),
+            body_truncated: response_body_truncated,
+        });
+    }
     outcome
 }
 
@@ -218,6 +313,8 @@ impl Window<'_> {
         }
         let mut statuses = BTreeMap::<u16, u64>::new();
         let mut errors = BTreeMap::<&str, u64>::new();
+        let mut failure_diagnostics = BTreeMap::new();
+        let mut unlisted_failure_diagnostics = 0u64;
         let mut successful = Vec::new();
         let mut mismatches = 0u64;
         for outcome in &outcomes {
@@ -228,6 +325,21 @@ impl Window<'_> {
             if let Some(error) = outcome.error {
                 *errors.entry(error).or_default() += 1;
             }
+            if outcome.status != Some(200) || outcome.error.is_some() || !outcome.semantic_match {
+                let diagnostic = outcome.diagnostic.as_ref();
+                record_failure_diagnostic(
+                    &mut failure_diagnostics,
+                    &mut unlisted_failure_diagnostics,
+                    FailureDiagnosticKey {
+                        status: outcome.status,
+                        error: outcome.error,
+                        content_type: diagnostic.map(|detail| detail.content_type),
+                        body_bytes: diagnostic.map(|detail| detail.body_bytes),
+                        body_sha256: diagnostic.and_then(|detail| detail.body_sha256.clone()),
+                        body_truncated: diagnostic.is_some_and(|detail| detail.body_truncated),
+                    },
+                );
+            }
             if outcome.error.is_none() && !outcome.semantic_match {
                 mismatches += 1;
             }
@@ -235,12 +347,22 @@ impl Window<'_> {
                 successful.push(outcome.elapsed_ms);
             }
         }
+        let failure_diagnostics = failure_diagnostics
+            .into_iter()
+            .map(|(key, count)| {
+                json!({"status":key.status,"error":key.error,"content_type":key.content_type,
+                    "body_bytes":key.body_bytes,"body_sha256":key.body_sha256,
+                    "body_truncated":key.body_truncated,"count":count})
+            })
+            .collect::<Vec<_>>();
         let elapsed = start.elapsed().as_secs_f64();
         Ok(
             json!({"path":path,"phase":phase,"offered_rate":rate,"duration_secs":seconds,
             "elapsed_with_drain_secs":elapsed,"scheduled":scheduled,"started":outcomes.len(),
             "completed":outcomes.len(),"unsent_capacity":unsent_capacity,"unsent_late":unsent_late,
             "statuses":statuses,"errors":errors,"semantic_mismatches":mismatches,
+            "failure_diagnostics":{"max_groups":MAX_FAILURE_DIAGNOSTIC_GROUPS,
+                "groups":failure_diagnostics,"unlisted_failures":unlisted_failure_diagnostics},
             "successful":successful.len(),"started_per_sec":outcomes.len() as f64 / seconds.max(1) as f64,
             "successful_per_sec":successful.len() as f64 / seconds.max(1) as f64,
             "successful_latency_ms":summary(&successful),"schedule_lateness_ms":summary(&lateness),
@@ -397,12 +519,26 @@ mod tests {
             .build()
             .unwrap();
         let expected = Arc::new(json!({"vector":[1,0]}));
-        for (path, status, error, matches) in [
-            ("/ok", 200, None, true),
-            ("/mismatch", 200, None, false),
-            ("/bad-json", 200, Some("body_invalid_json"), false),
-            ("/large", 200, Some("body_too_large"), false),
-            ("/refusal", 429, None, false),
+        for (path, status, error, matches, content_type, truncated) in [
+            ("/ok", 200, None, true, "application_json", false),
+            ("/mismatch", 200, None, false, "application_json", false),
+            (
+                "/bad-json",
+                200,
+                Some("body_invalid_json"),
+                false,
+                "text_plain",
+                false,
+            ),
+            (
+                "/large",
+                200,
+                Some("body_too_large"),
+                false,
+                "text_plain",
+                true,
+            ),
+            ("/refusal", 429, None, false, "application_json", false),
         ] {
             let reply = send(
                 client.clone(),
@@ -417,7 +553,54 @@ mod tests {
             assert_eq!(reply.error, error);
             assert_eq!(reply.semantic_match, matches);
             assert!(reply.schedule_delay_ms >= 0.);
+            if status == 200 && matches {
+                assert!(reply.diagnostic.is_none());
+            } else {
+                let diagnostic = reply.diagnostic.as_ref().unwrap();
+                assert_eq!(diagnostic.content_type, content_type);
+                assert!(diagnostic.body_bytes > 0);
+                assert!(
+                    diagnostic
+                        .body_sha256
+                        .as_ref()
+                        .is_some_and(|hash| hash.len() == 64)
+                );
+                assert_eq!(diagnostic.body_truncated, truncated);
+                if truncated {
+                    assert_eq!(diagnostic.body_bytes, BODY_LIMIT + 1);
+                    assert_eq!(
+                        diagnostic.body_sha256.as_deref(),
+                        Some(format!("{:x}", Sha256::digest(vec![b'x'; BODY_LIMIT])).as_str())
+                    );
+                }
+            }
         }
         server.abort();
+    }
+
+    #[test]
+    fn failure_diagnostic_groups_are_bounded_and_count_overflow() {
+        let mut groups = BTreeMap::new();
+        let mut unlisted = 0;
+        let key = |body_sha256: String| FailureDiagnosticKey {
+            status: Some(503),
+            error: None,
+            content_type: Some("application_json"),
+            body_bytes: Some(16),
+            body_sha256: Some(body_sha256),
+            body_truncated: false,
+        };
+        let repeated = key("same".into());
+        record_failure_diagnostic(&mut groups, &mut unlisted, repeated.clone());
+        record_failure_diagnostic(&mut groups, &mut unlisted, repeated);
+        for index in 0..MAX_FAILURE_DIAGNOSTIC_GROUPS {
+            record_failure_diagnostic(&mut groups, &mut unlisted, key(index.to_string()));
+        }
+        assert_eq!(groups.len(), MAX_FAILURE_DIAGNOSTIC_GROUPS);
+        assert_eq!(
+            groups.values().sum::<u64>(),
+            MAX_FAILURE_DIAGNOSTIC_GROUPS as u64 + 1
+        );
+        assert_eq!(unlisted, 1);
     }
 }
