@@ -385,6 +385,9 @@ fn render(
     let withdrawn = snapshot.withdrawn(&intent.tenant_id, &intent.operation_id);
     let (phase, next_step) = match terminal.map(|t| &t.outcome) {
         Some(TerminalOutcome::Succeeded { .. }) => ("succeeded", "none: the operation ended"),
+        Some(TerminalOutcome::Cancelled) if reserved => {
+            ("cancelled", "cancel again to release the reservation")
+        }
         Some(TerminalOutcome::Cancelled) => ("cancelled", "none: the operation ended"),
         Some(TerminalOutcome::Retired) => (
             "retired",
@@ -521,18 +524,32 @@ fn stored_action(
 }
 
 /// Refuses a verb whose handler is not available now; nothing is persisted.
-/// `slot` is this operation's reservation, if it holds one.
+/// `terminal` is the sealed outcome, if any; `slot` is this operation's
+/// reservation, if it holds one.
 fn available(
     verb: Verb,
     request: &ActionRequest,
     payload: &Payload,
-    ended: bool,
+    terminal: Option<&TerminalOutcome>,
     slot: Option<&Slot>,
 ) -> Result<(), ApiError> {
+    let ended = terminal.is_some();
     match verb {
         Verb::Resume if !ended && pins_sets(payload) => Err(pin_scope_unproven()),
         Verb::Resume => Ok(()),
-        Verb::Cancel if ended => Err(super::ended()),
+        // A sealed cancellation whose release was lost still holds the slot:
+        // a fresh cancel quoting the current tokens completes that release.
+        Verb::Cancel if ended => match (terminal, slot) {
+            (
+                Some(TerminalOutcome::Cancelled),
+                Some(Slot::Reserved {
+                    cancellation_requested: true,
+                    receipt: None,
+                    ..
+                }),
+            ) => Ok(()),
+            _ => Err(super::ended()),
+        },
         Verb::Cancel => match slot {
             Some(Slot::Reserved { receipt: None, .. }) => Ok(()),
             Some(_) => Err(conflict(
@@ -641,7 +658,7 @@ fn act(
                 verb,
                 &request,
                 &intent.payload,
-                terminal.is_some(),
+                terminal.as_ref().map(|t| &t.outcome),
                 holds(&snapshot, &intent),
             )?;
             let record = ActionRecord {
@@ -1641,6 +1658,127 @@ mod tests {
         assert_eq!(body["operation"]["phase"], "activated");
     }
 
+    /// A cancel sealed whose release was never published leaves the slot
+    /// reserved. Any admin's fresh cancel quoting the current tokens
+    /// completes that release; once released it stays ended.
+    #[tokio::test]
+    async fn a_fresh_cancel_completes_a_sealed_cancellation_whose_release_failed() {
+        let f = fixture();
+        let operation = f.create("onboard-contoso").await;
+        let id = operation["operation_id"].as_str().unwrap().to_owned();
+        let tenant = operation["tenant_id"].as_str().unwrap().to_owned();
+        // The first control-state write requests the cancellation; the
+        // second, the release after the seal, is refused.
+        f.memory.fault(Op::Put, CONTROL, Fault::Refuse, 1, 1);
+        let (status, body) = f
+            .action(&operation, "cancel", "cancel-lost", json!({}))
+            .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert!(matches!(
+            f.snapshot().lifecycle(&tenant).map(|entry| &entry.slot),
+            Some(Slot::Reserved {
+                cancellation_requested: true,
+                receipt: None,
+                ..
+            })
+        ));
+        let path = format!("/v1/admin/tenant-deployment-operations/{id}");
+        let (_, current) = f.call("GET", &path, None).await;
+        let current = current["operation"].clone();
+        assert_eq!(current["phase"], "cancelled");
+        assert_eq!(current["observed"]["terminal"], true);
+        assert_eq!(current["observed"]["reserved"], true);
+        assert_eq!(
+            current["next_step"],
+            "cancel again to release the reservation"
+        );
+        let (status, body) = f
+            .action(&operation, "cancel", "recover-stale", json!({}))
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"]["code"], "operation_generation_stale");
+
+        let (status, recovered) = f.action(&current, "cancel", "recover-1", json!({})).await;
+        assert_eq!(status, StatusCode::OK, "{recovered}");
+        assert_eq!(recovered["operation"]["phase"], "cancelled");
+        assert_eq!(recovered["operation"]["observed"]["reserved"], false);
+        assert_eq!(
+            recovered["operation"]["next_step"],
+            "none: the operation ended"
+        );
+        assert!(matches!(
+            f.snapshot().lifecycle(&tenant).map(|entry| &entry.slot),
+            Some(Slot::Released { operation_id, .. }) if *operation_id == id
+        ));
+        let audit = std::fs::read_to_string(f.directory.path().join("audit.jsonl")).unwrap();
+        assert!(
+            audit
+                .lines()
+                .any(|line| line.contains("tenant_deployment_action")
+                    && line.contains(&id)
+                    && line.contains("\"action\":\"cancel\"")),
+            "{audit}"
+        );
+        // The lost attempt's exact resend reaches the same end.
+        let (status, replay) = f
+            .action(&operation, "cancel", "cancel-lost", json!({}))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{replay}");
+        assert_eq!(replay["operation"]["observed"]["reserved"], false);
+        // Released: a further fresh cancel is ended, even with current tokens.
+        let (status, body) = f
+            .action(&recovered["operation"], "cancel", "recover-2", json!({}))
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"]["code"], "operation_terminal");
+    }
+
+    /// An ended operation takes a cancel only to release its own slot
+    /// after a sealed cancellation: never a released, replaced or
+    /// withdrawn slot (none is held), a retirement or an activation.
+    #[test]
+    fn an_ended_cancel_only_releases_its_own_sealed_cancellation() {
+        let request: ActionRequest = serde_json::from_value(json!({
+            "idempotency_key": "k",
+            "expected_operation_generation": 0,
+            "expected_lifecycle_generation": 0,
+        }))
+        .unwrap();
+        let payload = Payload::Retire {
+            tenant_id: ROUTED.into(),
+            expected_receipt: "a".repeat(64),
+            reason: "test".into(),
+            data_disposition: DataDisposition::Retain,
+        };
+        let reserved = |cancellation_requested| Slot::Reserved {
+            operation_id: "a".repeat(32),
+            kind: Kind::Retire,
+            request_digest: "b".repeat(64),
+            expected_route: None,
+            cancellation_requested,
+            receipt: None,
+        };
+        let cancelled = Some(&TerminalOutcome::Cancelled);
+        available(
+            Verb::Cancel,
+            &request,
+            &payload,
+            cancelled,
+            Some(&reserved(true)),
+        )
+        .unwrap();
+        for (terminal, slot) in [
+            (cancelled, None),
+            (cancelled, Some(reserved(false))),
+            (Some(&TerminalOutcome::Retired), Some(reserved(false))),
+            (Some(&TerminalOutcome::Retired), Some(reserved(true))),
+        ] {
+            let error =
+                available(Verb::Cancel, &request, &payload, terminal, slot.as_ref()).unwrap_err();
+            assert_eq!(error.code, "operation_terminal");
+        }
+    }
+
     /// EPIC-005: an unreserved reader change or retirement is cancelled by
     /// withdrawing it (`request_cancel`); a create or a migration still
     /// needs to hold its reservation.
@@ -1665,7 +1803,7 @@ mod tests {
             },
         ];
         for payload in &withdrawable {
-            available(Verb::Cancel, &request, payload, false, None).unwrap();
+            available(Verb::Cancel, &request, payload, None, None).unwrap();
         }
         let held_first = [
             Payload::Create {
@@ -1688,7 +1826,7 @@ mod tests {
             },
         ];
         for payload in &held_first {
-            let error = available(Verb::Cancel, &request, payload, false, None).unwrap_err();
+            let error = available(Verb::Cancel, &request, payload, None, None).unwrap_err();
             assert_eq!(error.code, "transition_unavailable");
         }
     }

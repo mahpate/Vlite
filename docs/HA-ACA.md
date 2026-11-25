@@ -808,8 +808,12 @@ value comes from:
   read. A stale token is explained, and **Check status** reads it again.
 - A cancel seals the operation before it releases the reservation. If the
   release fails, status shows `cancelled` with `observed.reserved` still
-  true. Only an exact resend of that cancel (same account, same key)
-  finishes the release; a new key is refused (`operation_terminal`). So the
+  true and the next step `cancel again to release the reservation`. An
+  exact resend of that cancel (same account, same key) finishes the
+  release. The server also accepts a new cancel from any administrator that
+  quotes the operation's current tokens, but only while this operation still
+  holds that reservation. Once it is released, or for an operation that
+  succeeded or retired, a new cancel is refused (`operation_terminal`). The
   panel saves each cancel it sends in this browser tab's `sessionStorage`,
   filed under the API address the dashboard sends its requests to, then the
   account the server verified at sign-in: a user account by its ID, or the
@@ -846,8 +850,10 @@ value comes from:
   - **No verified account or no API address:** the cancel is not saved; it is
     kept only while the operation stays selected on the page.
   - If the saved cancel is gone (another tab or browser, a sign-out or an
-    ended session), the panel says to report the operation ID to the server
-    operator.
+    ended session), the panel still says to report the operation ID to the
+    server operator. The panel does not yet send the new cancel described
+    above. Until it does, an administrator can send one through the API
+    with a new idempotency key and the current tokens from status.
 - Each **Create** adds a tenant record at once. The record counts toward the
   tenant limit and stays even if the request is later cancelled.
 

@@ -1721,7 +1721,11 @@ using tokens from the latest status. Results:
 * `resume` of a `present` reader change: 409 `pin_scope_unproven` (ITEM-008).
 * `cancel`: seals and releases a reserved, unactivated operation. It answers
   409 `retirement_required` once activated and `operation_terminal` once
-  ended. An accepted reader change or retirement that holds no reservation
+  ended, with one exception. If the release after the seal failed, the
+  operation reads `cancelled` with `observed.reserved` true. A cancel with a
+  new key that quotes the current generations then finishes the release, as
+  does the exact resend. Once the reservation is released or held by
+  another operation, a new cancel answers `operation_terminal`. An accepted reader change or retirement that holds no reservation
   is withdrawn instead, in the same control-state compare-and-swap that
   would reserve it, then sealed `cancelled`. It can never reserve afterwards
   and the slot and route are unchanged. If its reservation won first, the
