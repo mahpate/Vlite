@@ -570,7 +570,7 @@ impl Snapshot {
                 .iter()
                 .any(|existing| existing.tenant == migration.tenant && !existing.phase.terminal())
             || self.record_for(&migration.tenant) != Some(&migration.source)
-            || self.reserved(&migration.tenant)
+            || self.slot_held(&migration.tenant)
         {
             return Err(tenant_migration::conflict());
         }
@@ -812,7 +812,7 @@ impl Snapshot {
         }
     }
 
-    fn reserved(&self, tenant: &str) -> bool {
+    fn slot_held(&self, tenant: &str) -> bool {
         self.lifecycle(tenant)
             .is_some_and(|entry| matches!(entry.slot, Slot::Reserved { .. }))
     }
@@ -876,7 +876,7 @@ impl Snapshot {
                 "the operation was withdrawn and can never reserve",
             ));
         }
-        if self.reserved(tenant)
+        if self.slot_held(tenant)
             || self
                 .migrations
                 .iter()
@@ -2673,7 +2673,7 @@ mod tests {
             .unwrap();
         assert_eq!(read.generation(), 9);
         assert!(read.record_for(T1).unwrap() == &directory[0]);
-        assert!(read.reserved(T1));
+        assert!(read.slot_held(T1));
         assert_eq!(read.admit(T1).err().unwrap().code, "tenant_suspended");
     }
 
@@ -2695,7 +2695,7 @@ mod tests {
             .apply(3, &Edit::Directory, Some(&[][..]), None)
             .unwrap();
         let (read, _) = objects.read().unwrap();
-        assert!(read.record_for(T1).is_none() && read.reserved(T1));
+        assert!(read.record_for(T1).is_none() && read.slot_held(T1));
     }
 
     /// design-tenant-provisioning EPIC-005: T1 and T2 routed.
