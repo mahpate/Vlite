@@ -707,8 +707,9 @@ fn owned(found: &Value, owner: &str) -> Result<(), ArmError> {
 }
 
 /// One listed revision with its `active` flag, `None` when malformed. It is
-/// active while flagged or still running replicas; its digest is the app's
-/// (`shadow`) with this revision's template.
+/// active while flagged or still running replicas; a missing replica count
+/// is malformed, never zero. Its digest is the app's (`shadow`) with this
+/// revision's template.
 fn revision(item: &Value, shadow: &mut Value, body: Option<&Value>) -> Option<(Revision, bool)> {
     let name = item.get("name")?.as_str()?;
     let safe = |c: u8| c.is_ascii_alphanumeric() || c == b'-';
@@ -717,15 +718,13 @@ fn revision(item: &Value, shadow: &mut Value, body: Option<&Value>) -> Option<(R
     }
     let properties = item.get("properties")?;
     let flagged = properties.get("active")?.as_bool()?;
-    let replicas = match properties.get("replicas") {
-        None => 0,
-        Some(count) => count.as_u64().or_else(|| {
-            count
-                .as_f64()
-                .filter(|n| *n >= 0.0 && n.fract() == 0.0)
-                .map(|n| n as u64)
-        })?,
-    };
+    let count = properties.get("replicas")?;
+    let replicas = count.as_u64().or_else(|| {
+        count
+            .as_f64()
+            .filter(|n| *n >= 0.0 && n.fract() == 0.0)
+            .map(|n| n as u64)
+    })?;
     let template = properties.get("template").filter(|t| t.is_object())?;
     let config_digest = match body {
         Some(body) => {
@@ -1647,6 +1646,63 @@ mod tests {
         fake.finish();
     }
 
+    #[test]
+    fn a_missing_replica_count_never_proves_a_stop() {
+        let (listener, base) = bind();
+        let id = app("app-1");
+        let list = format!("{id}/revisions");
+        let ours = || on(line("GET", &id), ok(found(IMAGE, Some(OWNER))));
+        let listed = |items: Vec<Value>| on(line("GET", &list), page(items, None));
+        // A revision whose live replica count ARM left out.
+        let uncounted = |name: &str, active: bool| {
+            let mut item = entry(name, active, 0, IMAGE);
+            item["properties"]
+                .as_object_mut()
+                .unwrap()
+                .remove("replicas");
+            item
+        };
+        let fake = serve(
+            listener,
+            vec![
+                token(),
+                ours(),
+                listed(vec![uncounted("app-1--r1", false)]),
+                ours(),
+                listed(vec![uncounted("app-1--r1", false)]),
+                ours(),
+                listed(vec![
+                    entry("app-1--r2", true, 1, IMAGE),
+                    uncounted("app-1--r1", false),
+                ]),
+                ours(),
+                listed(vec![uncounted("app-1--r2", true)]),
+                ours(),
+                listed(vec![entry("app-1--r1", false, 1, IMAGE)]),
+                ours(),
+                listed(vec![entry("app-1--r1", false, 0, IMAGE)]),
+                on(line("GET", &id), status(404)),
+            ],
+        );
+        let arm = adapter(&base, mapped(&id), None);
+        let stop = format!("stop:{id}");
+        // Deactivated, but whether it still drains replicas is unknown.
+        assert_eq!(arm.poll(&stop), Err(ArmError::Unknown));
+        assert_eq!(
+            arm.read(&id).unwrap().unwrap().revisions,
+            Revisions::Incomplete
+        );
+        // Refused before any deactivation is sent, flagged or not.
+        let begin = || arm.begin(&call(&id, Verb::Stop));
+        assert_eq!(begin(), Err(refused("revision_inventory_incomplete")));
+        assert_eq!(begin(), Err(refused("revision_inventory_incomplete")));
+        // Explicit counts, and a deleted app, still decide the same handle.
+        assert_eq!(arm.poll(&stop), Ok(Poll::Running));
+        assert_eq!(arm.poll(&stop), Ok(Poll::Succeeded));
+        assert_eq!(arm.poll(&stop), Ok(Poll::Succeeded));
+        fake.finish();
+    }
+
     // ------------------------------------------------------------- read
 
     #[test]
@@ -1808,6 +1864,9 @@ mod tests {
             json!({"name": "r1", "properties": {"active": false, "replicas": "1", "template": template}}),
             json!({"name": "r1", "properties": {"active": false, "replicas": null, "template": template}}),
             json!({"name": "r1", "properties": {"active": false, "replicas": 1.5, "template": template}}),
+            // A missing replica count is unknown, never zero.
+            json!({"name": "r1", "properties": {"active": false, "template": template}}),
+            json!({"name": "r1", "properties": {"active": true, "template": template}}),
             json!({"name": "r1", "properties": {"active": true}}),
             json!({"name": "r1", "properties": {"active": true, "template": "t"}}),
             json!({"name": "r1"}),
