@@ -861,7 +861,8 @@
   function deploymentExplain(error) {
     const message = String(error?.message ?? error);
     const code = typeof error?.code === "string" ? error.code : "";
-    const hint = code && code !== "not_found" && Object.hasOwn(DEPLOY_HINTS, code) ? DEPLOY_HINTS[code]
+    const hint = typeof error?.deployHint === "string" ? error.deployHint
+      : code && code !== "not_found" && Object.hasOwn(DEPLOY_HINTS, code) ? DEPLOY_HINTS[code]
       : error?.status === 404 ? DEPLOY_BLOCKED.not_found
       : code ? "The dashboard has no explanation for this code. Select Load operations to see what is recorded; if it keeps failing, check the server log for this code."
       : "";
@@ -1035,8 +1036,8 @@
     };
   }
   const deploymentTerminal = (op) => object(op) && (["succeeded", "cancelled", "retired"].includes(op.phase) || op.observed?.terminal === true);
-  // Cancel seals the outcome first and then releases the tenant; if the release failed, only an exact
-  // resend of that same cancel (same key and body, same signed-in account) finishes it.
+  // Cancel seals the outcome first and then releases the tenant; if the release failed, an exact resend of
+  // that same cancel (same key and body, same signed-in account) or a new cancel quoting the current status finishes it.
   const deploymentReleasePending = (op) => object(op) && op.phase === "cancelled" && object(op.observed) && op.observed.reserved === true;
   // The cancel body quotes the tokens from the status just read, so a change in between is refused, not overridden.
   function deploymentCancelRequest(op, key) {
@@ -1070,15 +1071,19 @@
     ].join("\n");
   }
   const RELEASE_PENDING = "This operation is cancelled, but the server has not released the tenant's reservation yet (the release step failed after the cancel was recorded).";
-  function deploymentReleaseConfirm(op) {
+  function deploymentReleaseConfirm(op, resending) {
     return [
       `Finish cancelling operation ${deploymentView(op).operation}?`,
       RELEASE_PENDING,
-      "This resends your earlier cancel exactly, with the same request key, so the server only finishes releasing the reservation. Cloud execution is switched off (OD-002), so nothing in Azure is touched.",
+      resending ? "This resends your earlier cancel exactly, with the same request key, so the server only finishes releasing the reservation."
+        : "This sends a new cancel that quotes the status just read, so the server only finishes releasing the reservation. If the operation changes first, the server refuses it and nothing changes.",
+      "Cloud execution is switched off (OD-002), so nothing in Azure is touched.",
     ].join("\n");
   }
-  // Without the saved cancel the dashboard cannot resend it, and a new cancel is refused because the operation ended.
-  const RELEASE_LOST = `${RELEASE_PENDING} Only an exact resend of that cancel (same signed-in account, same request key) releases it, and this browser tab has no saved copy for the account signed in now under this dashboard's API address. A saved cancel stays only in the tab that sent it, only for the account that sent it, only for a dashboard using the same API address, and only until that account signs out or its session ends (both delete it). If another account sent it from this tab and its session has not ended, that account can sign in here again to resend it. A new cancel is refused because the operation has ended. Nothing else releases it today (the command-line tool cannot resend a dashboard's cancel either), so the tenant stays reserved: report the operation ID to the server operator.`;
+  // Without a saved cancel for this account, Cancel sends a new one quoting the status it reads first.
+  const RELEASE_LOST = `${RELEASE_PENDING} This browser tab has no saved copy of the earlier cancel for the account signed in now under this dashboard's API address (a saved cancel stays only in the tab that sent it, only for the account that sent it, and only until that account signs out or its session ends). Select Cancel to send a new cancel instead: it quotes the status read just before it is sent, and the server then finishes releasing the reservation.`;
+  // A server that predates this recovery refuses a new cancel once the operation has ended.
+  const RELEASE_REFUSED = "The server refused a new cancel for this operation. Select Check status: if the reservation is now released, nothing more is needed. If it is still held, this server is older than the dashboard and accepts only an exact resend of the earlier cancel, which this tab does not have: report the operation ID to the server operator.";
   // Saved cancels (sessionStorage) are filed by API address, then owner:
   // TD_CANCEL_STORE + encodeURIComponent(address) + "/" + principal + "." + operation ID.
   const TD_CANCEL_STORE = "vlite.tenant-deployment.cancel.";
@@ -1972,7 +1977,7 @@
       const releasing = shown && deploymentReleasePending(tdOp);
       const resend = releasing && tdCancelSavedFor(tdOp.operation_id) !== null;
       const ended = shown && !releasing && deploymentTerminal(tdOp);
-      $(TD("cancel")).disabled = !allowed || ended || (releasing && !resend);
+      $(TD("cancel")).disabled = !allowed || ended;
       $(TD("operation-help")).textContent = !allowed ? gates.tenantDeployments.reason
         : releasing ? (resend ? tdResendHelp(tdCancelSavedFor(tdOp.operation_id), " ") : RELEASE_LOST)
         : ended ? "This operation has ended, so it cannot be cancelled. Enter another operation ID to cancel a different one."
@@ -2136,14 +2141,14 @@
       if (!op) return;
       const saved = tdCancelSavedFor(id);
       const releasing = deploymentReleasePending(op);
-      if (releasing && !saved) { show(TD_MESSAGES.tdOperation, RELEASE_LOST); return; }
       if (!releasing && deploymentTerminal(op)) {
         tdCancelDrop(id);
         show(TD_MESSAGES.tdOperation, "This operation has already ended, so there is nothing to cancel. Nothing was sent.");
         return;
       }
+      // With no saved cancel for this account, a pending release gets a new cancel quoting the status just read.
       const pending = saved ?? { operation: id, principal: tdPrincipal, scope: tdScope, ...deploymentCancelRequest(op, idempotencyKey()) };
-      if (!await ctx.confirm(releasing ? deploymentReleaseConfirm(op) : deploymentCancelConfirm(op, saved !== null))) { if (current(mark)) show(TD_MESSAGES.tdOperation, "Nothing was sent."); return; }
+      if (!await ctx.confirm(releasing ? deploymentReleaseConfirm(op, saved !== null) : deploymentCancelConfirm(op, saved !== null))) { if (current(mark)) show(TD_MESSAGES.tdOperation, "Nothing was sent."); return; }
       if (!current(mark)) return;
       tdCancelKeep(pending);
       show(TD_MESSAGES.tdOperation, "Sending the cancel…");
@@ -2154,6 +2159,7 @@
           if (deploymentRetryable(error)) error.deployRetry = true;
           else tdCancelDrop(id);
         }
+        if (releasing && saved === null && error?.code === "operation_terminal") error.deployHint = RELEASE_REFUSED;
         if (error?.code === "operation_generation_stale" && current(mark)) focusAfterRun(TD("check"));
         throw error;
       }
@@ -2284,7 +2290,7 @@
     autoFailoverView, autoFailoverRequest, deploymentListPath, deploymentRequest, deploymentView, deploymentList, deploymentBlocked, deploymentExplain,
     sha256Hex, deploymentContent, deploymentCreateSubmission, deploymentReadersSubmission, deploymentRetireSubmission, deploymentTerminal,
     deploymentCancelRequest, deploymentCancelConfirm, deploymentRetryable, deploymentProfileText, DEPLOY_HINTS, DEPLOY_SETTLED,
-    deploymentReleasePending, deploymentReleaseConfirm, deploymentSavedCancel, deploymentAck, DEPLOY_PHASES, DEPLOY_KINDS, RELEASE_PENDING, RELEASE_LOST,
+    deploymentReleasePending, deploymentReleaseConfirm, deploymentSavedCancel, deploymentAck, DEPLOY_PHASES,     DEPLOY_KINDS, RELEASE_PENDING, RELEASE_LOST, RELEASE_REFUSED,
     deploymentPrincipal, deploymentApiScope, deploymentCancelOwner, deploymentCancelScope, DEPLOY_RETRY_AFTER_FIX } };
   if (typeof window !== "undefined") window.VLiteAdminTools = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;

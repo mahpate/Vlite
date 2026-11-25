@@ -1014,6 +1014,7 @@ class TenantDeploymentWriteApi(TenantDeploymentApi):
         self.bump_on_read = False  # the operation changes right after its status is read
         self.actions = {}  # (operation, key) -> the stored cancel and its result
         self.release_fails = False  # the next cancel seals the operation but fails to release its reservation
+        self.older_server = False  # refuses a new cancel for an ended operation, as servers before that recovery do
         self.rejected_token = None  # an access token refused with a non-JSON 401, as a proxy in front might answer
 
     def failure(self):
@@ -1074,7 +1075,10 @@ class TenantDeploymentWriteApi(TenantDeploymentApi):
             if (body["expected_operation_generation"], body["expected_lifecycle_generation"]) != (
                     operation["operation_generation"], operation["lifecycle_generation"]):
                 return self.error(409, "operation_generation_stale")
-            if operation["observed"]["terminal"]:
+            # As admin.rs `available`: once ended, only a sealed cancel still holding its reservation takes a new
+            # cancel (it finishes the release); a server older than that recovery refuses it as well.
+            if operation["observed"]["terminal"] and (self.older_server or not (
+                    operation["phase"] == "cancelled" and operation["observed"]["reserved"])):
                 return self.error(409, "operation_terminal")
             stored = self.actions[(rest[0], body["idempotency_key"])] = {"body": dict(body), "result": None}
         if not operation["observed"]["terminal"]:
@@ -1284,8 +1288,10 @@ def exercise_tenant_deployment_requests(browser):
     expect(page.locator("#tenant-deployment-cancel")).to_be_disabled()
     assert not [key for key in page.evaluate("() => Object.keys(sessionStorage)") if pending_id in key]
 
-    # Without the saved cancel (another tab, cleared storage) the dashboard cannot resend it and says so honestly.
+    # Without the saved cancel (another tab, cleared storage) the dashboard cannot resend it and says so; Cancel then
+    # sends a new cancel quoting the status read first, which finishes the release. Declining it sends nothing.
     lost_id = create_second("Northwind")
+    lost_path = f"{DEPLOY_OPS}/{lost_id}/cancel"
     fake.release_fails = True
     control(page, "#tenant-deployment-cancel").click()
     confirm(page, f"Cancel operation {lost_id}?")
@@ -1296,12 +1302,29 @@ def exercise_tenant_deployment_requests(browser):
     control(page, "#admin-tenant-deployments")
     control(page, "#tenant-deployment-operation").fill(lost_id)
     control(page, "#tenant-deployment-check").click()
-    expect(operation_message).to_contain_text("report the operation ID to the server operator")
+    expect(operation_message).to_contain_text("has no saved copy of the earlier cancel")
+    expect(operation_message).to_contain_text("Select Cancel to send a new cancel instead")
+    expect(page.locator("#tenant-deployment-cancel")).to_be_enabled()
+    control(page, "#tenant-deployment-cancel").click()
+    confirm_all(page, f"Finish cancelling operation {lost_id}?", "sends a new cancel that quotes the status just read",
+                accept=False)
+    expect(operation_message).to_have_text("Nothing was sent.")
+    assert len(posts(lost_path)) == 1
+    control(page, "#tenant-deployment-cancel").click()
+    confirm_all(page, f"Finish cancelling operation {lost_id}?", "sends a new cancel that quotes the status just read")
+    expect(operation_message).to_contain_text("Cancelled. Cloud execution is switched off (OD-002)")
+    sealed, fresh = (item["body"] for item in posts(lost_path))
+    lost_operation = next(item for item in fake.operations if item["operation_id"] == lost_id)
+    assert fresh["idempotency_key"] != sealed["idempotency_key"]
+    assert (fresh["expected_operation_generation"], fresh["expected_lifecycle_generation"]) == (
+        lost_operation["operation_generation"], lost_operation["lifecycle_generation"])
+    assert lost_operation["observed"]["reserved"] is False
     expect(page.locator("#tenant-deployment-cancel")).to_be_disabled()
-    assert len(posts(f"{DEPLOY_OPS}/{lost_id}/cancel")) == 1
+    assert not [key for key in page.evaluate("() => Object.keys(sessionStorage)") if lost_id in key]
 
     # A token refused on a fresh page (here with a non-JSON 401) deletes the bootstrap admin token's saved cancels on
     # this API address, even though the dashboard never learned who was signed in: the right token can no longer resend.
+    # A server older than the dashboard refuses the new cancel, and the dashboard says what to do instead.
     refused_id = create_second("Litware")
     fake.release_fails = True
     control(page, "#tenant-deployment-cancel").click()
@@ -1318,9 +1341,15 @@ def exercise_tenant_deployment_requests(browser):
     control(page, "#admin-tenant-deployments")
     control(page, "#tenant-deployment-operation").fill(refused_id)
     control(page, "#tenant-deployment-check").click()
+    expect(operation_message).to_contain_text("has no saved copy of the earlier cancel")
+    fake.older_server = True
+    control(page, "#tenant-deployment-cancel").click()
+    confirm_all(page, f"Finish cancelling operation {refused_id}?", "sends a new cancel that quotes the status just read")
+    expect(operation_message).to_contain_text("The server refused a new cancel for this operation")
     expect(operation_message).to_contain_text("report the operation ID to the server operator")
-    expect(page.locator("#tenant-deployment-cancel")).to_be_disabled()
-    assert len(posts(f"{DEPLOY_OPS}/{refused_id}/cancel")) == 1
+    fake.older_server = False
+    assert len(posts(f"{DEPLOY_OPS}/{refused_id}/cancel")) == 2
+    assert not [key for key in page.evaluate("() => Object.keys(sessionStorage)") if refused_id in key]
 
     # Signing out clears every form, result and kept request, and deletes this account's saved cancels: signed in
     # again with the same token, the dashboard can no longer resend that cancel.
@@ -1345,8 +1374,8 @@ def exercise_tenant_deployment_requests(browser):
     expect(page.locator("#tenant-deployment-list > li")).to_have_count(0)
     control(page, "#tenant-deployment-operation").fill(held_id)
     control(page, "#tenant-deployment-check").click()
-    expect(operation_message).to_contain_text("report the operation ID to the server operator")
-    expect(page.locator("#tenant-deployment-cancel")).to_be_disabled()
+    expect(operation_message).to_contain_text("has no saved copy of the earlier cancel")
+    expect(page.locator("#tenant-deployment-cancel")).to_be_enabled()
     assert len(posts(f"{DEPLOY_OPS}/{held_id}/cancel")) == 1
     # Losing authentication during a real form submission leaves no inspector contents in the hidden dashboard.
     control(page, "#tenant-deployment-name").fill("Session boundary")
@@ -1397,4 +1426,5 @@ if __name__ == "__main__":
           "pasted text, declined confirmation sends nothing, unknown outcome retried with the same key and shown as "
           "already recorded, edits get a new key, cancel reads fresh tokens and explains a stale one, ended operations "
           "cannot be cancelled, a cancel whose release failed is resent exactly (even after a reload) and clears the "
-          "reservation, a lost saved cancel is reported honestly, list refresh, no overflow and sign-out clearing.")
+          "reservation, a lost saved cancel is reported and replaced by a new cancel that finishes the release (an "
+          "older server's refusal explained), list refresh, no overflow and sign-out clearing.")

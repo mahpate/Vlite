@@ -826,8 +826,9 @@ value comes from:
     session that has not ended resumes by itself; a bootstrap token user
     types the token again.
   - **Another account in the same tab** cannot resend it. The panel says this
-    tab has no saved cancel for the account signed in now. The first
-    account's record stays until that account signs out or its session ends.
+    tab has no saved cancel for the account signed in now, and **Cancel**
+    sends a new cancel instead (see below). The first account's record stays
+    until that account signs out or its session ends.
   - **Another dashboard on the same site** cannot resend or delete it.
     `sessionStorage` is shared by every page of a site in a tab, and one site
     can serve dashboards for different servers. For example, the Docker image
@@ -850,10 +851,12 @@ value comes from:
   - **No verified account or no API address:** the cancel is not saved; it is
     kept only while the operation stays selected on the page.
   - If the saved cancel is gone (another tab or browser, a sign-out or an
-    ended session), the panel still says to report the operation ID to the
-    server operator. The panel does not yet send the new cancel described
-    above. Until it does, an administrator can send one through the API
-    with a new idempotency key and the current tokens from status.
+    ended session), the panel says so and **Cancel** sends the new cancel
+    described above instead: a new request key and the tokens from the
+    status it reads just before sending. A server older than this recovery
+    refuses that cancel (`operation_terminal`). The panel then says to
+    select **Check status** and, if the reservation is still held, to report
+    the operation ID to the server operator.
 - Each **Create** adds a tenant record at once. The record counts toward the
   tenant limit and stays even if the request is later cancelled.
 

@@ -1486,7 +1486,7 @@ async function tenantDeploymentTests() {
 async function tenantDeploymentWriteTests() {
   const { sha256Hex, deploymentContent, deploymentCreateSubmission, deploymentReadersSubmission, deploymentRetireSubmission, deploymentTerminal,
     deploymentCancelRequest, deploymentCancelConfirm, deploymentRetryable, deploymentProfileText, deploymentExplain, DEPLOY_HINTS, DEPLOY_SETTLED,
-    deploymentAck, deploymentReleasePending, deploymentReleaseConfirm, deploymentSavedCancel, DEPLOY_PHASES, DEPLOY_KINDS, RELEASE_PENDING, RELEASE_LOST,
+    deploymentAck, deploymentReleasePending, deploymentReleaseConfirm, deploymentSavedCancel, DEPLOY_PHASES,     DEPLOY_KINDS, RELEASE_PENDING, RELEASE_LOST, RELEASE_REFUSED,
     deploymentPrincipal, deploymentCancelOwner, deploymentCancelScope, deploymentApiScope } = utils;
   const nodeSha = (data) => require("node:crypto").createHash("sha256").update(data).digest("hex");
   const plain = (value) => JSON.parse(JSON.stringify(value));
@@ -1671,14 +1671,20 @@ async function tenantDeploymentWriteTests() {
   for (const [value, expect] of [[null, {}], [{}, {}], [{ operation: "x" }, {}], [{ operation: op("x") }, {}], [{ operation: op(A) }, { operation: B }],
     [{ operation: op(A) }, { kind: "retire" }], [{ operation: op(A) }, { tenant: B }]]) assert.equal(deploymentAck(value, expect), null, JSON.stringify(expect));
 
-  // A cancelled operation that still holds its reservation needs the exact earlier cancel resent.
+  // A cancelled operation that still holds its reservation is released by resending the earlier cancel or by a new one.
   assert.equal(deploymentReleasePending(op(A, { phase: "cancelled", observed: { terminal: true, reserved: true } })), true);
   for (const other of [op(A, { phase: "cancelled", observed: { terminal: true, reserved: false } }), op(A, { observed: { reserved: true } }), null])
     assert.equal(deploymentReleasePending(other), false);
-  assert.match(deploymentReleaseConfirm(op(A, { phase: "cancelled" })), /^Finish cancelling operation a{32}\?\n[\s\S]*same request key/);
-  assert.match(RELEASE_LOST, /^This operation is cancelled, but the server has not released[\s\S]*A new cancel is refused[\s\S]*report the operation ID to the server operator/);
+  assert.match(deploymentReleaseConfirm(op(A, { phase: "cancelled" }), true), /^Finish cancelling operation a{32}\?\n[\s\S]*resends your earlier cancel exactly, with the same request key/);
+  const freshRelease = deploymentReleaseConfirm(op(A, { phase: "cancelled" }), false);
+  assert.match(freshRelease, /^Finish cancelling operation a{32}\?\n[\s\S]*sends a new cancel that quotes the status just read[\s\S]*the server refuses it and nothing changes[\s\S]*nothing in Azure is touched/);
+  assert.doesNotMatch(freshRelease, /same request key/);
+  assert.match(RELEASE_LOST, /^This operation is cancelled, but the server has not released[\s\S]*Select Cancel to send a new cancel instead[\s\S]*finishes releasing the reservation\.$/);
+  assert.doesNotMatch(RELEASE_LOST, /refused|report the operation ID/);
+  // An older server refuses the new cancel; the page says how to tell whether anything is still held.
+  assert.match(RELEASE_REFUSED, /^The server refused a new cancel[\s\S]*Select Check status[\s\S]*still held[\s\S]*report the operation ID to the server operator\.$/);
   // The tab keeps a saved cancel only for the verified account that sent it, until it signs out or its session ends.
-  assert.match(RELEASE_LOST, /only for the account that sent it[\s\S]*signs out or its session ends[\s\S]*sign in here again/);
+  assert.match(RELEASE_LOST, /only for the account that sent it[\s\S]*signs out or its session ends/);
   // Whose a saved cancel is: a verified account (the server's actor names), never a role alone; anything else is no account.
   const ALICE = "a1".repeat(16), BOB = "b2".repeat(16), STORE = "vlite.tenant-deployment.cancel.";
   const userCaps = (id, accountRole = "super_admin") => ({ role: "admin", identity: { kind: "user", user_id: id, account_role: accountRole, label: "x" }, features: {}, routes: [] });
@@ -2011,6 +2017,7 @@ async function tenantDeploymentWriteTests() {
   // The server seals a cancel before releasing the reservation; if the release fails, the exact earlier cancel finishes it.
   const E = "e".repeat(32), stored = keyIn(ROOT, `user:${ALICE}`, E);
   const releasing = op(E, { phase: "cancelled", operation_generation: 5, observed: { journal_steps: 3, uncertain_steps: 0, terminal: true, reserved: true } });
+  const nowReleasedOf = (id) => op(id, { phase: "cancelled", operation_generation: 6, observed: { journal_steps: 4, uncertain_steps: 0, terminal: true, reserved: false } });
   el("operation").value = E; el("operation").input();
   // An answer naming another operation is an unknown outcome: the cancel stays saved.
   ctx.responses.push({ operation: op(E) }, { action: "cancel", operation: op(B) });
@@ -2042,19 +2049,61 @@ async function tenantDeploymentWriteTests() {
   assert.match(el("operation-message").textContent, /^Cancelled\./);
   assert.equal(session.has(stored), false);
   assert.equal(el("cancel").disabled, true);
-  // Without the earlier cancel there is no resend; the page says so and sends nothing.
-  const lost = "1".repeat(32);
+  // Without the earlier cancel, Cancel sends a new one that quotes the status it reads first.
+  const lost = "1".repeat(32), lostKey = keyIn(ROOT, `user:${ALICE}`, lost);
+  const lostReleasing = { ...releasing, operation_id: lost, operation_generation: 7, lifecycle_generation: 3 };
   el("operation").value = lost; el("operation").input();
-  ctx.responses.push({ operation: { ...releasing, operation_id: lost } });
+  ctx.responses.push({ operation: lostReleasing });
   await el("check").click();
   assert.equal(el("operation-message").textContent, RELEASE_LOST);
-  assert.equal(el("cancel").disabled, true);
+  assert.equal(el("cancel").disabled, false);
   assert.ok(el("operation-help").textContent.includes(RELEASE_LOST));
-  const noSend = ctx.calls.length;
-  ctx.responses.push({ operation: { ...releasing, operation_id: lost } });
+  // Declining the confirmation sends nothing.
+  const declined = ctx.calls.length;
+  ctx.answer = false;
+  ctx.responses.push({ operation: lostReleasing });
   await el("cancel").click();
-  assert.deepEqual(ctx.calls.slice(noSend).map((call) => call.method), ["GET"]);
-  assert.equal(el("operation-message").textContent, RELEASE_LOST);
+  ctx.answer = true;
+  assert.deepEqual(ctx.calls.slice(declined).map((call) => call.method), ["GET"]);
+  assert.equal(el("operation-message").textContent, "Nothing was sent.");
+  assert.equal(session.has(lostKey), false);
+  const freshSend = ctx.calls.length;
+  ctx.responses.push({ operation: lostReleasing }, { action: "cancel", operation: { ...nowReleasedOf(lost), operation_generation: 8 } }, listed());
+  await el("cancel").click();
+  assert.deepEqual(ctx.calls.slice(freshSend).map((call) => call.method), ["GET", "POST", "GET"]);
+  const fresh = ctx.calls[freshSend + 1];
+  assert.equal(fresh.path, `/v1/admin/tenant-deployment-operations/${lost}/cancel`);
+  assert.equal(fresh.body.expected_operation_generation, 7);
+  assert.equal(fresh.body.expected_lifecycle_generation, 3);
+  assert.notEqual(fresh.body.idempotency_key, sealed.idempotency_key);
+  assert.match(ctx.confirms.at(-1), /^Finish cancelling operation 1{32}\?\n[\s\S]*sends a new cancel that quotes the status just read/);
+  assert.doesNotMatch(ctx.confirms.at(-1), /same request key/);
+  assert.match(el("operation-message").textContent, /^Cancelled\./);
+  assert.equal(session.has(lostKey), false);
+  assert.equal(el("cancel").disabled, true);
+  // A server older than this recovery refuses the new cancel: the page says what to do and keeps no saved copy.
+  const old = "2".repeat(32), oldKey = keyIn(ROOT, `user:${ALICE}`, old);
+  el("operation").value = old; el("operation").input();
+  ctx.responses.push({ operation: { ...releasing, operation_id: old } }, fail(409, "operation_terminal"));
+  await el("cancel").click();
+  assert.equal(ctx.calls.at(-1).method, "POST");
+  assert.match(el("operation-message").textContent, /^HTTP 409: operation_terminal: x\n/);
+  assert.ok(el("operation-message").textContent.includes(RELEASE_REFUSED));
+  assert.equal(session.has(oldKey), false);
+  // A new cancel whose outcome is unknown is kept for this account and resent exactly.
+  const unsure = "5".repeat(32), unsureKey = keyIn(ROOT, `user:${ALICE}`, unsure);
+  el("operation").value = unsure; el("operation").input();
+  ctx.responses.push({ operation: { ...releasing, operation_id: unsure } }, fail(503, "operation_store_unavailable"));
+  await el("cancel").click();
+  const unsureBody = plain(ctx.calls.at(-1).body);
+  assert.match(el("operation-message").textContent, /same button again/);
+  assert.deepEqual(JSON.parse(session.get(unsureKey)).body, unsureBody);
+  ctx.responses.push({ operation: { ...releasing, operation_id: unsure } }, { action: "cancel", operation: nowReleasedOf(unsure) }, listed());
+  await el("cancel").click();
+  assert.deepEqual(plain(ctx.calls.at(-2).body), unsureBody);
+  assert.match(ctx.confirms.at(-1), /resends your earlier cancel exactly, with the same request key/);
+  assert.match(el("operation-message").textContent, /^Cancelled\./);
+  assert.equal(session.has(unsureKey), false);
   // A malformed ID or status sends nothing further.
   el("operation").value = "nope"; el("operation").input();
   const quiet = ctx.calls.length;
@@ -2102,16 +2151,26 @@ async function tenantDeploymentWriteTests() {
   // Leaving the page (pagehide) keeps it for a reload.
   tools.disconnect({ sessionEnded: false });
   assert.ok(session.has(aliceF));
-  // Bob signs in to the same tab: Alice's cancel is neither offered nor sent, and it stays saved for her.
+  // Bob signs in to the same tab: Alice's cancel is neither offered nor sent; declining his new cancel sends nothing.
   signIn(userCaps(BOB));
   assert.equal(await checkShows(F), RELEASE_LOST);
-  assert.equal(el("cancel").disabled, true);
+  assert.equal(el("cancel").disabled, false);
   const bobSent = ctx.calls.length;
+  ctx.answer = false;
   ctx.responses.push({ operation: stillReserved(F) });
   await el("cancel").click();
+  ctx.answer = true;
   assert.deepEqual(ctx.calls.slice(bobSent).map((call) => call.method), ["GET"]);
-  assert.equal(el("operation-message").textContent, RELEASE_LOST);
+  assert.match(ctx.confirms.at(-1), /sends a new cancel that quotes the status just read/);
+  assert.equal(el("operation-message").textContent, "Nothing was sent.");
   assert.ok(session.has(aliceF));
+  // Bob's own new cancel uses a new key and, while its outcome is unknown, is saved under Bob; Alice's stays hers.
+  const bobF = keyOf(`user:${BOB}`, F);
+  ctx.responses.push({ operation: stillReserved(F) }, fail(503, "operation_store_unavailable"));
+  await el("cancel").click();
+  assert.notEqual(ctx.calls.at(-1).body.idempotency_key, aliceBody.idempotency_key);
+  assert.deepEqual(JSON.parse(session.get(bobF)).body, plain(ctx.calls.at(-1).body));
+  assert.deepEqual(JSON.parse(session.get(aliceF)).body, aliceBody);
   // Bob's own cancel is saved under Bob.
   const bobG = keyOf(`user:${BOB}`, G);
   await leaveReleasePending(G);
@@ -2259,16 +2318,19 @@ async function tenantDeploymentWriteTests() {
   const rootSaved = session.get(aliceRoot);
   A1.t.disconnect({ sessionEnded: false });
   // Dashboard B, on the same site and in the same tab, sends its requests under /vlite-b/api. The same account checking
-  // the same operation ID is not offered A's cancel, and Cancel sends only the status read.
+  // the same operation ID is not offered A's cancel; Cancel offers only a new cancel, and declining it sends nothing.
   const B1 = page("/vlite-b/api");
   signIn(userCaps(ALICE), B1.c, B1.t);
   assert.equal(await checkShows(SHARED, B1.c), RELEASE_LOST);
-  assert.equal(el("cancel").disabled, true);
+  assert.equal(el("cancel").disabled, false);
   const bSent = B1.c.calls.length;
+  B1.c.answer = false;
   B1.c.responses.push({ operation: stillReserved(SHARED) });
   await el("cancel").click();
+  B1.c.answer = true;
   assert.deepEqual(B1.c.calls.slice(bSent).map((call) => call.method), ["GET"]);
-  assert.equal(el("operation-message").textContent, RELEASE_LOST);
+  assert.match(B1.c.confirms.at(-1), /sends a new cancel that quotes the status just read/);
+  assert.equal(el("operation-message").textContent, "Nothing was sent.");
   // B's own cancel for the same operation ID and account is filed under B's address; A's saved copy is untouched.
   const proxiedBody = await leaveReleasePending(SHARED, B1.c);
   assert.notEqual(proxiedBody.idempotency_key, rootBody.idempotency_key);
@@ -2333,13 +2395,16 @@ async function tenantDeploymentWriteTests() {
   assert.deepEqual(cancelKeys(), [aliceOp, elsewhereToken, oldToken, tokenOp, unknownRoot].sort());
   A4.t.disconnect({ sessionEnded: true, rejectedToken: true });
   assert.deepEqual(cancelKeys(), [aliceOp, elsewhereToken].sort());
-  // Signed in with the right token, nothing is offered: the release is reported lost, and Cancel only reads the status.
+  // Signed in with the right token, nothing is offered: the release is reported lost, and Cancel offers only a new cancel.
   signIn(tokenCaps, A4.c, A4.t);
   assert.equal(await checkShows(TOKEN_OP, A4.c), RELEASE_LOST);
   const tokenSent = A4.c.calls.length;
+  A4.c.answer = false;
   A4.c.responses.push({ operation: stillReserved(TOKEN_OP) });
   await el("cancel").click();
+  A4.c.answer = true;
   assert.deepEqual(A4.c.calls.slice(tokenSent).map((call) => call.method), ["GET"]);
+  assert.match(A4.c.confirms.at(-1), /sends a new cancel that quotes the status just read/);
   // Alice, whose session never ended, still resends hers exactly after signing in again.
   signIn(userCaps(ALICE), A4.c, A4.t);
   assert.deepEqual(await resend(ALICE_OP, A4.c), aliceOpBody);
