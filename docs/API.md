@@ -50,6 +50,11 @@ passwords and sessions.
 | `DELETE /v1/admin/users/{id}` | Super admin | Delete an account |
 | `POST /v1/admin/users/{id}/password` | Super admin | Set a temporary password |
 
+A gateway answers the first five routes itself only with its opt-in
+`dashboard` block, for tenant editors and viewers, and does not change
+passwords; see
+[Dashboard sign-in through a gateway](#dashboard-sign-in-through-a-gateway-od-004-opt-in).
+
 ## Record expiry and metadata
 
 `PUT /v1/vectors/{id}` and its collection-scoped equivalent accept optional
@@ -1109,9 +1114,11 @@ tenant has one backend.
 ### What a gateway serves
 
 * **Tenant credentials only.** A single `Authorization: Bearer vlk_...`
-  credential that belongs to a tenant. Admin and read-only tokens, sessions,
-  sign-in, the dashboard and super-admin routes are not served through a
-  gateway.
+  credential that belongs to a tenant. Admin and read-only tokens and
+  super-admin routes are never served through a gateway. Sign-in, sessions
+  and the dashboard are served only with the opt-in `dashboard` block, and
+  only for tenant editor and viewer accounts (see
+  [Dashboard sign-in through a gateway](#dashboard-sign-in-through-a-gateway-od-004-opt-in)).
 * **Its own health and readiness.** `GET /health` answers
   `{"status":"ok"}`. `GET /ready` answers `{"status":"ready","generation":A}`
   only while its control-state copy was confirmed within `s_ctl_ms`.
@@ -1127,10 +1134,13 @@ Before forwarding, the gateway checks, in order:
 2. The route. An unregistered route gets 404 `not_found`, and a wrong method
    gets 405 `method_not_allowed`. The standalone public routes
    (`/v1/auth/login`, `/v1/auth/config` and the dashboard) also get 404
-   through a gateway.
+   through a gateway without a `dashboard` block. With one, the gateway
+   answers them and the other `/v1/auth/*` session routes itself; they are
+   never forwarded.
 3. A fresh control-state snapshot, else 503 `control_state_stale`.
 4. The credential and tenant, with the standalone rules. Without a tenant
-   credential the answer is 401 `unauthorized`; unknown, revoked and expired
+   credential (or, with a `dashboard` block, a valid session cookie) the
+   answer is 401 `unauthorized`; unknown, revoked and expired
    credentials are refused as on a standalone server; a suspended tenant gets
    403 `tenant_suspended`. A credential without a tenant gets 403
    `gateway_tenant_required`, and a tenant with no directory record gets 503
@@ -1149,13 +1159,19 @@ Before forwarding, the gateway checks, in order:
    body whose next piece does not arrive within `upstream_timeout_ms` gets
    408 `request_body_timeout`, and nothing is sent upstream.
 
-More than `max_in_flight` concurrent requests get 503 `overloaded`.
+More than `max_in_flight` concurrent requests get 503 `overloaded`. Dashboard
+sign-in (`POST /v1/auth/login`) is admitted before that limit and never holds
+one of its slots: each replica runs at most 16 sign-ins at once, and the
+next gets 503 `overloaded` while other requests are unaffected. The whole
+sign-in body must arrive within `upstream_timeout_ms`, or the sign-in gets
+408 `request_body_timeout` and no cookie.
 
 **Forwarding.** The gateway keeps the method, path, query, body and status. It
 drops the caller's `Authorization`, `Cookie`, `x-vlite-principal`, `Host`,
 `Forwarded`, `X-Forwarded-*`, `X-Real-IP` and proxy headers, hop-by-hop
 headers and any header that `Connection` names, and it adds its own envelope.
-Responses are streamed back without hop-by-hop or `Set-Cookie` headers. The
+Responses are streamed back without hop-by-hop or `Set-Cookie` headers; the
+only cookie a gateway sets is its own dashboard session cookie. The
 upstream URL is the record's `writer` origin plus the caller's path and query.
 A record endpoint with a path, query, fragment or user name, or a path that
 URL normalization would change, is refused (503 `tenant_route_invalid` or 400
@@ -1213,6 +1229,14 @@ not start without that read. In this mode:
 * The existing scope, admin-only, lineage, memory and quota guards run as for
   a `vlk_` credential. Tenant vector quotas come from the control state, and
   the backend keeps its own per-credential rate limit.
+* An envelope whose principal id is `user:<32 hex>` comes from a gateway's
+  dashboard sign-in. It is accepted only in the shape of a standalone editor
+  or viewer session: a tenant, the tenant's whole scope, no rate or quota
+  limit, and only editor or viewer operations (`read`, `search`,
+  `search_build`, `write`, `import`, `index`, `collections`, `graph_read`,
+  `graph_write`). It is served as a session, never as a `vlk_` credential;
+  any other shape gets 401 `envelope_invalid`. A backend built before OD-004
+  refuses it.
 * `/ready` is unauthenticated and answers
   `{"status":"ready","generation":A,"minimum_generation":M}`, or 503
   `control_state_stale` or `draining`.
@@ -1251,8 +1275,10 @@ the trust file can supply one, so its start is refused with
 files, reads the control state once, prints `LISTENING http://<address>` and
 logs JSON events to stderr (`gateway_started`, which also states that gateway
 replicas add no write capacity, `gateway_upstream_failed`,
-`control_state_poll_failed`, `draining`, `server_shutdown`). The file is at
-most 64 KiB and unknown fields are refused:
+`control_state_poll_failed`, `draining`, `server_shutdown`, and with a
+`dashboard` block `gateway_user_login`, `gateway_user_login_failed` and
+`gateway_user_logout`). The file is at most 64 KiB and unknown fields are
+refused:
 
 ```json
 {"bind": "127.0.0.1:8080",
@@ -1281,10 +1307,12 @@ most 64 KiB and unknown fields are refused:
 | `max_in_flight` | 1–65536. |
 | `upstream_timeout_ms` | Positive. Bounds connecting, waiting for the response head and each wait for the next piece of a request or streamed response body, in either direction, not the whole request or response. |
 | `max_buckets` | 1–1000000. |
+| `dashboard` | Optional. Dashboard sign-in for tenant editor and viewer accounts (OD-004); see [below](#dashboard-sign-in-through-a-gateway-od-004-opt-in). Absent means no sign-in, sessions or dashboard, as before. |
 
 Durations are at most 3600000 ms. No field has a default except
-`allow_remote` (`false`): S_ctl, the poll interval and the replica maximum
-must be chosen per deployment and are not measured here.
+`allow_remote` (`false`) and the optional `dashboard` block: S_ctl, the poll
+interval and the replica maximum must be chosen per deployment and are not
+measured here.
 
 On SIGTERM or Ctrl+C (Ctrl+Break on Windows), a gateway or trusted backend
 logs `draining` and answers 503 `draining` on `/ready` for
@@ -1307,6 +1335,192 @@ the control-state poller at most one more second to stop (a poll still
 reading is left to finish on its own, logged `poller_stop_timeout`). A gateway
 therefore exits within about `readiness_propagation_ms` + `drain_timeout_ms`
 + 2 seconds of the signal.
+
+### Dashboard sign-in through a gateway (OD-004, opt-in)
+
+Experimental, opt-in and not qualified on ACA. With a `dashboard` block, any
+gateway replica can sign in a tenant's editor and viewer accounts and serve
+the standalone dashboard, unchanged, so a person can inspect their own
+tenant's data through the gateway. A session started on one replica works on
+every other replica with the same users file and session key; the replicas
+share no session state. Without the block a gateway behaves exactly as
+described above: no sign-in, no cookie is ever read, and the dashboard and
+public auth routes get 404.
+
+```json
+"dashboard": {"users_file": "/run/secrets/dashboard-users.json",
+              "session_key_file": "/run/secrets/dashboard-session-key",
+              "idle_timeout_ms": 1800000, "lifetime_ms": 28800000,
+              "trusted_proxy": false}
+```
+
+| Field | Meaning and bounds |
+| --- | --- |
+| `users_file` | Required. A copy of the admin directory's `users.json` (`{"schema":1,"users":[...]}`, at most 1 MiB) that holds only tenant `editor` and `viewer` accounts. It contains Argon2id password hashes: deliver it as a secret file to gateways only, never in Blob, the control state or an image. A super admin or an account without `tenant_id` refuses startup. |
+| `session_key_file` | Required. Base64 (standard or URL-safe) of at least 32 random bytes, file at most 1024 bytes. Signs new and re-issued cookies. Every replica must hold it, here or as an accepted key, and it is used for nothing else. It is never logged or echoed. |
+| `accepted_session_key_files` | Optional, default none. At most 3 more key files in the same format that only verify cookies, never sign them, for [rotating the session key](#rotating-the-dashboard-session-key). Each must differ from the others and from `session_key_file`. |
+| `idle_timeout_ms` | 300000 to `lifetime_ms`. Default 1800000 (30 minutes), or `lifetime_ms` if that is lower. |
+| `lifetime_ms` | 300000–86400000. Default 28800000 (8 hours). |
+| `trusted_proxy` | Default `false`. Set `true` only behind an HTTPS ingress that sets `X-Forwarded-Proto` and appends the client address to `X-Forwarded-For`, and that is the only way to reach the gateway. |
+
+Unknown fields are refused. A bad block stops the gateway with
+`gateway_config_invalid` and names the setting, never file content, for
+example `dashboard.lifetime_ms must be 300000..=86400000`,
+`cannot read dashboard users file: entity not found`,
+`dashboard users file is larger than 1048576 bytes`,
+`dashboard users file is not a valid users.json`,
+`dashboard users file has no accounts`,
+`... super admins and accounts without a tenant cannot sign in through a gateway`,
+`cannot read dashboard session key: entity not found`,
+`dashboard session key must be base64 of at least 32 random bytes`,
+`dashboard accepted session key must be base64 of at least 32 random bytes`,
+`dashboard.accepted_session_key_files may list at most 3 keys` or
+`dashboard.accepted_session_key_files repeats a key or the session key`.
+`gateway_started` reports `"dashboard": true` and `dashboard_session_kids`:
+the key ids of the session key and then the accepted keys. A key id is 16
+hex characters derived one-way from the key, safe to log and compare across
+replicas; the key itself cannot be recovered from it.
+
+**Transport.** Password sign-in needs a loopback `bind` or
+`trusted_proxy: true`. Otherwise `GET /v1/auth/config` reports
+`"password_login": false, "reason": "insecure_transport"` and sign-in gets
+403 `insecure_transport`. The cookie is
+`vlite_session=...; Path=/; HttpOnly; SameSite=Strict`. Behind a trusted
+proxy a request with `X-Forwarded-Proto: https` gets
+`__Host-vlite_session=...; Path=/; HttpOnly; SameSite=Strict; Secure`
+instead, so serve the ingress over HTTPS only. The per-replica sign-in
+throttle counts the client address only behind a trusted proxy.
+
+**Routes the gateway answers itself.** These are never forwarded to a
+backend.
+
+| Route | Answer |
+| --- | --- |
+| `GET /dashboard` and its assets | The standalone dashboard files, unchanged. |
+| `GET /v1/auth/config` | `{"mode":"protected","password_login":true,"reason":null,"setup_required":false}` |
+| `POST /v1/auth/login` | `{"username","password"}`, body at most 16 KiB. The standalone per-account and per-address throttle (429 `too_many_attempts`) and Argon2id check (401 `invalid_credentials` for a wrong password or unknown name, 403 `account_disabled`). Then the tenant must be admitted (403 `tenant_suspended` or `tenant_unavailable`) and routed (503 `tenant_not_routed`), and an account that must change its password gets 403 `password_change_required`. 200 `{"user":{...},"expires_unix_ms":...,"idle_timeout_seconds":...,"must_change_password":false}` with the session cookie and `Cache-Control: no-store`. |
+| `GET /v1/auth/session` | With the cookie and no `Authorization`: `{"method":"password","role":"scoped","user":{...},"expires_unix_ms":...,"idle_timeout_seconds":...,"must_change_password":false,"accounts":true,"setup_required":false}`. |
+| `POST /v1/auth/password` | With the cookie: 409 `password_change_unavailable`. A gateway's accounts are a read-only export; change passwords on the admin server. |
+| `POST /v1/auth/logout` | With the cookie: clears both cookie names, `{"signed_out":true}` (`false` if the cookie did not verify). |
+
+`/v1/auth/session`, `/password` and `/logout` with an `Authorization` header
+are API requests and are handled as before.
+
+**Data requests.** A request without `Authorization` that carries the
+session cookie is checked by whichever replica receives it, in this order:
+
+1. CSRF, as standalone: a `Sec-Fetch-Site` other than `same-origin` or
+   `none` gets 403 `csrf_rejected`, and a method other than GET, HEAD or
+   OPTIONS also needs an `X-VLite-Request` header (the dashboard sends it).
+   Sign-in and sign-out are checked the same way.
+2. The cookie, `v1.<key id>.<claims>.<seal>`: the key id must name this
+   replica's session key or an accepted key, the HMAC-SHA256 seal under
+   that key must cover the key id and claims, issue and last-seen times may
+   be no more than 60 s ahead, and the idle timeout and the lifetime (the
+   lower of the cookie's and this replica's) must not have passed.
+3. The control state: a session already served at a newer generation than
+   this replica has read gets 503 `control_state_behind`; retry.
+4. The account in this replica's users file. An account that has another
+   version, is disabled, must change its password or moved to another
+   tenant ends the session, and so does an unknown account. Two cases mean
+   this replica's users file is older than the session instead, and get
+   503 `dashboard_users_behind` during a rollout; retry: a cookie with a
+   newer account version, and an unknown account created after every
+   account in this file was created or last changed.
+5. The tenant in the current snapshot: suspended gets 403
+   `tenant_suspended`, deleted or unknown 403 `tenant_unavailable`, and no
+   directory record 503 `tenant_not_routed`.
+
+A session that ends gets 401 `session_expired`, both cookies cleared and
+`Cache-Control: no-store`, and the dashboard returns to its sign-in form.
+Otherwise the request continues at step 5 of [What a gateway
+serves](#what-a-gateway-serves) as the account's standalone session scope
+for its tenant: editors get `read`, `search`, `search_build`, `write`,
+`import`, `index`, `collections`, `graph_read` and `graph_write`, viewers
+`read`, `search` and `graph_read`, both limited by the account's graph
+settings. Admin routes, `/metrics` and `/v1/database` get 403 as for a
+standalone editor or viewer, and the tenant always comes from the account,
+never from the request. The request is forwarded with a
+`user:<id>` principal envelope that the backend checks again (see
+[Gateway-trusted backend](#gateway-trusted-backend)). Once the cookie's last-seen
+time is 60 s old, the response carries a re-issued cookie; this is the only
+`Set-Cookie` a gateway sends with forwarded responses.
+
+**Rollout.**
+
+1. Upgrade every gateway-trusted backend before any gateway uses a
+   `dashboard` block; older backends refuse `user:` envelopes with 401
+   `envelope_invalid`.
+2. Manage accounts on the admin server that owns the admin directory you
+   publish the control state from (`POST /v1/admin/users` with `role`
+   `editor` or `viewer` and the tenant's `tenant_id`, the same id as in the
+   control state). An account with `must_change_password` set, the default
+   for new accounts and after a password reset, gets 403
+   `password_change_required` through a gateway; have the user change the
+   password on the admin server before you export.
+3. Export the accounts: copy `<admin dir>/users.json` and remove every
+   `super_admin` and every account without `tenant_id`, for example
+   `jq '.users |= map(select(.role != "super_admin" and .tenant_id != null))' users.json > dashboard-users.json`.
+4. Create the session key once:
+   `openssl rand -base64 32`, or in PowerShell
+   `[Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))`.
+5. Store both files as secrets (for ACA, app secrets mounted read-only as
+   files, like the signing key; OD-009) and mount them on gateways only.
+   Backends need neither. The ACA templates under `deploy/` do not mount
+   them yet.
+6. Add the `dashboard` block, set `trusted_proxy` to match the ingress, and
+   restart every gateway replica. Check `gateway_started` for
+   `"dashboard": true` and `GET /v1/auth/config` for `"password_login": true`.
+7. Sign in at `https://<gateway>/dashboard` and check that the tenant's
+   collections are listed.
+
+**Ending sessions.** Sessions are stateless. Sign-out clears only that
+browser's cookie; a copied cookie stays valid until its idle timeout or
+lifetime. To end sessions earlier:
+
+* One account: disable it, reset its password or change its role or tenant
+  on the admin server (each bumps its version), re-export, update the secret
+  and restart every gateway replica. Its sessions end on each replica that
+  has the new file; replicas still holding the old file keep accepting them
+  until they restart. Disable an account rather than removing it from the
+  export: if it was the account created or changed most recently, its
+  sessions get 503 `dashboard_users_behind` instead of ending, until they
+  idle out or another account changes.
+* A whole tenant: suspend it
+  (`control-state update --suspend-tenant <id>`); every replica refuses its
+  sessions within S_ctl. Suspension pauses sessions rather than ending them:
+  after `--resume-tenant`, cookies that have not reached their idle timeout or
+  lifetime work again. After a suspected cookie leak, also disable the
+  affected accounts or replace the session key.
+* Everyone: replace the session key, list no accepted keys, and restart
+  every replica.
+
+<a id="rotating-the-dashboard-session-key"></a>**Rotating the session
+key.** To replace the key without signing everyone out, restart every
+replica three times and check `dashboard_session_kids` in each
+`gateway_started` before the next step:
+
+1. Add the new key file to `accepted_session_key_files` on every replica.
+   A replica that does not hold the new key ends every session another
+   replica signed with it.
+2. Make the new key `session_key_file` and list the old one in
+   `accepted_session_key_files`. New cookies, and cookies re-issued after
+   60 s of use, are now sealed with the new key.
+3. After at least the idle timeout, remove the old key. Sessions used since
+   step 2 carry the new key; any cookie still sealed with the old key ends.
+
+**Limitations.** Super admins, accounts without a tenant and password
+changes are not served through a gateway. The sign-in throttle is per
+replica, so the effective limit grows with the replica count. Idle time and
+cookie refresh have 60-second granularity. Sign-in and sign-out events
+(`gateway_user_login`, `gateway_user_login_failed`, `gateway_user_logout`)
+go to stderr; a gateway writes no audit log. Signed-in dashboard users have
+no per-user `requests_per_second` limit at the gateway (as on a standalone
+server, their session grant carries none); only `max_in_flight` bounds them.
+Dashboard
+assets do not count against `max_in_flight`. The tests run in-process
+(gateway replicas and a gateway-trusted backend over loopback HTTP); no
+multi-process, Azurite or ACA run covers this yet.
 
 ### Keys, control state and the tenant directory
 
@@ -1456,7 +1670,7 @@ local token configuration.
 
 These admin routes record durable, idempotent tenant lifecycle intents in the
 control-state store. They do **not** provision, deploy, route or stop any
-Azure resource. There is no production ARM adapter or control worker, and no
+Azure resource. There is no production ARM adapter, the control worker refuses before any claim or cloud call in production, and there is no
 ACA-qualified behavior. The operator runbook and its local test evidence are
 in [HA-ACA](HA-ACA.md#managed-tenant-deployments-local-intent-only-not-aca-qualified).
 
@@ -1478,6 +1692,7 @@ needs `VLITE_ADMIN_DIR` and an admin token, and refuses `--insecure-local` and
 | `POST /v1/admin/tenant-deployments/{tenant}/readers` | Records a reader change (202, phase `accepted`, `observed.reserved: false`). Nothing runs it. |
 | `POST /v1/admin/tenant-deployments/{tenant}/retire` | Records a retirement naming `expected_receipt` (`data_disposition: "retain"` only). Nothing runs it. |
 | `POST /v1/admin/tenant-deployments/{tenant}/migrations` | **Excluded.** Records an unreserved intent that nothing runs. Migration is not implemented. Do not use it. |
+| `GET /v1/admin/tenant-deployment-operations` | Lists the redacted status of operations from the records (not live Azure state), ascending by operation ID: `limit` (1-100, default 50) and an exclusive `after` operation ID page it, and `next_after` names the next `after` (null on the last page). |
 | `GET /v1/admin/tenant-deployment-operations/{operation}` | Status: `phase`, `next_step`, generation tokens, `desired` and `observed` from the records (not live Azure state). |
 | `POST /v1/admin/tenant-deployment-operations/{operation}/{action}` | `resume` (no-op, never cloud execution) and `cancel`. Every other action is refused (below). |
 

@@ -35,10 +35,13 @@ proof of current writer HA or ACA qualification.
 - **Archive faults (MEAS-003):** In local tests with an in-memory object
   store, the loss report agreed with the records missing after restore.
   Those tests did not measure data loss during an ACA outage.
-- **Gateway load and control-state changes (MEAS-004/005):** Neither has been
-  measured on ACA. The local drivers exist, but the ACA harness still needs to
-  distribute the same bootstrap database to each backend. Generating a new
-  database gives it a different lineage and invalidates the comparison.
+- **Gateway load (MEAS-004):** Isolated ACA runs collected proposal evidence
+  only. The latest full-profile run started 2,017,242 of 2,076,000 scheduled
+  requests but did not reach the offered 1,600 requests per second through the
+  gateway, and 27 HTTP 503 responses have no identified cause. This is not
+  capacity, overhead or SLO evidence; see the
+  [measurement record](../deploy/azure-container-apps/ha/measure.md).
+- **Control-state changes (MEAS-005):** Not measured on ACA.
 - **Writer fencing (MEAS-006):** In-memory and local Blob emulator runs
   exercised the writer checks. Both ACA attempts reached log collection
   without a usable result; the cause is unknown. Neither fencing latency on ACA nor a bound
@@ -516,6 +519,34 @@ not what a grant permits. Enrollment in this mode replaces only its own
 reader pin objects; a record pin from earlier legacy runs stays until
 removed. The forced-unpin route does not see reader pin objects.
 
+`New-VLiteHaReaderStorageGrants` (`deploy/azure-container-apps/ha/templates.ps1`)
+is an offline, pure builder for the proposed per-tenant reader grants on the
+existing storage account. It returns one custom pin-writer role and two
+condition-version 2.0 assignments for the reader identity. The custom role
+has blob data actions only (read/write/add/delete) and no control-plane
+actions, so no container delete/write. Its name and GUID are derived
+deterministically from the resource group. Each assignment also has a
+deterministic GUID `name`, derived from its lowercased scope, principal ID and
+role definition ID, so rebuilding the template yields the same role definition
+and assignment names. On the coordination container it allows writes and deletes only
+under `<prefix>reader-pins/`. The data container uses the built-in Storage
+Blob Data Reader role with reads only. Both assignments allow reads only under
+`<prefix>`, and lists only when the request prefix starts with `<prefix>`.
+User delegation keys are a storage-account-level action, so these
+container-scoped assignments cannot mint them. The builder requires
+managed-identity targets, refuses `shared_key_file`, and refuses a sibling
+tenant prefix that nests with (or equals) this one, or any input with a
+trailing newline. The sibling list is asserted by the operator
+(`sibling_inventory:"operator_asserted_complete"`), not discovered. The
+conditions bind the principal object ID; `client_id` is accepted but unused.
+Readers of one tenant are cooperative: any of them can create or delete that
+tenant's pin objects, so a stale-pin TTL or lease and a per-reader pin segment
+remain follow-ups. It invokes nothing and its result reports
+`offline_template_effective_access_unqualified`. Azure enforcement of these
+conditions, whether every reader list carries the prefix, role-assignment
+propagation and mount behaviour are all unqualified, and present reader fleets
+still refuse `pin_scope_unproven`.
+
 The positional served path must be exactly
 `<follower_dir>\reader-a\database.vlite`; the second private slot is
 `<follower_dir>\reader-b`. Enrollment replaces the two slot directories:
@@ -712,14 +743,17 @@ future qualified path must keep.
 
 The `tenant-deployment` admin surface records durable, idempotent lifecycle
 **intents** in the control-state store. It does not provision, start, stop,
-deploy or route any Azure resource. There is no production ARM adapter, no
-control worker that runs accepted operations, and no qualified ACA behavior.
-For managed tenants today, use the manual procedures in this guide.
+deploy or route any Azure resource. There is no production ARM adapter and
+no qualified ACA behavior. The [control worker](#control-worker-and-aca-job-offline-only)
+(`work`) refuses at its gates before any claim or cloud call, so it runs no
+accepted operation in production. For managed tenants today, use the manual
+procedures in this guide.
 
 | Request | What runs locally today | Qualified on ACA |
 |---------|-------------------------|------------------|
 | `create` | Records the intent, creates **unrouted** tenant metadata from the persisted ID and reserves the tenant (phase `reserved`). Cloud execution refuses (OD-002). | No |
 | `status` | Read-only view of the records (below). | No |
+| `work` | Runs the gates for one accepted `create`. Production refuses before any claim or cloud call, at the latest with `qualification_missing` ([control worker](#control-worker-and-aca-job-offline-only)). Only offline fixtures claim and run an attempt. | No |
 | `resume` | Records the action as an idempotent no-op; it never runs a cloud step. A `present` reader change answers 409 `pin_scope_unproven`. | No |
 | `cancel` | Seals and releases a reserved operation that has not activated (`retirement_required` once activated). Withdraws an unreserved reader change or retirement so it can never reserve; an unreserved `create` or `migrate` answers `transition_unavailable`. | No |
 | `readers`, `retire` | Recorded as intent only (`accepted`, `observed.reserved: false`). The actuators exist only in offline fixtures. | No |
@@ -742,6 +776,7 @@ vlite-server tenant-deployment create --request-file req.json \
 vlite-server tenant-deployment <readers|retire> --tenant <id> --request-file req.json \
   --target-file target.json --object gateway/control-state.json --admin-dir /data/admin
 vlite-server tenant-deployment status --operation <id> --target-file ... --object ... --admin-dir ...
+vlite-server tenant-deployment work [--operation <id>] --target-file ... --object ... --admin-dir ...
 vlite-server tenant-deployment <resume|cancel> --operation <id> --request-file action.json \
   --target-file ... --object ... --admin-dir ...
 ```
@@ -751,6 +786,13 @@ vlite-server tenant-deployment <resume|cancel> --operation <id> --request-file a
 Operation records live under `<prefix>tenant-operations/` beside the
 control-state object. Routes, bodies and errors are listed in the
 [API reference](API.md#managed-tenant-deployments-intent-only-opt-in-off-by-default).
+
+**Dashboard (read only).** A super administrator signed in to the server
+directly can list the operations and their phases under **Administration →
+Users & access → Tenant deployments**, 20 at a time. The panel submits
+nothing. It stays locked with open development access (no admin token) and
+through the HA gateway, which refuses admin routes. Use the CLI or REST
+routes above to submit or cancel.
 
 **Create.** Submit `{"idempotency_key", "request": {"kind": "create", ...},
 "contents": [...]}`. `contents` holds the exact text of every profile it
@@ -857,6 +899,8 @@ this surface:
 |---------|-------|---------------|
 | `cargo test --features server --lib tenant_provisioning` | Durable intents and idempotency, reservation/route CAS, guards, fake-ARM create/update/delete/stop, unknown-outcome reconciliation, no adoption, retention on cancel/retire, reader anchoring/eligibility, schema compatibility, admin REST/CLI refusals and redaction | Real ARM/ACA behavior, Azure RBAC or mounts, clock/freshness, stop proofs, timing or storage measurements |
 | `cargo test --features server --lib epic_005` | The reader/retirement subset, including stale plans, races, withdrawal-versus-reservation races, failed-to-healthy fleet observations and route drift | ACA replica replacement, reader-pin/RBAC policy-propagation lag (ITEM-008/019), reader routing or reader qualification (ITEM-021) |
+| `cargo test --features server --lib tenant_provisioning::worker` | The control worker: one claim and one attempt per invocation, every gate refusing in order before the claim and the adapter, a lost claim race and a foreign claim refusing `actuator_fence_unproven`, a refused dispatch reported `failed`, an unknown dispatch kept uncertain and never retried, cancelled operations, unknown IDs and store faults failing closed, no control-state write | The production ARM adapter, `ActuatorStopped` proofs, polling pace, a Job execution on ACA |
+| `pwsh -NoProfile -File deploy/azure-container-apps/ha/test.ps1` | The worker Job template (TEST-014): manual trigger, parallelism 1, one completion, `replicaRetryLimit` 0, a dedicated identity that no serving role holds, only the control-target secret, the `work` invocation, never referenced by `deploy.ps1`, and the qualification gate still refusing | That the Job runs on ACA, the identity's RBAC grants, or that the projected `client_id` belongs to that identity |
 | `cargo test --features server --test server_cli tenant_deployment` | Routes are opt-in and refused before a database is created | Any served lifecycle |
 | `python tests/openapi_contract.py`, `python tests/admin_route_coverage.py` | Routes are registered with their OpenAPI contracts and are admin-only | Behavior |
 
@@ -864,6 +908,113 @@ Every test should pass. A refusal listed above is the expected result, not a
 failure to work around. Passing suites do not complete the epic or any gate:
 OD-002/004/005/006, ITEM-008, ITEM-021, MEAS-005/006 and GATE-005 stay open,
 and auto-failover stays off by default.
+
+### Control worker and ACA Job (offline only)
+
+`vlite-server tenant-deployment work` is the control worker
+(design-tenant-provisioning ITEM-022). **In production it always refuses
+before it claims an operation or calls Azure.** No production ARM adapter is
+wired and no qualification, quota or budget proof exists (OD-002, OD-006).
+This section explains what it does and what each result means.
+
+```sh
+vlite-server tenant-deployment work [--operation <id>] \
+  --target-file target.json --object gateway/control-state.json --admin-dir /data/admin
+```
+
+It takes the same `--target-file`, `--object`, `--admin-dir` and optional
+`--shared-key-file` flags and the same admin-directory lock as the other verbs
+(`admin_dir_busy` while a server or another CLI holds it). One invocation does
+the following, once:
+
+1. **Select.** With `--operation`, that operation. Otherwise, the unclaimed,
+   unsealed `create` with the lowest operation ID whose reservation is held
+   and not cancelled. If there is none, it prints `{"outcome": "idle"}` and
+   exits 0. An unknown ID answers `operation_not_found`. Without
+   `--operation`, the worker lists the operations prefix once per invocation
+   and stops at the first unreadable store or record (it fails closed rather
+   than skipping it). Neither claims anything.
+2. **Gates, in this order, before any claim or Azure call:**
+   `operation_not_provisionable` (the reservation is gone or cancelled, or the
+   operation is sealed); `actuator_fence_unproven` if another attempt already
+   holds the claim (see step 3); then the writer profile, which refuses 409
+   `profile_unsupported` for any kind other than `create` (reachable only
+   with `--operation`), 503 `operation_input_unavailable` if the retained
+   profile content is missing or corrupt, and 422 `operation_request_invalid`
+   if the profile is legacy or does not match the strict writer-profile
+   schema; then `qualification_missing`,
+   `quota_unproven`, `quota_exceeded` and `budget_unapproved`, and last
+   `transition_unavailable` (no production ARM adapter, ITEM-020). Production
+   stops at the first gate that applies, at the latest at
+   `qualification_missing`. The same operation is selected again next time.
+   To run a different one, pass `--operation`, or cancel the refused one.
+3. **Claim.** A compare-and-swap on the operation journal records this
+   attempt under a fresh `worker-<hex>` ID. If another attempt claimed the
+   operation first, or wins the race, the worker refuses
+   `actuator_fence_unproven` and does not try another operation. A stale or
+   foreign claim is never taken over: takeover keeps refusing
+   `actuator_fence_unproven` until a production `ActuatorStopped` proof exists
+   (OD-002). There is no flag to force it. Once the claim succeeds, the
+   operation stays claimed by that attempt whatever its outcome
+   (`provisioned`, `failed` or `unknown`): no later invocation selects it,
+   and an explicit `--operation` refuses `actuator_fence_unproven`.
+4. **Attempt.** It runs one provision attempt. Each cloud action is journaled
+   before it is sent and is settled only from an exact readback. The worker
+   never retries an action and never writes the control state. Only the
+   existing activation compare-and-swap publishes a route, and that needs
+   readiness and delivery proofs that nothing produces yet.
+
+A result is printed as JSON on stdout with exit 0. An error is printed as
+`{"error": "<code>: ..."}` on stderr with exit 1, the same as the other verbs.
+Once an operation is selected, the error also ends with
+`; operation <id>, attempt <id>, outcome <outcome>`:
+
+| Outcome | Exit | Meaning | What to do |
+|---------|------|---------|------------|
+| `idle` | 0 | Nothing to claim. | Nothing. |
+| `provisioned` | 0 | Every profile resource was created or verified, and every step is settled. The tenant stays unrouted. | Offline fixtures only today. |
+| `blocked` | 1 | A gate or the claim refused. Nothing was dispatched. | Resolve the named code, or wait for its owner decision. Rerunning does not clear `actuator_fence_unproven`. |
+| `failed` | 1 | The attempt ended without provisioning (for example, Azure refused an action), and every journaled step is settled. It is not retryable: the operation stays claimed by this attempt until an `ActuatorStopped` proof exists (OD-002). | Read `status`, then escalate. A new attempt cannot take over this claim. |
+| `unknown` | 1 | A step's outcome, or the claim's own write, is unknown. It is never reported as success, and `status` shows `uncertain_steps > 0`. | Do not rerun, and do not edit records. Escalate (see uncertain outcomes above). |
+
+Each attempt on a selected operation appends a `tenant_deployment_attempt`
+event (operation, attempt, outcome and refusal code) to the admin
+directory's `audit.jsonl`. The operation journal in Blob storage is the
+durable record.
+
+**ACA Job (rendered and tested offline only).** `New-VLiteHaWorkerJobTemplate`
+(`deploy/azure-container-apps/ha/templates.ps1`) renders a
+`Microsoft.App/jobs` body for the worker. It is a pure, offline renderer.
+`deploy.ps1` never calls it, and `Assert-VLiteHaQualification` still blocks
+every HA deployment, so nothing in this repository creates or starts the Job.
+Do not create it by hand. The rendered Job has:
+
+- `triggerType` `Manual`, `parallelism` 1, `replicaCompletionCount` 1 and
+  `replicaRetryLimit` 0. One execution starts one replica that runs `work`
+  once. A retried replica would be a second attempt.
+- `replicaTimeout` from `WorkerReplicaTimeoutSeconds` (default 1800, allowed
+  300 to 14400).
+- Its own user-assigned identity, `WorkerIdentityId`. This must differ from
+  the gateway, writer and reader identities (compared case-insensitively).
+- Exactly one secret, `control-target-g<SecretGeneration>`. It holds
+  `ControlTarget` with only `client_id` replaced by the worker identity's
+  client ID. That client ID must be a lowercase GUID and must differ,
+  compared case-insensitively, from the `ControlTarget` and `ArchiveTarget`
+  client IDs; the configuration has no other client IDs (serving identities'
+  are not checked). The secret value is re-serialized from the validated
+  object, so duplicate JSON keys cannot carry an unchecked value. Only
+  managed identity is accepted, never a shared key. The secret is projected
+  to `/run/vlite/control-target.json`. There is no admin token, seed, trust,
+  archive or Azure Files mount, and no environment variables, ingress or
+  probes.
+- `--admin-dir /data` on an EmptyDir volume, so the audit log lasts for one
+  execution only. Container logs carry the JSON result.
+
+Inputs are `WorkerJobName`, `WorkerIdentityId`, `WorkerCpu`, `WorkerMemory`,
+`ControlTarget` and, optionally, `WorkerReplicaTimeoutSeconds`. The offline
+tests do not prove that the projected `client_id` belongs to
+`WorkerIdentityId`, the identity's RBAC grants (none are rendered), or how ACA
+runs the Job.
 
 ## Recover control-state availability or publish a refresh
 
@@ -1014,5 +1165,6 @@ test recovery or reuse old credentials on the new lineage.
   Blob fencing measurement.
 - Query routing of writes to readers, position tokens or read-your-writes overrides.
 - Managed tenant provisioning, reader fleets, retirement or migration on ACA:
-  the `tenant-deployment` surface records intent only (see
+  the `tenant-deployment` surface records intent only, and its control worker
+  refuses before any cloud call (see
   [managed tenant deployments](#managed-tenant-deployments-local-intent-only-not-aca-qualified)).

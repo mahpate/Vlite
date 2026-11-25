@@ -60,6 +60,17 @@ as `redacted`. Tenant API keys may hold graph operations with tenant-local
   up to 15 minutes.
 - **Tenants:** suspending a tenant blocks its users' sign-in and ends their
   sessions. Deleting a tenant removes its user accounts.
+- **Through an HA gateway (opt-in, experimental):** a gateway with a
+  `dashboard` block signs in tenant editors and viewers from a read-only
+  export of the accounts, mounted as a secret on gateways only, and issues a
+  sealed, stateless session cookie that every replica sharing the session key
+  accepts. Super admins, accounts without a tenant and password changes stay
+  on the admin server. Sign-out clears only that browser's cookie; an
+  account change takes effect after re-export and a restart of every
+  replica. The session key can be rotated without signing everyone out:
+  up to three older keys verify cookies but never sign them, and the logs
+  name keys only by a one-way key id. See
+  [API.md](API.md#dashboard-sign-in-through-a-gateway-od-004-opt-in).
 
 The routes are listed in [API.md](API.md#dashboard-sign-in-and-accounts).
 
