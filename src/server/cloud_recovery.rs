@@ -214,6 +214,13 @@ fn read_target(path: &FilePath) -> Result<Target, RecoveryError> {
     Ok(target)
 }
 
+/// ITEM-022: the managed identity the control worker authenticates to ARM
+/// as. The worker Job's mounted target names its dedicated identity, so
+/// the same client ID selects it for management tokens.
+pub(super) fn target_client_id(path: &FilePath) -> Result<Option<String>, RecoveryError> {
+    Ok(read_target(path)?.client_id)
+}
+
 /// The emulator key: the explicit file, else the process setting, and only
 /// for emulator auth (an explicit key with managed identity is refused by
 /// the connector).
@@ -2308,6 +2315,26 @@ pub(in crate::server) mod tests {
         assert_eq!(error.code, "invalid_input", "{error}");
         assert!(error.message.contains("emulator_shared_key"), "{error}");
         assert!(read_target(&env.dir.path().join("absent.json")).is_err());
+        // The control worker's ARM identity is the target's client ID.
+        assert_eq!(
+            target_client_id(&env.dir.path().join("target.json")).unwrap(),
+            None
+        );
+        let client = "01234567-89ab-cdef-0123-456789abcdef";
+        std::fs::write(
+            env.dir.path().join("worker.json"),
+            serde_json::to_vec(&Target {
+                client_id: Some(client.into()),
+                ..managed
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            target_client_id(&env.dir.path().join("worker.json")).unwrap(),
+            Some(client.to_owned())
+        );
+        assert!(target_client_id(&env.dir.path().join("absent.json")).is_err());
     }
 
     /// Appends one checkpoint holding `fill`'s commits to `source.vlite`,

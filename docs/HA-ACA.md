@@ -743,8 +743,8 @@ future qualified path must keep.
 
 The `tenant-deployment` admin surface records durable, idempotent lifecycle
 **intents** in the control-state store. It does not provision, start, stop,
-deploy or route any Azure resource. There is no production ARM adapter and
-no qualified ACA behavior. The [control worker](#control-worker-and-aca-job-offline-only)
+deploy or route any Azure resource. The ARM adapter is built only behind
+every worker gate, and there is no qualified ACA behavior. The [control worker](#control-worker-and-aca-job-offline-only)
 (`work`) refuses at its gates before any claim or cloud call, so it runs no
 accepted operation in production. For managed tenants today, use the manual
 procedures in this guide.
@@ -991,7 +991,7 @@ this surface:
 |---------|-------|---------------|
 | `cargo test --features server --lib tenant_provisioning` | Durable intents and idempotency, reservation/route CAS, guards, fake-ARM create/update/delete/stop, unknown-outcome reconciliation, no adoption, retention on cancel/retire, reader anchoring/eligibility, schema compatibility, admin REST/CLI refusals and redaction | Real ARM/ACA behavior, Azure RBAC or mounts, clock/freshness, stop proofs, timing or storage measurements |
 | `cargo test --features server --lib epic_005` | The reader/retirement subset, including stale plans, races, withdrawal-versus-reservation races, failed-to-healthy fleet observations and route drift | ACA replica replacement, reader-pin/RBAC policy-propagation lag (ITEM-008/019), reader routing or reader qualification (ITEM-021) |
-| `cargo test --features server --lib tenant_provisioning::worker` | The control worker: one claim and one attempt per invocation, every gate refusing in order before the claim and the adapter, a lost claim race and a foreign claim refusing `actuator_fence_unproven`, a refused dispatch reported `failed`, an unknown dispatch kept uncertain and never retried, cancelled operations, unknown IDs and store faults failing closed, no control-state write | The production ARM adapter, `ActuatorStopped` proofs, polling pace, a Job execution on ACA |
+| `cargo test --features server --lib tenant_provisioning::worker` | The control worker: one claim and one attempt per invocation, every gate refusing in order before the claim and the adapter, production never building the adapter without proofs, one test-proof attempt provisioning a writer through `ArmClient` on a loopback fake (`tenant_provisioning::arm`), a lost claim race and a foreign claim refusing `actuator_fence_unproven`, a refused dispatch reported `failed`, an unknown dispatch kept uncertain and never retried, cancelled operations, unknown IDs and store faults failing closed, no control-state write | Real Azure ARM, `ActuatorStopped` proofs, polling pace, a Job execution on ACA |
 | `pwsh -NoProfile -File deploy/azure-container-apps/ha/test.ps1` | The worker Job template (TEST-014): manual trigger, parallelism 1, one completion, `replicaRetryLimit` 0, a dedicated identity that no serving role holds, only the control-target secret, the `work` invocation, never referenced by `deploy.ps1`, and the qualification gate still refusing | That the Job runs on ACA, the identity's RBAC grants, or that the projected `client_id` belongs to that identity |
 | `cargo test --features server --test server_cli tenant_deployment` | Routes are opt-in and refused before a database is created | Any served lifecycle |
 | `python tests/openapi_contract.py`, `python tests/admin_route_coverage.py` | Routes are registered with their OpenAPI contracts and are admin-only | Behavior |
@@ -1005,8 +1005,9 @@ and auto-failover stays off by default.
 
 `vlite-server tenant-deployment work` is the control worker
 (design-tenant-provisioning ITEM-022). **In production it always refuses
-before it claims an operation or calls Azure.** No production ARM adapter is
-wired and no qualification, quota or budget proof exists (OD-002, OD-006).
+before it claims an operation or calls Azure.** The ARM adapter is wired,
+but it is built only after every gate passes, and no qualification, quota
+or budget proof exists (OD-002, OD-006).
 This section explains what it does and what each result means.
 
 ```sh
@@ -1035,10 +1036,13 @@ the following, once:
    profile content is missing or corrupt, and 422 `operation_request_invalid`
    if the profile is legacy or does not match the strict writer-profile
    schema; then `qualification_missing`,
-   `quota_unproven`, `quota_exceeded` and `budget_unapproved`, and last
-   `transition_unavailable` (no production ARM adapter, ITEM-020). Production
-   stops at the first gate that applies, at the latest at
-   `qualification_missing`. The same operation is selected again next time.
+   `quota_unproven`, `quota_exceeded` and `budget_unapproved`. Only past
+   every gate does the worker build the ARM adapter (ITEM-020's `ArmClient`,
+   authenticating as the platform managed identity whose client ID the
+   target file names; building it sends nothing). No production proof
+   exists yet (OD-006), so production stops at the first gate that applies,
+   at the latest at `qualification_missing`, and never builds the adapter
+   or calls Azure. The same operation is selected again next time.
    To run a different one, pass `--operation`, or cancel the refused one.
 3. **Claim.** A compare-and-swap on the operation journal records this
    attempt under a fresh `worker-<hex>` ID. If another attempt claimed the

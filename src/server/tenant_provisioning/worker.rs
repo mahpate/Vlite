@@ -10,10 +10,10 @@
 //!   resolve ([`aca::Profile::resolve`]; every kind but create is
 //!   `profile_unsupported`), [`aca::preflight`] needs qualification, quota
 //!   and budget proofs that no production code can produce yet
-//!   (`qualification_missing` first), and the production adapter must exist
-//!   ([`production_arm`] refuses `transition_unavailable` until ITEM-020 is
-//!   wired). Claiming first would strand the operation: no later attempt
-//!   can take it over without an `ActuatorStopped` proof (OD-002).
+//!   (`qualification_missing` first). Only then is the production adapter
+//!   ([`production_arm`], ITEM-020's `ArmClient`) built. Claiming first
+//!   would strand the operation: no later attempt can take it over without
+//!   an `ActuatorStopped` proof (OD-002).
 //! - Exactly one claim: an operation another attempt claimed first, or won
 //!   in a race, refuses `actuator_fence_unproven` (naming the holder before
 //!   any other gate); the worker does not try another operation.
@@ -45,17 +45,22 @@ pub(super) struct Proofs {
 pub(super) type Adapter<'a> =
     dyn Fn(&BTreeMap<String, Value>) -> Result<Box<dyn aca::Arm>, ApiError> + 'a;
 
-/// SEAM(ITEM-020): the production ARM adapter, built from the profile's
-/// desired bodies. ITEM-020's `ArmClient` is not wired here yet, so this
-/// refuses before anything is claimed or dispatched. Wire it here and
-/// nowhere else; every gate in [`work`] still runs first.
+/// The production ARM adapter: ITEM-020's [`arm::ArmClient`] for the
+/// profile's desired bodies, authenticating as the platform managed
+/// identity (`client_id` selects a user-assigned one). Building it sends
+/// nothing; tokens are fetched on the first call. Every gate in [`work`]
+/// runs before it is built, and production cannot pass preflight yet
+/// (OD-006), so production never builds it.
 pub(super) fn production_arm(
-    _bodies: &BTreeMap<String, Value>,
-) -> Result<Box<dyn aca::Arm>, ApiError> {
-    Err(conflict(
-        "transition_unavailable",
-        "no production ARM adapter is wired (ITEM-020); nothing was claimed or dispatched",
-    ))
+    client_id: Option<String>,
+) -> impl Fn(&BTreeMap<String, Value>) -> Result<Box<dyn aca::Arm>, ApiError> {
+    move |bodies| {
+        Ok(Box::new(arm::ArmClient::new(
+            bodies.clone(),
+            crate::server::cloud_backup::azure::IdentitySource::from_env(),
+            client_id.clone(),
+        )?))
+    }
 }
 
 /// A fresh attempt ID per invocation, so no two workers share one.
@@ -696,11 +701,6 @@ mod tests {
             refused(&done, Outcome::Blocked, code);
             assert_eq!(done.intent.operation_id, id);
         }
-        // The production seam refuses last, still before the claim.
-        let done = work(&w.objects, &w.ops, &full, &production_arm, None, "worker-1")
-            .unwrap()
-            .unwrap();
-        refused(&done, Outcome::Blocked, "transition_unavailable");
         assert_eq!((built.get(), arm.calls()), (0, 0));
         assert!(w.journal_object(&id).is_none());
         // With every proof and an adapter, the same operation proceeds.
@@ -711,6 +711,37 @@ mod tests {
         assert_eq!((built.get(), arm.calls()), (1, 1));
     }
 
+    /// The production adapter is ITEM-020's `ArmClient`. Building it sends
+    /// nothing, and without production proofs it is never built.
+    #[test]
+    fn the_production_adapter_is_built_only_behind_every_gate() {
+        let bodies = BTreeMap::from([(writer("contoso"), json!({"location": "westus2"}))]);
+        assert!(
+            production_arm(Some("01234567-89ab-cdef-0123-456789abcdef".into()))(&bodies).is_ok()
+        );
+        let w = world();
+        let id = w.submit("a", "contoso");
+        let built = Cell::new(0);
+        let production = production_arm(None);
+        let counted = |bodies: &BTreeMap<String, Value>| {
+            built.set(built.get() + 1);
+            production(bodies)
+        };
+        let done = work(
+            &w.objects,
+            &w.ops,
+            &Proofs::default(),
+            &counted,
+            None,
+            "worker-1",
+        )
+        .unwrap()
+        .unwrap();
+        refused(&done, Outcome::Blocked, "qualification_missing");
+        assert_eq!(built.get(), 0);
+        assert!(w.journal_object(&id).is_none());
+    }
+
     #[test]
     fn production_refuses_through_the_cli_core_before_the_claim() {
         let w = world();
@@ -719,6 +750,7 @@ mod tests {
         let command = |operation: Option<&str>| admin::Command::Work {
             operation: operation.map(str::to_owned),
             attempt: "worker-1".into(),
+            client_id: None,
         };
         let error =
             admin::run(&w.deployments(), &w.store, Some(&log), command(None), NOW).unwrap_err();

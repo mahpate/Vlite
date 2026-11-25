@@ -2,10 +2,10 @@
 //! effects behind a mockable ARM port, journaled by the ITEM-003 contract.
 //!
 //! [`Arm`] is the port. ITEM-020's [`super::arm::ArmClient`] implements it,
-//! but production never builds one: the worker's single seam
-//! ([`super::worker::production_arm`]) still refuses, so no cloud action can
-//! be dispatched (OD-002: no platform proof that a former actuator stopped,
-//! and no qualified effects adapter). Every effect goes
+//! and the worker ([`super::worker::production_arm`]) builds one only after
+//! every gate passes. Production cannot pass preflight yet, so no cloud
+//! action can be dispatched (OD-002: no platform proof that a former
+//! actuator stopped; OD-006: no qualification, quota or budget proof). Every effect goes
 //! through one [`Driver`], which claims the operation first: without an
 //! `ActuatorStopped` proof a second attempt is refused before the port is
 //! called.
@@ -142,8 +142,9 @@ pub(super) struct Observed {
     pub(super) revisions: Revisions,
 }
 
-/// The ARM effects port. [`super::arm::ArmClient`] implements it; nothing in
-/// production builds one yet (OD-002, [`super::worker::production_arm`]).
+/// The ARM effects port. [`super::arm::ArmClient`] implements it; the worker
+/// builds one only past every gate (OD-002, OD-006,
+/// [`super::worker::production_arm`]).
 pub(super) trait Arm {
     /// Starts `call`. `Ok` is a handle [`Arm::poll`] can watch; it may name
     /// an effect the platform never accepted (an outcome unknown when the

@@ -1021,6 +1021,8 @@ pub(super) enum Command {
     Work {
         operation: Option<String>,
         attempt: String,
+        /// The managed identity for ARM tokens: the target's client ID.
+        client_id: Option<String>,
     },
 }
 
@@ -1141,12 +1143,17 @@ pub(super) fn run(
             audit_event(log, action_event(CLI_ACTOR, &operation, &verb));
             Ok(result)
         }
-        Command::Work { operation, attempt } => work(
+        Command::Work {
+            operation,
+            attempt,
+            client_id,
+        } => work(
             deployments,
             log,
-            // No production proof exists yet (OD-006), so preflight refuses.
+            // No production proof exists yet (OD-006), so preflight refuses
+            // before the adapter is built or anything is claimed.
             &super::worker::Proofs::default(),
-            &super::worker::production_arm,
+            &super::worker::production_arm(client_id),
             operation.as_deref(),
             &attempt,
         ),
@@ -1220,6 +1227,8 @@ pub fn tenant_deployment_command(args: &[OsString]) -> Result<Value, String> {
                 .transpose()?,
             attempt: super::worker::attempt_id()
                 .map_err(|error| format!("{}: {}", error.code, error.message))?,
+            client_id: crate::server::cloud_recovery::target_client_id(&source.target_file)
+                .map_err(|error| error.to_string())?,
         },
         None => Command::Act {
             operation: utf8("--operation", required("--operation")?)?,

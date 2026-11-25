@@ -1,7 +1,8 @@
 //! design-tenant-provisioning EPIC-008: the Azure Resource Manager adapter
 //! behind the [`Arm`] port, for `Microsoft.App` at api-version
-//! [`API_VERSION`]. Nothing in production constructs it: no deployment
-//! profile is wired yet and every production refusal stands.
+//! [`API_VERSION`]. The control worker builds it only after every gate
+//! passes ([`super::worker::production_arm`]); production cannot pass the
+//! preflight proofs yet (OD-006), so no production path reaches it.
 //!
 //! Safety, in the order the checks run:
 //! - only a mapped, non-singleton container app is ever written, deleted
@@ -2333,5 +2334,141 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(error.status.as_u16(), 422);
+    }
+
+    // ------------------------------------------------ worker round trip
+
+    /// ITEM-022 wiring: one worker attempt drives this adapter through the
+    /// driver: the never-adopt pre-read, the create-only PUT, its async
+    /// operation and the exact readback that settles the step. Only the
+    /// test-only proofs let the attempt past the preflight gates.
+    #[test]
+    fn one_worker_attempt_provisions_a_writer_through_the_adapter() {
+        use super::super::aca::{BudgetApproval, Demand, Qualification, QuotaProof};
+        use super::super::{
+            Kind, Objects, Operations, Snapshot, StepOutcome, admin, sha256_hex, worker,
+        };
+        use crate::server::cloud_backup::fake::Memory;
+        use crate::server::{credentials, tenants};
+        use std::sync::Arc;
+
+        const CONTROL: &str = "control/state.json";
+        const PREFIX: &str = "tenant-operations";
+        const NOW: u64 = 1_700_000_000_000;
+        const INIT: &str = r#"{"dimension":"from-approved-profile"}"#;
+        let id = app("app-1");
+        let profile =
+            json!({"resources": [{"id": id, "ownership": "owned", "body": desired(IMAGE)}]})
+                .to_string();
+        let directory = tempfile::tempdir().unwrap();
+        let store = tenants::Store::load(directory.path()).unwrap();
+        let credentials = credentials::Store::load(directory.path()).unwrap();
+        let memory = Arc::new(Memory::default());
+        let objects = Objects::new(memory.clone(), CONTROL);
+        objects
+            .create(Snapshot::import(&credentials, Some(&store)).unwrap(), NOW)
+            .unwrap();
+        let ops = Operations::new(memory.clone(), PREFIX);
+        let request = json!({
+            "idempotency_key": "a",
+            "request": {
+                "kind": "create",
+                "name": "contoso",
+                "max_vectors": 1000,
+                "writer_profile": sha256_hex(profile.as_bytes()),
+                "initialization": sha256_hex(INIT.as_bytes()),
+                "resources": [id],
+                "secret_versions": ["archive-sas@3"],
+            },
+            "contents": [profile, INIT],
+        });
+        let submit = admin::Command::Submit {
+            kind: Kind::Create,
+            tenant: None,
+            request: request.to_string().into_bytes(),
+        };
+        let deployments = admin::Deployments::new(memory.clone(), CONTROL, PREFIX);
+        let created = admin::run(&deployments, &store, None, submit, NOW).unwrap();
+        let operation = created["operation"]["operation_id"].as_str().unwrap();
+        let owner = format!(
+            "vlite-tenant:{}",
+            ops.load(operation).unwrap().intent.tenant_id
+        );
+        let control = memory.raw(CONTROL).unwrap();
+
+        let (listener, base) = bind();
+        let path = format!(
+            "/subscriptions/00000000-0000-0000-0000-000000000000/providers/Microsoft.App/locations/westus2/containerappOperationStatuses/op-1?api-version={API_VERSION}"
+        );
+        let mut pending = found(IMAGE, Some(&owner));
+        pending["properties"]["provisioningState"] = json!("InProgress");
+        let fake = serve(
+            listener,
+            vec![
+                token(),
+                // The driver's never-adopt pre-read, then the adapter's own.
+                on(line("GET", &id), status(404)),
+                on(line("GET", &id), status(404)),
+                on(
+                    line("PUT", &id),
+                    reply(
+                        201,
+                        &[("azure-asyncoperation", &format!("{base}{path}"))],
+                        &pending.to_string(),
+                    ),
+                ),
+                on(format!("GET {path}"), ok(json!({"status": "Succeeded"}))),
+                on(line("GET", &id), ok(found(IMAGE, Some(&owner)))),
+                on(
+                    line("GET", &format!("{id}/revisions")),
+                    page(vec![entry("app-1--r2", true, 1, IMAGE)], None),
+                ),
+            ],
+        );
+        let proofs = worker::Proofs {
+            qualification: Some(Qualification::for_test()),
+            quota: Some(QuotaProof::for_test(Demand {
+                apps: 10,
+                cores_milli: 10_000,
+                memory_mib: 100_000,
+            })),
+            budget: Some(BudgetApproval::for_test()),
+        };
+        let adapter = |bodies: &BTreeMap<String, Value>| -> Result<Box<dyn Arm>, ApiError> {
+            let identity = IdentitySource::Platform {
+                endpoint: format!("{base}/msi/token"),
+                header: "hdr-secret".into(),
+            };
+            Ok(Box::new(ArmClient::for_test(
+                &base,
+                bodies.clone(),
+                identity,
+                None,
+            )?))
+        };
+        let done = worker::work(&objects, &ops, &proofs, &adapter, None, "worker-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (done.outcome, done.error.as_ref().map(|e| e.code)),
+            (worker::Outcome::Provisioned, None)
+        );
+        let seen = fake.finish();
+        assert_eq!(serde_json::from_slice::<Value>(&seen[3].body).unwrap(), {
+            let mut body = desired(IMAGE);
+            body["tags"]["vlite-tenant"] = json!(owner);
+            body
+        });
+        let journal = ops.journal(operation).unwrap();
+        assert_eq!(journal.attempt.as_deref(), Some("worker-1"));
+        assert_eq!(journal.steps.len(), 1);
+        assert_eq!(
+            journal.steps[0].outcome,
+            StepOutcome::Settled {
+                observed: "created".into()
+            }
+        );
+        // No route: the control state is untouched.
+        assert_eq!(memory.raw(CONTROL).unwrap(), control);
     }
 }
