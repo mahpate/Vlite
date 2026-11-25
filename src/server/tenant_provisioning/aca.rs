@@ -383,9 +383,12 @@ fn check_body(body: &Value, app: bool) -> Result<(), ApiError> {
     Ok(())
 }
 
-/// Whether a key at any depth names secret material. A key-name heuristic
-/// only: a reference (`…SecretRef`) passes, and plaintext under a neutral
-/// key (e.g. `env[].value`) is not detected.
+/// Whether a body carries secret material: the key-name heuristic exempts
+/// references (`…SecretRef`), and every `env` (case-insensitive) must be an
+/// array of objects with only a non-empty `name` and one string source.
+/// A `secretRef` permits any name; a `value` requires an exact allow-listed
+/// non-secret setting. Plaintext under other neutral keys such as `args`
+/// or `command` is still not detected.
 fn secret(value: &Value) -> bool {
     const NAMES: [&str; 7] = [
         "password",
@@ -396,10 +399,48 @@ fn secret(value: &Value) -> bool {
         "sharedkey",
         "privatekey",
     ];
+    const NON_SECRET_ENV: [&str; 16] = [
+        "VLITE_SERVE_MODE",
+        "VLITE_TRUSTED_PROXY",
+        "VLITE_ADMIN_DIR",
+        "VLITE_ADMIN_USERNAME",
+        "VLITE_SESSION_IDLE_MINUTES",
+        "VLITE_SESSION_MAX_HOURS",
+        "VLITE_AUTO_MAINTENANCE_INTERVAL_SECS",
+        "VLITE_BACKUP_INTERVAL_SECS",
+        "VLITE_BACKUP_RETENTION_ENABLED",
+        "VLITE_BACKUP_RETAIN_LAST",
+        "VLITE_BACKUP_RETAIN_DAYS",
+        "VLITE_BACKUP_DRILL_EVERY",
+        "VLITE_BACKUP_DRILL_MAX_BYTES",
+        "VLITE_SLOW_QUERY_MS",
+        "VLITE_METRICS_WITH_MEMORY",
+        "RUST_LOG",
+    ];
     match value {
         Value::Object(map) => map.iter().any(|(key, value)| {
             let key = key.to_ascii_lowercase();
             (!key.ends_with("secretref") && NAMES.iter().any(|name| key.contains(name)))
+                || (key == "env"
+                    && !value.as_array().is_some_and(|entries| {
+                        entries.iter().all(|entry| {
+                            let Some(entry) = entry.as_object() else {
+                                return false;
+                            };
+                            let Some(name) = entry.get("name").and_then(Value::as_str) else {
+                                return false;
+                            };
+                            entry.len() == 2
+                                && !name.is_empty()
+                                && match (entry.get("secretRef"), entry.get("value")) {
+                                    (Some(Value::String(_)), None) => true,
+                                    (None, Some(Value::String(_))) => {
+                                        NON_SECRET_ENV.contains(&name)
+                                    }
+                                    _ => false,
+                                }
+                        })
+                    }))
                 || secret(value)
         }),
         Value::Array(items) => items.iter().any(secret),
