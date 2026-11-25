@@ -202,6 +202,7 @@ ADMIN_SPECIAL = {
     "list-backups", "cred-list", "cred-table", "backup-verify", "backup-drill",
     "tenant-save-settings", "tenant-suspend", "tenant-resume", "replication-export",
     "obs-refresh", "webhook-list", "tenant-list", "compaction-refresh", "compaction-cancel", "cloud-backup-unpin",
+    "tenant-deployment-refresh",
 }
 ADMIN_DYNAMIC = {
     "/v1/admin/tenants/{id}": '`/v1/admin/tenants/${value}`',
@@ -280,6 +281,14 @@ for path, expression in (
 chain("DELETE", "/v1/admin/cloud-backup/sets/{id}/pins/{pin}", "cloud-backup-unpin", (
     (on("cloud-backup-unpin"), 'const path = `/v1/admin/cloud-backup/sets/${encodeURIComponent(item.id)}/pins/${encodeURIComponent(pin)}${force ? "?force=true" : ""}`'),
     (on("cloud-backup-unpin"), 'ctx.api("DELETE", path,'),
+), "admin-tools.js")
+# Tenant deployments (EPIC-011): Load operations reads a page; Next page follows the cursor.
+chain("GET", "/v1/admin/tenant-deployment-operations", "tenant-deployment-refresh", (
+    (on("tenant-deployment-refresh"), "tdLoad(mark, null)"),
+    (on("tenant-deployment-next"), "tdLoad(mark, tdAfter)"),
+    ("async function tdLoad(mark, after)", 'ctx.api("GET", deploymentListPath(after)'),
+    ("function deploymentListPath(after = null, limit = DEPLOY_PAGE)", 'return `${DEPLOY_OPERATIONS}?limit=${limit}${after === null ? "" : `&after=${after}`}`'),
+    ("const DEPLOY_OPERATIONS =", '"/v1/admin/tenant-deployment-operations"'),
 ), "admin-tools.js")
 
 # Collection management, resumable import and index lifecycle.
@@ -617,8 +626,8 @@ def main():
             ("const toolsContext =", "path, settingsPath,"),
         ),
         "admin-tools.js": (
-            ("const on = (name, area, action) =>", '$(name).addEventListener("click", () => ctx.run('),
-            ("const on = (name, area, action) =>", 'await action(mark)'),
+            ("const on = (name, area, action, describe = explain) =>", '$(name).addEventListener("click", () => ctx.run('),
+            ("const on = (name, area, action, describe = explain) =>", 'await action(mark)'),
         ),
         "observability.js": (
             ("const connection = () =>", "window.VLiteObservabilityConnection"),

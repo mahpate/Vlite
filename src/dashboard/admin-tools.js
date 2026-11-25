@@ -247,7 +247,7 @@
     const features = object(caps?.features) ? caps.features : {};
     const routes = Array.isArray(caps?.routes) ? caps.routes : [];
     const offline = { allowed: false, reason: "Sign in first." };
-    if (!connected || !object(caps)) return { users: offline, tenants: offline, lifecycle: offline, tls: offline, replication: offline, compaction: offline, cloudBackup: offline, autoFailover: offline };
+    if (!connected || !object(caps)) return { users: offline, tenants: offline, lifecycle: offline, tls: offline, replication: offline, compaction: offline, cloudBackup: offline, autoFailover: offline, tenantDeployments: offline };
     const admin = role === "admin";
     const notAdmin = (what) => `${what} requires a super admin: a super-admin account or the bootstrap admin token (current role: ${role ?? "unknown"}). Editors, viewers, read-only and scoped credentials cannot use it.`;
     const users = !admin ? { allowed: false, reason: notAdmin("User management") }
@@ -276,9 +276,18 @@
     const cloudBackup = !admin ? { allowed: false, reason: notAdmin("Cloud backup") }
       : features.cloud_backup !== true ? { allowed: false, reason: "This server does not offer cloud backup: it needs the managed vlite-server runtime with admin token authentication and a private admin directory (VLITE_ADMIN_DIR)." }
       : { allowed: true, reason: "" };
-    // Admin-only; whether this server can switch it is shown after Refresh status.
-    const autoFailover = !admin ? { allowed: false, reason: notAdmin("Automatic failover") } : { allowed: true, reason: "" };
-    return { users, tenants, lifecycle, tls, replication, compaction, cloudBackup, autoFailover };
+    // With no admin token the server answers status reads but refuses these admin routes with 401, which would sign the dashboard out.
+    const open = object(caps.identity) && caps.identity.kind === "open";
+    const needsToken = (what) => `${what} needs configured admin authentication. This server has no admin token, so it refuses these requests. Restart it with an admin token (VLITE_AUTH_TOKEN), then sign in.`;
+    // Admin-only; whether this server can switch it is shown after Refresh status. Status still loads without an admin token.
+    const autoFailover = !admin ? { allowed: false, reason: notAdmin("Automatic failover") }
+      : open ? { allowed: true, reason: "", change: false, changeReason: needsToken("Turning automatic failover on or off") }
+      : { allowed: true, reason: "", change: true, changeReason: "" };
+    // Admin-only; there is no capability flag, so whether this server has it switched on shows after Load operations.
+    const tenantDeployments = !admin ? { allowed: false, reason: `${notAdmin("Tenant deployments")} The HA gateway also refuses admin routes: sign in to the server directly.` }
+      : open ? { allowed: false, reason: needsToken("Tenant deployments") }
+      : { allowed: true, reason: "" };
+    return { users, tenants, lifecycle, tls, replication, compaction, cloudBackup, autoFailover, tenantDeployments };
   }
 
   const HINTS = {
@@ -706,6 +715,99 @@
     return { enabled: true, acknowledge_unqualified: true, ...(revision ? { expected_revision: revision } : {}) };
   }
 
+  // ---- Tenant deployments (Administration > Users): read-only list of recorded operations (EPIC-011) ----
+  const DEPLOY_OPERATIONS = "/v1/admin/tenant-deployment-operations";
+  const DEPLOY_PAGE = 20;
+  const DEPLOY_KINDS = { create: "Create tenant", set_readers: "Change reader replicas", migrate: "Move tenant", retire: "Retire tenant" };
+  const DEPLOY_PHASES = {
+    accepted: "Recorded, nothing reserved yet",
+    reserved: "Reserved, waiting for cloud execution",
+    cancelling: "Cancelling, not finished",
+    activated: "Active",
+    succeeded: "Finished",
+    cancelled: "Cancelled",
+    retired: "Retired: route removed, data kept",
+  };
+  const deployLabel = (map, value) => typeof value === "string" && Object.hasOwn(map, value) ? map[value] : `Unrecognized (${String(value ?? "missing")})`;
+  // Refusals that mean "not available here", not a failure: shown as the panel status.
+  const DEPLOY_BLOCKED = {
+    tenant_deployments_not_configured: "Tenant deployments are off on this server. They need the server started with --tenant-deployments-file. Nothing is wrong with your sign-in.",
+    read_only: "Read-only credentials cannot view tenant deployments. Sign in as a super admin.",
+    forbidden_scope: "This credential cannot use admin routes. Sign in as a super admin.",
+    gateway_tenant_required: "The HA gateway does not serve admin routes. Sign in to the server directly to view tenant deployments.",
+    not_found: "This server does not offer tenant deployments (an older version, or the HA gateway). Sign in to an up-to-date server directly.",
+  };
+  const DEPLOY_HINTS = {
+    ...DEPLOY_BLOCKED,
+    admin_auth_required: "Sign in with a super-admin account or the bootstrap admin token.",
+    invalid_query: "The page request was not accepted. Select Load operations to start again from the first page.",
+    operation_store_unavailable: "The operation store could not be read. Nothing changed; try again shortly.",
+    operation_indeterminate: "The operation store did not give a definite answer. Nothing changed; try again shortly.",
+    operation_state_invalid: "A stored operation record is damaged. Nothing changed; check the server log.",
+  };
+  const OPERATION_ID = /^[0-9a-f]{32}$/;
+  function deploymentListPath(after = null, limit = DEPLOY_PAGE) {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error("The page size must be 1 to 100.");
+    if (after !== null && !OPERATION_ID.test(after)) throw new Error("The page position is not a valid operation ID. Select Load operations to start again.");
+    return `${DEPLOY_OPERATIONS}?limit=${limit}${after === null ? "" : `&after=${after}`}`;
+  }
+  // Plain-language summary of what an operation asked for; server values are only ever shown as text.
+  function deploymentRequest(kind, desired) {
+    const d = object(desired) ? desired : {};
+    if (kind === "create") return `Name ${typeof d.name === "string" ? d.name : "--"}; vector limit ${Number.isSafeInteger(d.max_vectors) ? d.max_vectors : "none"}`;
+    if (kind === "set_readers") {
+      const fleet = object(d.fleet) ? d.fleet : {};
+      if (fleet.state === "absent") return "No reader replicas";
+      if (fleet.state === "present") {
+        const count = (value) => Number.isSafeInteger(value) && value >= 0 ? value : "?";
+        return `${count(fleet.min_replicas)} to ${count(fleet.max_replicas)} reader replicas; reads go to ${deployLabel({ readers: "the readers", writer_only: "the writer only" }, fleet.read_routing)}`;
+      }
+      if (fleet.state !== undefined) return `Reader replicas: ${deployLabel({}, fleet.state)}`;
+    }
+    if (kind === "retire") return "Remove the route and stop the apps; all data is kept";
+    if (kind === "migrate") return "Move the tenant to another writer";
+    return "--";
+  }
+  function deploymentView(op) {
+    const o = object(op) ? op : {};
+    const observed = object(o.observed) ? o.observed : {};
+    const text = (value) => typeof value === "string" && value ? value : "--";
+    const steps = Number.isSafeInteger(observed.journal_steps)
+      ? `${observed.journal_steps}${Number.isSafeInteger(observed.uncertain_steps) && observed.uncertain_steps > 0 ? ` (${observed.uncertain_steps} not confirmed)` : ""}`
+      : "--";
+    return {
+      headline: `${deployLabel(DEPLOY_KINDS, o.kind)}: ${deployLabel(DEPLOY_PHASES, o.phase)}`,
+      facts: [
+        ["Request", deploymentRequest(o.kind, o.desired)],
+        ["Next step", text(o.next_step)],
+        ["Requested", utcTime(o.created_unix_ms)],
+        ["Operation ID", text(o.operation_id)],
+        ["Tenant ID", text(o.tenant_id)],
+        ["Recorded steps", steps],
+      ],
+    };
+  }
+  // `after` is the position this page was read from; the next position must move forward or paging could loop.
+  function deploymentList(value, after = null) {
+    if (!object(value) || !Array.isArray(value.operations) || !(value.next_after === null || (typeof value.next_after === "string" && OPERATION_ID.test(value.next_after)))
+      || (after !== null && value.next_after !== null && value.next_after <= after)) {
+      throw new Error("The server sent an unexpected tenant deployment list.");
+    }
+    return { items: value.operations.map(deploymentView), next: value.next_after };
+  }
+  // Any 404 means the route is not offered here (an older server or the HA gateway).
+  const deploymentBlocked = (error) => error?.status === 404 ? DEPLOY_BLOCKED.not_found
+    : typeof error?.code === "string" && error.code !== "not_found" && Object.hasOwn(DEPLOY_BLOCKED, error.code) ? DEPLOY_BLOCKED[error.code] : "";
+  function deploymentExplain(error) {
+    const message = String(error?.message ?? error);
+    const code = typeof error?.code === "string" ? error.code : "";
+    const hint = error?.status === 404 ? DEPLOY_BLOCKED.not_found
+      : code && Object.hasOwn(DEPLOY_HINTS, code) ? DEPLOY_HINTS[code]
+      : code ? "This view only reads, so nothing changed. Select Load operations to try again; if it keeps failing, check the server log for this code."
+      : "";
+    return hint ? `${message}\n${hint}` : message;
+  }
+
   function init(ctx) {
     const $ = (id) => document.getElementById(id);
     const controls = ["tenant-list", "tenant-name", "tenant-max-vectors", "tenant-create", "tenant-id", "tenant-delete", "tenant-result",
@@ -728,9 +830,10 @@
       "cloud-backup-grace", "cloud-backup-grace-error", "cloud-backup-save", "cloud-backup-sets", "cloud-backup-set-id", "cloud-backup-set-facts",
       "cloud-backup-drill", "cloud-backup-restore", "cloud-backup-pin-reason", "cloud-backup-pin-reason-error", "cloud-backup-pin",
       "cloud-backup-pin-id", "cloud-backup-force", "cloud-backup-unpin", "cloud-backup-sets-help", "cloud-backup-result",
-      "auto-failover-status", "auto-failover-facts", "auto-failover-refresh", "auto-failover-toggle", "auto-failover-help", "auto-failover-result"];
+      "auto-failover-status", "auto-failover-facts", "auto-failover-refresh", "auto-failover-toggle", "auto-failover-help", "auto-failover-result",
+      "tenant-deployment-status", "tenant-deployment-list", "tenant-deployment-refresh", "tenant-deployment-next", "tenant-deployment-help", "tenant-deployment-result"];
     for (const name of controls) if (!$(name)) throw new Error(`admin markup is missing control #${name}`);
-    const OUTPUTS = { users: "user-result", tenants: "tenant-result", tls: "tls-result", replication: "replication-result", compaction: "compaction-result", cloudBackup: "cloud-backup-result", autoFailover: "auto-failover-result" };
+    const OUTPUTS = { users: "user-result", tenants: "tenant-result", tls: "tls-result", replication: "replication-result", compaction: "compaction-result", cloudBackup: "cloud-backup-result", autoFailover: "auto-failover-result", tenantDeployments: "tenant-deployment-result" };
     const TARGETS = { ...OUTPUTS, lifecycle: "tenant-result" };
     let epoch = 0;
     let segment = null;
@@ -744,11 +847,11 @@
       if (!gates[area].allowed) { show(TARGETS[area], gates[area].reason); throw new Error(gates[area].reason); }
     };
     // Every action captures the epoch; disconnect/reconnect bumps it so late results are dropped.
-    const on = (name, area, action) => $(name).addEventListener("click", () => ctx.run(async () => {
+    const on = (name, area, action, describe = explain) => $(name).addEventListener("click", () => ctx.run(async () => {
       const mark = epoch;
       try { await action(mark); }
       catch (error) {
-        if (!error?.stale && current(mark)) show(TARGETS[area], explain(error));
+        if (!error?.stale && current(mark)) show(TARGETS[area], describe(error));
         // The panel already says it is off while agent memory is enabled; that is not a failure to report again.
         if (error?.memoryMode) { ctx.status?.(error.message); return; }
         throw error;
@@ -1331,13 +1434,15 @@
     }
     function gateAutoFailover(offline = false) {
       const allowed = !offline && gates.autoFailover.allowed;
+      const changeable = gates.autoFailover.change !== false;
       const toggle = $("auto-failover-toggle");
       $("auto-failover-refresh").disabled = !allowed;
-      toggle.disabled = !allowed || !afState || !afView.canToggle;
+      toggle.disabled = !allowed || !changeable || !afState || !afView.canToggle;
       const turnOff = afView.enabled || afView.invalid;
       toggle.textContent = turnOff ? "Turn off automatic failover" : "Turn on automatic failover";
       toggle.classList?.toggle("danger", !turnOff);
       $("auto-failover-help").textContent = !allowed ? gates.autoFailover.reason
+        : !changeable ? `${gates.autoFailover.changeReason} Refresh status still shows the current setting.`
         : !afState ? "Select Refresh status first."
         : !afView.available ? "This server cannot switch automatic failover. Manual failover still works."
         : turnOff ? "Turning it off writes a fresh disabled revision. A promotion that has not passed its final transfer check will stop; one already past that check may complete."
@@ -1352,6 +1457,8 @@
     });
     on("auto-failover-toggle", "autoFailover", async (mark) => {
       need("autoFailover");
+      // Without an admin token the server would answer 401, which signs the dashboard out.
+      if (gates.autoFailover.change === false) throw new Error(gates.autoFailover.changeReason);
       if (!afState || !afView.canToggle) throw new Error("Select Refresh status first.");
       const enable = !(afView.enabled || afView.invalid);
       const prompt = enable
@@ -1371,6 +1478,74 @@
       afRender(value);
       show("auto-failover-result", enable ? "Automatic failover is on (not yet proven safe)." : "Automatic failover is off.");
     });
+    // Tenant deployments: read-only, paged by operation ID. Nothing loads until Load operations.
+    let tdAfter = null, tdPage = 0;
+    function tdStatus(text, tone) {
+      $("tenant-deployment-status").textContent = text;
+      $("tenant-deployment-status").setAttribute?.("data-tone", tone);
+    }
+    const tdItem = (view) => {
+      const item = document.createElement("li"), title = document.createElement("strong"), facts = document.createElement("dl");
+      title.textContent = view.headline;
+      facts.className = "compaction-facts";
+      facts.append(...view.facts.map(factRow));
+      item.append(title, facts);
+      return item;
+    };
+    function gateTenantDeployments(offline = false) {
+      const allowed = !offline && gates.tenantDeployments.allowed;
+      $("tenant-deployment-refresh").disabled = !allowed;
+      $("tenant-deployment-next").disabled = !allowed || tdAfter === null;
+      $("tenant-deployment-help").textContent = !allowed ? gates.tenantDeployments.reason
+        : tdAfter !== null ? "Next page shows the operations after the last one listed."
+        : `Load operations shows the first ${DEPLOY_PAGE}. Nothing loads automatically.`;
+    }
+    function tdClear() {
+      tdAfter = null; tdPage = 0;
+      cList("tenant-deployment-list", [], () => null);
+    }
+    async function tdLoad(mark, after) {
+      need("tenantDeployments");
+      let value;
+      try { value = await ctx.api("GET", deploymentListPath(after), undefined, { data: false }); }
+      catch (error) {
+        if (!current(mark)) throw error;
+        const blocked = deploymentBlocked(error);
+        // A refusal or a rejected position starts over; a network or server failure keeps the page so the same button can try again.
+        const retryable = !blocked && (error?.status === undefined || error.status >= 500 || error.status === 429 || error.status === 408);
+        if (!retryable) tdClear();
+        tdStatus(blocked || (tdPage > 0
+          ? `Could not load tenant deployment operations; page ${tdPage} below is from before. Try again.`
+          : "Could not load tenant deployment operations. See the message below."), "blocked");
+        gateTenantDeployments();
+        if (!blocked) throw error;
+        show("tenant-deployment-result", deploymentExplain(error));
+        ctx.status?.(blocked);
+        return;
+      }
+      if (!current(mark)) return;
+      let page;
+      try { page = deploymentList(value, after); }
+      catch (error) {
+        tdClear();
+        tdStatus("Could not load tenant deployment operations. See the message below.", "blocked");
+        gateTenantDeployments();
+        throw error;
+      }
+      tdPage = after === null ? 1 : tdPage + 1;
+      tdAfter = page.next;
+      cList("tenant-deployment-list", page.items, tdItem);
+      const count = page.items.length;
+      tdStatus(count === 0 && tdPage === 1 ? "No tenant deployment operations are recorded yet."
+        : `Page ${tdPage}: ${count} operation${count === 1 ? "" : "s"}${tdAfter !== null ? "; more on the next page" : ""}. Listed in operation ID order, not by time.`, "ready");
+      gateTenantDeployments();
+      show("tenant-deployment-result", "");
+    }
+    on("tenant-deployment-refresh", "tenantDeployments", (mark) => tdLoad(mark, null), deploymentExplain);
+    on("tenant-deployment-next", "tenantDeployments", async (mark) => {
+      if (tdAfter === null) throw new Error("Select Load operations first.");
+      await tdLoad(mark, tdAfter);
+    }, deploymentExplain);
     function gate(offline = false) {
       gates = availability(ctx.capabilities(), !offline && ctx.connected());
       $("replication-export").disabled = !gates.replication.allowed;
@@ -1378,6 +1553,7 @@
       gateCompaction(offline);
       gateCloudBackup(offline);
       gateAutoFailover(offline);
+      gateTenantDeployments(offline);
     }
     function reset() {
       epoch++;
@@ -1401,6 +1577,9 @@
       $("auto-failover-status").textContent = afView.headline;
       $("auto-failover-status").setAttribute?.("data-tone", afView.tone);
       cList("auto-failover-facts", [], () => null);
+      tdAfter = null; tdPage = 0;
+      tdStatus("Tenant deployment operations not loaded.", "idle");
+      cList("tenant-deployment-list", [], () => null);
       graphSupport(false);
       for (const id of Object.values(OUTPUTS)) show(id, "");
     }
@@ -1426,7 +1605,7 @@
     username, password, userRole, userTenant, userId, userRequest, userChanges, userView, userList,
     formatBytes, compactionForm, compactionSettings, compactionOutcome, compactionView, idempotencyKey, COMPACTION_PHASES,
     cloudBackupForm, cloudBackupPolicy, cloudBackupView, cloudBackupSets, cloudBackupSetFacts, cloudRunOutcome, cloudRestoreOutcome, cloudInterval, cloudCollectionText, cloudDrillText,
-    autoFailoverView, autoFailoverRequest } };
+    autoFailoverView, autoFailoverRequest, deploymentListPath, deploymentRequest, deploymentView, deploymentList, deploymentBlocked, deploymentExplain } };
   if (typeof window !== "undefined") window.VLiteAdminTools = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })();

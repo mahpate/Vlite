@@ -35,7 +35,8 @@ const ids = ["tenant-list", "tenant-name", "tenant-max-vectors", "tenant-create"
   "cloud-backup-grace", "cloud-backup-grace-error", "cloud-backup-save", "cloud-backup-sets", "cloud-backup-set-id", "cloud-backup-set-facts",
   "cloud-backup-drill", "cloud-backup-restore", "cloud-backup-pin-reason", "cloud-backup-pin-reason-error", "cloud-backup-pin",
   "cloud-backup-pin-id", "cloud-backup-force", "cloud-backup-unpin", "cloud-backup-sets-help", "cloud-backup-result",
-  "auto-failover-status", "auto-failover-facts", "auto-failover-refresh", "auto-failover-toggle", "auto-failover-help", "auto-failover-result"];
+  "auto-failover-status", "auto-failover-facts", "auto-failover-refresh", "auto-failover-toggle", "auto-failover-help", "auto-failover-result",
+  "tenant-deployment-status", "tenant-deployment-list", "tenant-deployment-refresh", "tenant-deployment-next", "tenant-deployment-help", "tenant-deployment-result"];
 const elements = Object.fromEntries(ids.map((id) => [id, element(id, id.endsWith("-result") ? "PRE" : "BUTTON")]));
 const downloads = [];
 // Polling timers (5 s and longer) are captured so tests advance them by hand.
@@ -582,6 +583,7 @@ const reset = () => { for (const e of Object.values(elements)) { e.listeners.len
   await compactionTests();
   await cloudBackupTests();
   await autoFailoverTests();
+  await tenantDeploymentTests();
   console.log("admin tools tests passed");
 })().catch((error) => { console.error(error); process.exit(1); });
 
@@ -1207,6 +1209,25 @@ async function autoFailoverTests() {
   assert.equal(ctx.calls.length, sent);
   assert.equal(availability(null, false).autoFailover.allowed, false);
 
+  // Open access (no admin token): status still loads, but switching is refused before a request,
+  // because the server answers 401 and that would sign the dashboard out.
+  const openCaps = { role: "admin", identity: { kind: "open", label: "Open access" }, features: {}, routes: [] };
+  const openGate = availability(openCaps).autoFailover;
+  assert.deepEqual([openGate.allowed, openGate.change], [true, false]);
+  assert.match(openGate.changeReason, /VLITE_AUTH_TOKEN/);
+  ctx.caps = openCaps;
+  tools.capabilities(openCaps);
+  ctx.responses.push(base);
+  await el("refresh").click();
+  assert.equal(ctx.calls.at(-1).method, "GET");
+  assert.equal(el("toggle").disabled, true);
+  assert.match(el("help").textContent, /needs configured admin authentication.*Refresh status still shows the current setting/s);
+  const openSent = ctx.calls.length;
+  await el("toggle").click();
+  assert.equal(ctx.calls.length, openSent);
+  assert.match(el("result").textContent, /VLITE_AUTH_TOKEN/);
+  assert.deepEqual([availability(caps).autoFailover.change, availability(caps).autoFailover.changeReason], [true, ""]);
+
   // Disconnect clears the card and locks it; late results are dropped.
   tools.capabilities(caps);
   ctx.responses.push(on);
@@ -1219,4 +1240,223 @@ async function autoFailoverTests() {
   ctx.responses.push(() => { tools.disconnect(); return on; });
   await el("refresh").click();
   assert.equal(el("status").textContent, "Automatic failover status not loaded.");
+}
+
+// ---- Tenant deployments: read-only list of recorded operations (EPIC-011). ----
+async function tenantDeploymentTests() {
+  const { deploymentListPath, deploymentRequest, deploymentView, deploymentList, deploymentBlocked, deploymentExplain } = utils;
+  const plain = (value) => JSON.parse(JSON.stringify(value));
+  const fail = (status, code) => Object.assign(new Error(`HTTP ${status}: ${code}: x`), { status, code });
+  const A = "a".repeat(32), B = "b".repeat(32), T = Date.UTC(2026, 10, 14, 12, 30);
+  const op = (id, extra = {}) => ({ operation_id: id, kind: "create", tenant_id: "c".repeat(32), phase: "reserved",
+    next_step: "cloud execution is blocked (OD-002); cancel to release the reservation",
+    operation_generation: 1, lifecycle_generation: 1, control_generation: 3, receipt_digest: null, created_unix_ms: T,
+    desired: { kind: "create", name: "acme", max_vectors: 1000, writer_profile: "d".repeat(64), initialization: "e".repeat(64), resources: [], secret_versions: 1 },
+    observed: { reserved: true, routed: false, cancellation_requested: false, journal_steps: 2, uncertain_steps: 0, terminal: false }, ...extra });
+
+  // Paths: page size 1..100 and a 32-hex cursor; anything else is refused before a request.
+  assert.equal(deploymentListPath(), "/v1/admin/tenant-deployment-operations?limit=20");
+  assert.equal(deploymentListPath(A), `/v1/admin/tenant-deployment-operations?limit=20&after=${A}`);
+  assert.equal(deploymentListPath(null, 100), "/v1/admin/tenant-deployment-operations?limit=100");
+  for (const bad of ["", "A".repeat(32), "a".repeat(31), `${A}&limit=1`, "../x"]) assert.throws(() => deploymentListPath(bad), /not a valid operation ID/, bad);
+  for (const bad of [0, 101, 1.5, "20"]) assert.throws(() => deploymentListPath(null, bad), /page size/);
+
+  // View: plain-language kind and phase; server text stays data; unknown values are labelled, not dropped.
+  const view = deploymentView(op(A));
+  assert.equal(view.headline, "Create tenant: Reserved, waiting for cloud execution");
+  assert.deepEqual(plain(view.facts), [["Request", "Name acme; vector limit 1000"], ["Next step", "cloud execution is blocked (OD-002); cancel to release the reservation"],
+    ["Requested", "2026-11-14 12:30 UTC"], ["Operation ID", A], ["Tenant ID", "c".repeat(32)], ["Recorded steps", "2"]]);
+  assert.equal(deploymentView(op(A, { kind: "retire", phase: "retired" })).headline, "Retire tenant: Retired: route removed, data kept");
+  assert.equal(deploymentView(op(A, { kind: "set_readers", phase: "accepted" })).headline, "Change reader replicas: Recorded, nothing reserved yet");
+  assert.equal(deploymentView(op(A, { kind: "migrate", phase: "cancelling" })).headline, "Move tenant: Cancelling, not finished");
+  assert.equal(deploymentView(op(A, { kind: "teleport", phase: "constructor" })).headline, "Unrecognized (teleport): Unrecognized (constructor)");
+  assert.equal(deploymentView(op(A, { observed: { journal_steps: 3, uncertain_steps: 1 } })).facts[5][1], "3 (1 not confirmed)");
+  assert.deepEqual(plain(deploymentView(null).facts.map(([, value]) => value)), ["--", "--", "--", "--", "--", "--"]);
+  assert.equal(deploymentRequest("create", { name: "a" }), "Name a; vector limit none");
+  assert.equal(deploymentRequest("set_readers", { fleet: { state: "absent" } }), "No reader replicas");
+  assert.equal(deploymentRequest("set_readers", { fleet: { state: "present", min_replicas: 1, max_replicas: 3, read_routing: "readers" } }), "1 to 3 reader replicas; reads go to the readers");
+  assert.equal(deploymentRequest("set_readers", { fleet: { state: "present", min_replicas: 0, max_replicas: 2, read_routing: "writer_only" } }), "0 to 2 reader replicas; reads go to the writer only");
+  assert.match(deploymentRequest("retire", {}), /all data is kept/);
+  assert.equal(deploymentRequest("set_readers", null), "--");
+  assert.equal(deploymentRequest("set_readers", { fleet: { state: "present", min_replicas: -1, max_replicas: 2.5, read_routing: "sideways" } }),
+    "? to ? reader replicas; reads go to Unrecognized (sideways)");
+  assert.equal(deploymentRequest("set_readers", { fleet: { state: "frozen" } }), "Reader replicas: Unrecognized (frozen)");
+  // List: shape-checked, including the cursor, which must move forward from the page it was read after.
+  assert.equal(deploymentList({ operations: [op(A)], next_after: A }).next, A);
+  assert.equal(deploymentList({ operations: [], next_after: null }).items.length, 0);
+  assert.equal(deploymentList({ operations: [], next_after: B }, A).next, B);
+  assert.equal(deploymentList({ operations: [], next_after: null }, A).next, null);
+  for (const bad of [null, {}, { operations: {}, next_after: null }, { operations: [], next_after: "x" }, { operations: [] }])
+    assert.throws(() => deploymentList(bad), /unexpected tenant deployment list/);
+  for (const next of [A, "0".repeat(32)]) assert.throws(() => deploymentList({ operations: [], next_after: next }, A), /unexpected tenant deployment list/);
+
+  // Refusals: "not available here" codes are explained, not treated as failures; unknown codes still show.
+  assert.match(deploymentBlocked(fail(409, "tenant_deployments_not_configured")), /--tenant-deployments-file/);
+  assert.match(deploymentBlocked(fail(403, "read_only")), /Read-only credentials/);
+  assert.match(deploymentBlocked(fail(403, "gateway_tenant_required")), /HA gateway/);
+  assert.match(deploymentBlocked(fail(404, "not_found")), /does not offer tenant deployments/);
+  // Any 404 means the route is missing here, whatever code the proxy or older server used.
+  assert.match(deploymentBlocked(fail(404, "route_missing")), /does not offer tenant deployments/);
+  assert.match(deploymentExplain(fail(404, "route_missing")), /does not offer tenant deployments/);
+  assert.equal(deploymentBlocked(fail(500, "not_found")), "");
+  assert.equal(deploymentBlocked(fail(503, "operation_store_unavailable")), "");
+  assert.equal(deploymentBlocked(fail(409, "constructor")), "");
+  assert.equal(deploymentBlocked(new Error("network")), "");
+  assert.match(deploymentExplain(fail(503, "operation_store_unavailable")), /^HTTP 503: operation_store_unavailable: x\nThe operation store could not be read/);
+  assert.match(deploymentExplain(fail(400, "invalid_query")), /start again from the first page/);
+  assert.match(deploymentExplain(fail(409, "constructor")), /^HTTP 409: constructor: x\nThis view only reads/);
+  assert.equal(deploymentExplain(new Error("network down")), "network down");
+
+  // Availability: super admin only; everyone else is told why, including about the HA gateway.
+  assert.equal(availability({ role: "admin", features: {}, routes: [] }).tenantDeployments.allowed, true);
+  const reader = availability({ role: "read_only", features: {}, routes: [] }).tenantDeployments;
+  assert.equal(reader.allowed, false);
+  assert.match(reader.reason, /requires a super admin.*HA gateway/s);
+  assert.match(availability({ role: "scoped", scope: { tenant: "t" }, features: {}, routes: [] }).tenantDeployments.reason, /requires a super admin/);
+  assert.match(availability(null, false).tenantDeployments.reason, /Sign in first/);
+  // Open access (no admin token): the server answers 401, which would sign the dashboard out, so the card stays locked.
+  const openTd = availability({ role: "admin", identity: { kind: "open", label: "Open access" }, features: {}, routes: [] }).tenantDeployments;
+  assert.equal(openTd.allowed, false);
+  assert.match(openTd.reason, /^Tenant deployments needs configured admin authentication.*VLITE_AUTH_TOKEN/s);
+
+  // Wiring: nothing loads on sign-in; Load operations reads page 1 and Next page follows next_after.
+  reset(); timers.length = 0;
+  const ctx = fakeCtx();
+  const caps = { role: "admin", features: {}, routes: [] };
+  ctx.caps = caps;
+  const tools = init(ctx);
+  tools.capabilities(caps);
+  const el = (id) => elements[`tenant-deployment-${id}`];
+  const rows = () => el("list").children.map((item) => [item.children[0].textContent, ...item.children[1].children.map((row) => row.children[1].textContent)]);
+  assert.equal(ctx.calls.length, 0);
+  assert.equal(el("status").textContent, "Tenant deployment operations not loaded.");
+  assert.deepEqual([el("refresh").disabled, el("next").disabled, el("list").hidden], [false, true, true]);
+  assert.match(el("help").textContent, /first 20/);
+
+  const hostile = "<img src=x onerror=alert(1)>";
+  ctx.responses.push({ operations: [op(A, { next_step: hostile }), op(B, { kind: "retire", phase: "retired" })], next_after: B });
+  await el("refresh").click();
+  assert.deepEqual(plain(ctx.calls), [{ method: "GET", path: "/v1/admin/tenant-deployment-operations?limit=20", options: { data: false } }]);
+  assert.equal(el("list").hidden, false);
+  assert.equal(rows().length, 2);
+  assert.equal(rows()[0][2], hostile);
+  assert.equal(rows()[1][0], "Retire tenant: Retired: route removed, data kept");
+  assert.equal(el("status").textContent, "Page 1: 2 operations; more on the next page. Listed in operation ID order, not by time.");
+  assert.equal(el("status").attributes["data-tone"], "ready");
+  assert.equal(el("next").disabled, false);
+  assert.match(el("help").textContent, /after the last one listed/);
+
+  ctx.responses.push({ operations: [op("f".repeat(32))], next_after: null });
+  await el("next").click();
+  assert.equal(ctx.calls[1].path, `/v1/admin/tenant-deployment-operations?limit=20&after=${B}`);
+  assert.equal(el("status").textContent, "Page 2: 1 operation. Listed in operation ID order, not by time.");
+  assert.equal(el("next").disabled, true);
+  // Next page without a cursor sends nothing.
+  await el("next").click();
+  assert.equal(ctx.calls.length, 2);
+  assert.match(el("result").textContent, /Select Load operations first/);
+
+  // Load operations restarts at page 1; an empty server says so plainly.
+  ctx.responses.push({ operations: [], next_after: null });
+  await el("refresh").click();
+  assert.equal(ctx.calls[2].path, "/v1/admin/tenant-deployment-operations?limit=20");
+  assert.equal(el("status").textContent, "No tenant deployment operations are recorded yet.");
+  assert.equal(el("list").hidden, true);
+
+  // A network or server failure keeps the page and its position so the same button can try again.
+  ctx.responses.push({ operations: [op(A)], next_after: A });
+  await el("refresh").click();
+  ctx.responses.push({ operations: [op(B)], next_after: B });
+  await el("next").click();
+  const kept = ctx.errors.length;
+  ctx.responses.push(fail(503, "operation_store_unavailable"));
+  await el("next").click();
+  assert.equal(ctx.calls.at(-1).path, `/v1/admin/tenant-deployment-operations?limit=20&after=${B}`);
+  assert.equal(ctx.errors.length, kept + 1);
+  assert.match(el("status").textContent, /^Could not load tenant deployment operations; page 2 below is from before/);
+  assert.deepEqual([rows().length, el("list").hidden, el("next").disabled], [1, false, false]);
+  ctx.responses.push(new Error("network down"));
+  await el("next").click();
+  assert.equal(ctx.calls.at(-1).path, `/v1/admin/tenant-deployment-operations?limit=20&after=${B}`);
+  assert.match(el("status").textContent, /page 2 below is from before/);
+  assert.deepEqual([el("list").hidden, el("next").disabled], [false, false]);
+  ctx.responses.push({ operations: [op("f".repeat(32))], next_after: null });
+  await el("next").click();
+  assert.equal(el("status").textContent, "Page 3: 1 operation. Listed in operation ID order, not by time.");
+  // A rejected position starts over from the first page.
+  ctx.responses.push({ operations: [op(A)], next_after: A });
+  await el("refresh").click();
+  ctx.responses.push(fail(400, "invalid_query"));
+  await el("next").click();
+  assert.deepEqual([el("list").hidden, el("next").disabled], [true, true]);
+  assert.match(el("result").textContent, /start again from the first page/);
+  // A page whose next position does not move forward is refused, so paging cannot loop.
+  ctx.responses.push({ operations: [op(B)], next_after: B });
+  await el("refresh").click();
+  ctx.responses.push({ operations: [op(A)], next_after: A });
+  await el("next").click();
+  assert.match(el("result").textContent, /unexpected tenant deployment list/);
+  assert.match(el("status").textContent, /^Could not load/);
+  assert.deepEqual([el("list").hidden, el("next").disabled], [true, true]);
+  // Any 404 reads as "not offered here", not as a failure.
+  const quiet = ctx.errors.length;
+  ctx.responses.push(fail(404, "route_missing"));
+  await el("refresh").click();
+  assert.equal(ctx.errors.length, quiet);
+  assert.match(el("status").textContent, /does not offer tenant deployments/);
+
+  // Not configured (409): a calm status, not an error; the list and cursor are cleared.
+  ctx.responses.push({ operations: [op(A)], next_after: A });
+  await el("refresh").click();
+  const errors = ctx.errors.length;
+  ctx.responses.push(fail(409, "tenant_deployments_not_configured"));
+  await el("refresh").click();
+  assert.equal(ctx.errors.length, errors);
+  assert.match(el("status").textContent, /off on this server.*--tenant-deployments-file/);
+  assert.equal(el("status").attributes["data-tone"], "blocked");
+  assert.deepEqual([el("list").hidden, el("next").disabled], [true, true]);
+  assert.match(el("result").textContent, /^HTTP 409: tenant_deployments_not_configured/);
+  assert.match(ctx.statuses.at(-1), /--tenant-deployments-file/);
+  // A reader token refused by the server (403 read_only) and the HA gateway refusal read the same way.
+  ctx.responses.push(fail(403, "read_only"));
+  await el("refresh").click();
+  assert.match(el("status").textContent, /Read-only credentials cannot view/);
+  ctx.responses.push(fail(403, "gateway_tenant_required"));
+  await el("refresh").click();
+  assert.match(el("status").textContent, /HA gateway does not serve admin routes/);
+  assert.equal(ctx.errors.length, errors);
+  // Other failures are reported as errors with a plain-language hint.
+  ctx.responses.push(fail(503, "operation_store_unavailable"));
+  await el("refresh").click();
+  assert.equal(ctx.errors.length, errors + 1);
+  assert.match(el("status").textContent, /Could not load/);
+  assert.match(el("result").textContent, /operation store could not be read/);
+  ctx.responses.push({ operations: "nope", next_after: null });
+  await el("refresh").click();
+  assert.match(el("result").textContent, /unexpected tenant deployment list/);
+
+  // A read-only sign-in: both buttons are disabled with the reason, and a click sends nothing.
+  const roCaps = { role: "read_only", features: {}, routes: [] };
+  ctx.caps = roCaps;
+  tools.capabilities(roCaps);
+  assert.deepEqual([el("refresh").disabled, el("next").disabled], [true, true]);
+  assert.match(el("help").textContent, /requires a super admin/);
+  assert.match(el("result").textContent, /requires a super admin/);
+  const sent = ctx.calls.length;
+  await el("refresh").click();
+  assert.equal(ctx.calls.length, sent);
+
+  // Sign-out clears the list and locks the card; a late answer is dropped.
+  ctx.caps = caps;
+  tools.capabilities(caps);
+  ctx.responses.push({ operations: [op(A)], next_after: A });
+  await el("refresh").click();
+  tools.disconnect();
+  assert.equal(el("status").textContent, "Tenant deployment operations not loaded.");
+  assert.deepEqual([el("list").hidden, el("refresh").disabled, el("next").disabled], [true, true, true]);
+  tools.capabilities(caps);
+  ctx.responses.push(() => { tools.disconnect(); return { operations: [op(A)], next_after: A }; });
+  await el("refresh").click();
+  assert.equal(el("status").textContent, "Tenant deployment operations not loaded.");
+  assert.equal(el("list").hidden, true);
 }

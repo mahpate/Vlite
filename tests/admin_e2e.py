@@ -873,6 +873,113 @@ def exercise_auto_failover(browser):
     context.close()
 
 
+DEPLOY_OPS = "/v1/admin/tenant-deployment-operations"
+HOSTILE = "<img src=x onerror=window.__xss=1>"
+
+
+def deployment(index, **extra):
+    operation = {
+        "operation_id": f"{index:032x}", "kind": "create", "tenant_id": "c" * 32, "phase": "reserved",
+        "next_step": "cloud execution is blocked (OD-002); cancel to release the reservation",
+        "operation_generation": 1, "lifecycle_generation": 1, "control_generation": 3, "receipt_digest": None,
+        "created_unix_ms": CREATED,
+        "desired": {"kind": "create", "name": f"tenant-{index}-" + "x" * 50, "max_vectors": None,
+                    "writer_profile": "d" * 64, "initialization": "e" * 64, "resources": [], "secret_versions": 1},
+        "observed": {"reserved": True, "routed": False, "cancellation_requested": False,
+                     "journal_steps": 2, "uncertain_steps": 0, "terminal": False},
+    }
+    return {**operation, **extra}
+
+
+class TenantDeploymentApi(AdminApi):
+    """The read-only operation list with its documented page shape and refusals; nothing is executed."""
+
+    def __init__(self, role="admin", refusal=None):
+        super().__init__(role=role)
+        self.refusal = refusal
+        self.operations = [deployment(1, next_step=HOSTILE)] + [deployment(i) for i in range(2, 23)] + [
+            deployment(23, kind="retire", phase="retired", desired={"kind": "retire"})]
+
+    def api(self, method, path, query, body, headers):
+        if path == DEPLOY_OPS and method == "GET":
+            if self.refusal:
+                return self.error(*self.refusal)
+            params = dict(item.split("=", 1) for item in query.split("&") if item)
+            limit = int(params.get("limit", "50"))
+            after = params.get("after")
+            items = [item for item in self.operations if after is None or item["operation_id"] > after][:limit]
+            more = items and items[-1] is not self.operations[-1]
+            return 200, {"operations": items, "next_after": items[-1]["operation_id"] if more else None}, {}
+        return super().api(method, path, query, body, headers)
+
+
+def exercise_tenant_deployments(browser):
+    fake = TenantDeploymentApi()
+    context, page, errors = mocked_page(browser, fake)
+    control(page, "#admin-tenant-deployments")
+    status = page.locator("#tenant-deployment-status")
+    expect(status).to_have_text("Tenant deployment operations not loaded.")
+    assert not calls(fake, DEPLOY_OPS, "GET"), "Tenant deployments must not be read on connection"
+    expect(page.locator("#tenant-deployment-next")).to_be_disabled()
+    expect(page.locator("#tenant-deployment-help")).to_contain_text("Nothing loads automatically")
+
+    control(page, "#tenant-deployment-refresh").click()
+    expect(status).to_have_text("Page 1: 20 operations; more on the next page. Listed in operation ID order, not by time.")
+    items = page.locator("#tenant-deployment-list > li")
+    expect(items).to_have_count(20)
+    expect(items.first).to_contain_text("Create tenant: Reserved, waiting for cloud execution")
+    expect(items.first).not_to_contain_text("not enabled yet")
+    expect(items.first).to_contain_text(HOSTILE)
+    assert page.evaluate("() => window.__xss === undefined && !document.querySelector('#tenant-deployment-list img')")
+    assert calls(fake, DEPLOY_OPS, "GET")[-1]["query"] == "limit=20"
+
+    for width, height in ((1280, 900), (768, 1000), (390, 844)):
+        page.set_viewport_size({"width": width, "height": height})
+        control(page, "#admin-tenant-deployments")
+        overflow = page.evaluate("""() => {
+            const card = document.querySelector('#admin-tenant-deployments');
+            return { page: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+                     card: card.scrollWidth - card.clientWidth };
+        }""")
+        assert overflow["page"] <= 0 and overflow["card"] <= 0, (width, overflow)
+    page.set_viewport_size({"width": 1280, "height": 900})
+
+    control(page, "#tenant-deployment-next").click()
+    expect(status).to_have_text("Page 2: 3 operations. Listed in operation ID order, not by time.")
+    assert calls(fake, DEPLOY_OPS, "GET")[-1]["query"] == f"limit=20&after={20:032x}"
+    expect(items).to_have_count(3)
+    expect(items.last).to_contain_text("Retire tenant: Retired: route removed, data kept")
+    expect(page.locator("#tenant-deployment-next")).to_be_disabled()
+
+    sign_out(page)
+    expect(page.locator("#tenant-deployment-result")).to_have_text("")
+    expect(status).to_have_text("Tenant deployment operations not loaded.")
+    assert not errors, errors
+    context.close()
+
+    # Not enabled on this server: a calm explanation, not a failure.
+    fake = TenantDeploymentApi(refusal=(409, "tenant_deployments_not_configured"))
+    context, page, errors = mocked_page(browser, fake)
+    control(page, "#tenant-deployment-refresh").click()
+    status = page.locator("#tenant-deployment-status")
+    expect(status).to_contain_text("--tenant-deployments-file")
+    expect(status).to_have_attribute("data-tone", "blocked")
+    expect(page.locator("#tenant-deployment-next")).to_be_disabled()
+    assert not errors, errors
+    context.close()
+
+    # Reader sign-in: locked with the reason, and nothing is requested.
+    fake = TenantDeploymentApi("read_only")
+    context, page, errors = mocked_page(browser, fake)
+    control(page, "#admin-tenant-deployments")
+    for selector in ("#tenant-deployment-refresh", "#tenant-deployment-next"):
+        expect(page.locator(selector)).to_be_disabled()
+    expect(page.locator("#tenant-deployment-help")).to_contain_text("requires a super admin")
+    assert not calls(fake, DEPLOY_OPS, "GET")
+    assert not errors, errors
+    context.close()
+
+
 if __name__ == "__main__":
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
@@ -882,6 +989,7 @@ if __name__ == "__main__":
             exercise_password_memory_mode(browser)
             exercise_cloud_backup(browser)
             exercise_auto_failover(browser)
+            exercise_tenant_deployments(browser)
         finally:
             browser.close()
     print("PASS browser admin flows: identity badge, confirmations/cancel, tenant CRUD/usage/settings/"
@@ -897,3 +1005,5 @@ if __name__ == "__main__":
     print("PASS automatic failover card: no read on connect, refresh, cancelled and confirmed turn-on with the "
           "acknowledgement and revision, unguarded turn-off, conflict message, no overflow, sign-out clearing and "
           "unavailable/role gates.")
+    print("PASS tenant deployments panel: no read on connect, paged list with plain-language status, untrusted text "
+          "kept literal, no overflow at 1280/768/390, sign-out clearing, not-configured explanation and reader gate.")

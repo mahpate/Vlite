@@ -21,6 +21,7 @@ const layout = {
   "change-feed": ["observability", "change-feed"],
   operations: ["administration", "operations"],
   users: ["administration", "users"], credentials: ["administration", "users"], tenants: ["administration", "users"],
+  "admin-tenant-deployments": ["administration", "users"],
   "admin-token-management": ["administration", "users"], "admin-persistent-audit": ["administration", "users"],
   "admin-backups": ["administration", "admin-backups"], "admin-backup-schedule": ["administration", "admin-backups"], "admin-cloud-backup": ["administration", "admin-backups"], "admin-compaction": ["administration", "admin-backups"],
   "admin-pitr": ["administration", "admin-backups"], replication: ["administration", "admin-backups"],
@@ -143,7 +144,7 @@ test("revealing a view or control shows its section under grouped tabs", () => {
   assert.deepEqual(labels("workspace-tabs"), ["Health", "Users & access", "Backup & recovery", "Server settings"]);
   assert.deepEqual(selected("workspace-tabs"), ["Users & access"]);
   assert.equal(elements.get("workspace-tabs").getAttribute("aria-label"), "Administration views");
-  assert.deepEqual(labels("workspace-subtabs"), ["Users", "API keys", "Tenants", "Admin tokens", "Audit log"]);
+  assert.deepEqual(labels("workspace-subtabs"), ["Users", "API keys", "Tenants", "Tenant deployments", "Admin tokens", "Audit log"]);
   assert.deepEqual(selected("workspace-subtabs"), ["API keys"]);
   assert.equal(elements.get("workspace-subtabs").getAttribute("aria-label"), "Users & access tools");
   assert.equal(elements.get("credentials").getAttribute("aria-labelledby"), "workspace-subtabs-credentials");

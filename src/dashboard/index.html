@@ -744,6 +744,19 @@
     <button id="tenant-delete" type="button" class="danger" data-admin data-feature="tenants">Delete empty tenant</button>
     <pre id="tenant-result" aria-live="polite"></pre>
   </section>
+  <section id="admin-tenant-deployments" class="wide">
+    <h2>Tenant deployments</h2>
+    <p>Shows recorded tenant deployment requests (create, reader replicas, move, retire) and where each one stands. This view only reads: it changes nothing.</p>
+    <p>Off unless the server starts with <code>--tenant-deployments-file</code>. Needs a super admin signed in to the server directly; the HA gateway refuses admin routes.</p>
+    <p id="tenant-deployment-status" class="compaction-status" role="status" aria-live="polite" data-tone="idle">Tenant deployment operations not loaded.</p>
+    <ol id="tenant-deployment-list" hidden></ol>
+    <div class="compaction-actions">
+      <button id="tenant-deployment-refresh" data-admin type="button" class="secondary" aria-describedby="tenant-deployment-help">Load operations</button>
+      <button id="tenant-deployment-next" data-admin type="button" class="secondary" aria-describedby="tenant-deployment-help">Next page</button>
+    </div>
+    <p id="tenant-deployment-help" class="field-help">Sign in to use this.</p>
+    <pre id="tenant-deployment-result" aria-live="polite"></pre>
+  </section>
   <section id="admin-token-management" class="wide">
     <h2>Admin tokens and recent activity</h2>
     <p data-admin-availability="tokens_reload">Sign in to check configured token-file reload support.</p>
