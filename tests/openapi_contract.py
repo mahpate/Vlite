@@ -117,7 +117,7 @@ class OpenApiTests(unittest.TestCase):
         source = (ROOT / "src" / "server" / "tenant_provisioning.rs").read_text(encoding="utf-8")
         routes = re.search(r"fn routes\(\).*?\n}", source, re.S).group(0)
         served = set(re.findall(r'"(/v1/admin/tenant-deployment[^"]*)",?\s*(get|post)\(', routes))
-        self.assertEqual(len(served), 6, served)
+        self.assertEqual(len(served), 7, served)
         # Every served route is documented, with no extra method.
         for path, method in served:
             self.assertTrue(path in paths, f"{path} is not in src/openapi.json")
@@ -143,6 +143,25 @@ class OpenApiTests(unittest.TestCase):
         operation = "/v1/admin/tenant-deployment-operations/{operation}"
         self.assertTrue({"200", "401", "403", "404", "409", "503"}
                         <= set(paths[operation]["get"]["responses"]))
+        # ITEM-023: the list is GET-only, paged by limit and an exclusive after.
+        listing = "/v1/admin/tenant-deployment-operations"
+        self.assertIn((listing, "get"), served)
+        self.assertEqual(set(paths[listing]), {"get"})
+        listed = paths[listing]["get"]
+        self.assertTrue({"200", "400", "401", "403", "409", "503"} <= set(listed["responses"]))
+        self.assertEqual(listed["responses"]["200"]["content"]["application/json"]["schema"],
+                         {"$ref": "#/components/schemas/TenantDeploymentOperationPage"})
+        page = schemas["TenantDeploymentOperationPage"]
+        self.assertFalse(page["additionalProperties"])
+        self.assertEqual(set(page["required"]), {"operations", "next_after"})
+        self.assertEqual(page["properties"]["operations"]["items"],
+                         {"$ref": "#/components/schemas/TenantDeploymentOperation"})
+        self.assertIn({"type": "null"}, page["properties"]["next_after"]["anyOf"])
+        query = {p["name"]: p["schema"] for p in listed["parameters"] if p["in"] == "query"}
+        self.assertEqual(set(query), {"limit", "after"})
+        self.assertEqual((query["limit"]["minimum"], query["limit"]["maximum"],
+                          query["limit"]["default"]), (1, 100, 50))
+        self.assertEqual(query["after"]["pattern"], "^[0-9a-f]{32}$")
         acting = operation + "/{action}"
         self.assertEqual(body(acting), action)
         self.assertTrue({"200", "401", "403", "404", "409", "422", "503"}

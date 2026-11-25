@@ -16,6 +16,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const API_VERSION: &str = "2021-08-06";
 const RESOURCE: &str = "https://storage.azure.com/";
+/// The Azure Resource Manager token audience ([`ManagementCredential`]).
+const MANAGEMENT: &str = "https://management.azure.com/";
 const IMDS: &str = "http://169.254.169.254/metadata/identity/oauth2/token";
 const SINGLE_PUT_MAX: u64 = 4 * 1024 * 1024;
 const BLOCK: u64 = 8 * 1024 * 1024;
@@ -141,7 +143,7 @@ pub(in crate::server) fn connect_with(
     Ok(Sets::new(meta, data, shared, target.prefix.clone()))
 }
 
-fn client(no_proxy: bool) -> Result<Client, ApiError> {
+pub(in crate::server) fn client(no_proxy: bool) -> Result<Client, ApiError> {
     let mut builder = Client::builder()
         .timeout(Duration::from_secs(120))
         .connect_timeout(Duration::from_secs(10))
@@ -283,55 +285,99 @@ impl Credential {
                 client_id,
                 http,
                 cache,
-            } => {
-                let now = now_secs();
-                let mut cache = cache
-                    .lock()
-                    .map_err(|_| StoreError::Failed("token cache unavailable".into()))?;
-                if let Some(token) = cache.as_ref()
-                    && token.expires_at > now + 300
-                {
-                    return Ok(format!("Bearer {}", token.value));
-                }
-                let (endpoint, version) = match source {
-                    IdentitySource::Platform { endpoint, .. } => (endpoint.as_str(), "2019-08-01"),
-                    IdentitySource::Imds => (IMDS, "2018-02-01"),
-                };
-                let mut url = Url::parse(endpoint).map_err(|_| {
-                    StoreError::Failed("the managed identity endpoint is invalid".into())
-                })?;
-                {
-                    let mut query = url.query_pairs_mut();
-                    query.append_pair("api-version", version);
-                    query.append_pair("resource", RESOURCE);
-                    if let Some(id) = client_id {
-                        query.append_pair("client_id", id);
-                    }
-                }
-                let request = match source {
-                    IdentitySource::Platform { header, .. } => {
-                        http.get(url).header("X-IDENTITY-HEADER", header)
-                    }
-                    IdentitySource::Imds => http.get(url).header("Metadata", "true"),
-                };
-                let response = request.send().map_err(transport)?;
-                let status = response.status().as_u16();
-                let body = read_limited(response, TOKEN_BODY_MAX)?;
-                if !(200..300).contains(&status) {
-                    let detail = format!("managed identity token request returned HTTP {status}");
-                    return Err(if status == 429 || status >= 500 {
-                        StoreError::Unknown(detail)
-                    } else {
-                        StoreError::Failed(detail)
-                    });
-                }
-                let token = parse_token(&body, now)?;
-                let header = format!("Bearer {}", token.value);
-                *cache = Some(token);
-                Ok(header)
-            }
+            } => bearer(source, client_id.as_deref(), http, cache, RESOURCE),
         }
     }
+}
+
+/// Managed identity bearer tokens for Azure Resource Manager. Its token is
+/// cached apart from any storage credential's: a token is only ever sent
+/// to the audience it was issued for.
+pub(in crate::server) struct ManagementCredential {
+    source: IdentitySource,
+    client_id: Option<String>,
+    http: Client,
+    cache: Mutex<Option<Token>>,
+}
+
+impl ManagementCredential {
+    pub(in crate::server) fn new(
+        source: IdentitySource,
+        client_id: Option<String>,
+    ) -> Result<Self, ApiError> {
+        Ok(Self {
+            source,
+            client_id,
+            http: client(true)?,
+            cache: Mutex::new(None),
+        })
+    }
+
+    /// `Bearer <token>` for the management audience.
+    pub(in crate::server) fn authorization(&self) -> Result<String, StoreError> {
+        bearer(
+            &self.source,
+            self.client_id.as_deref(),
+            &self.http,
+            &self.cache,
+            MANAGEMENT,
+        )
+    }
+}
+
+/// `Bearer <token>` for `resource` from the managed identity endpoint,
+/// reusing the cached token while more than five minutes remain.
+fn bearer(
+    source: &IdentitySource,
+    client_id: Option<&str>,
+    http: &Client,
+    cache: &Mutex<Option<Token>>,
+    resource: &str,
+) -> Result<String, StoreError> {
+    let now = now_secs();
+    let mut cache = cache
+        .lock()
+        .map_err(|_| StoreError::Failed("token cache unavailable".into()))?;
+    if let Some(token) = cache.as_ref()
+        && token.expires_at > now + 300
+    {
+        return Ok(format!("Bearer {}", token.value));
+    }
+    let (endpoint, version) = match source {
+        IdentitySource::Platform { endpoint, .. } => (endpoint.as_str(), "2019-08-01"),
+        IdentitySource::Imds => (IMDS, "2018-02-01"),
+    };
+    let mut url = Url::parse(endpoint)
+        .map_err(|_| StoreError::Failed("the managed identity endpoint is invalid".into()))?;
+    {
+        let mut query = url.query_pairs_mut();
+        query.append_pair("api-version", version);
+        query.append_pair("resource", resource);
+        if let Some(id) = client_id {
+            query.append_pair("client_id", id);
+        }
+    }
+    let request = match source {
+        IdentitySource::Platform { header, .. } => {
+            http.get(url).header("X-IDENTITY-HEADER", header)
+        }
+        IdentitySource::Imds => http.get(url).header("Metadata", "true"),
+    };
+    let response = request.send().map_err(transport)?;
+    let status = response.status().as_u16();
+    let body = read_limited(response, TOKEN_BODY_MAX)?;
+    if !(200..300).contains(&status) {
+        let detail = format!("managed identity token request returned HTTP {status}");
+        return Err(if status == 429 || status >= 500 {
+            StoreError::Unknown(detail)
+        } else {
+            StoreError::Failed(detail)
+        });
+    }
+    let token = parse_token(&body, now)?;
+    let header = format!("Bearer {}", token.value);
+    *cache = Some(token);
+    Ok(header)
 }
 
 fn transport(error: reqwest::Error) -> StoreError {
@@ -383,7 +429,7 @@ fn etag(response: &Response) -> Result<String, StoreError> {
         .ok_or_else(|| StoreError::Failed("the response has no ETag".into()))
 }
 
-fn read_limited(response: Response, max: u64) -> Result<Vec<u8>, StoreError> {
+pub(in crate::server) fn read_limited(response: Response, max: u64) -> Result<Vec<u8>, StoreError> {
     if response.content_length().is_some_and(|n| n > max) {
         return Err(StoreError::TooLarge);
     }
@@ -1062,6 +1108,69 @@ mod tests {
         assert_eq!(
             credential.authorization("GET", &url, &[], 0).unwrap(),
             "Bearer tok123"
+        );
+    }
+
+    #[test]
+    fn management_tokens_have_their_own_audience_and_cache() {
+        let token = |value: &str| {
+            let body = format!(r#"{{"access_token":"{value}","expires_on":"99999999999"}}"#);
+            format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            )
+        };
+        let (address, handle) = serve(vec![token("tok-storage"), token("tok-arm")]);
+        let source = || IdentitySource::Platform {
+            endpoint: format!("{address}/msi/token"),
+            header: "hdr-secret".into(),
+        };
+        let storage = Credential::Managed {
+            source: source(),
+            client_id: None,
+            http: client(true).unwrap(),
+            cache: Mutex::new(None),
+        };
+        let url = Url::parse("https://a.blob.core.windows.net/c/b").unwrap();
+        assert_eq!(
+            storage.authorization("GET", &url, &[], 0).unwrap(),
+            "Bearer tok-storage"
+        );
+        // A cached storage token is never offered to Resource Manager.
+        let management = ManagementCredential::new(
+            source(),
+            Some("01234567-89ab-cdef-0123-456789abcdef".into()),
+        )
+        .unwrap();
+        assert_eq!(management.authorization().unwrap(), "Bearer tok-arm");
+        let heads: Vec<String> = handle
+            .join()
+            .unwrap()
+            .iter()
+            .map(|head| head.to_ascii_lowercase())
+            .collect();
+        assert!(
+            heads[0].contains("resource=https%3a%2f%2fstorage.azure.com%2f"),
+            "{}",
+            heads[0]
+        );
+        assert!(
+            heads[1].starts_with("get /msi/token?api-version=2019-08-01"),
+            "{}",
+            heads[1]
+        );
+        assert!(
+            heads[1].contains("resource=https%3a%2f%2fmanagement.azure.com%2f"),
+            "{}",
+            heads[1]
+        );
+        assert!(heads[1].contains("client_id=01234567-89ab-cdef-0123-456789abcdef"));
+        assert!(heads[1].contains("x-identity-header: hdr-secret"));
+        // Each token is cached for its own audience (the responder exited).
+        assert_eq!(management.authorization().unwrap(), "Bearer tok-arm");
+        assert_eq!(
+            storage.authorization("GET", &url, &[], 0).unwrap(),
+            "Bearer tok-storage"
         );
     }
 

@@ -1020,172 +1020,7 @@ fn routes(service: Service) -> Router {
         .merge(
             Router::new()
                 .route("/health", get(|| async { Json(json!({"status": "ok"})) }))
-                .route(
-                    "/dashboard",
-                    get(|| async {
-                        dashboard_asset(
-                            "text/html; charset=utf-8",
-                            include_str!("dashboard/index.html"),
-                        )
-                    }),
-                )
-                .route(
-                    "/dashboard/app.js",
-                    get(|| async {
-                        dashboard_asset(
-                            "text/javascript; charset=utf-8",
-                            include_str!("dashboard/app.js"),
-                        )
-                    }),
-                )
-                .route(
-                    "/dashboard/navigation.js",
-                    get(|| async {
-                        dashboard_asset(
-                            "text/javascript; charset=utf-8",
-                            include_str!("dashboard/navigation.js"),
-                        )
-                    }),
-                )
-                .route(
-                    "/dashboard/observability.js",
-                    get(|| async {
-                        dashboard_asset(
-                            "text/javascript; charset=utf-8",
-                            include_str!("dashboard/observability.js"),
-                        )
-                    }),
-                )
-                .route(
-                    "/dashboard/console-tools.js",
-                    get(|| async {
-                        dashboard_asset(
-                            "text/javascript; charset=utf-8",
-                            include_str!("dashboard/console-tools.js"),
-                        )
-                    }),
-                )
-                .route(
-                    "/dashboard/admin-tools.js",
-                    get(|| async {
-                        dashboard_asset(
-                            "text/javascript; charset=utf-8",
-                            include_str!("dashboard/admin-tools.js"),
-                        )
-                    }),
-                )
-                .route(
-                    "/dashboard/graph.js",
-                    get(|| async {
-                        dashboard_asset(
-                            "text/javascript; charset=utf-8",
-                            include_str!("dashboard/graph.js"),
-                        )
-                    }),
-                )
-                .route(
-                    "/dashboard/graph.css",
-                    get(|| async {
-                        dashboard_asset(
-                            "text/css; charset=utf-8",
-                            include_str!("dashboard/graph.css"),
-                        )
-                    }),
-                )
-                .route(
-                    "/dashboard/graph3d.js",
-                    get(|| async {
-                        dashboard_asset(
-                            "text/javascript; charset=utf-8",
-                            include_str!("dashboard/graph3d.js"),
-                        )
-                    }),
-                )
-                .route(
-                    "/dashboard/ambience.js",
-                    get(|| async {
-                        dashboard_asset(
-                            "text/javascript; charset=utf-8",
-                            include_str!("dashboard/ambience.js"),
-                        )
-                    }),
-                )
-                .route(
-                    "/dashboard/three.min.js",
-                    get(|| async {
-                        dashboard_asset(
-                            "text/javascript; charset=utf-8",
-                            include_str!("../site/assets/vendor/three/three.min.js"),
-                        )
-                    }),
-                )
-                .route(
-                    "/dashboard/three.LICENSE",
-                    get(|| async {
-                        dashboard_asset(
-                            "text/plain; charset=utf-8",
-                            include_str!("../site/assets/vendor/three/LICENSE"),
-                        )
-                    }),
-                )
-                .route(
-                    "/dashboard/fonts/outfit-latin-wght-normal.woff2",
-                    get(|| async {
-                        dashboard_asset(
-                            "font/woff2",
-                            include_bytes!("../site/assets/fonts/outfit-latin-wght-normal.woff2")
-                                .as_slice(),
-                        )
-                    }),
-                )
-                .route(
-                    "/dashboard/fonts/jetbrains-mono-latin-wght-normal.woff2",
-                    get(|| async {
-                        dashboard_asset(
-                            "font/woff2",
-                            include_bytes!(
-                                "../site/assets/fonts/jetbrains-mono-latin-wght-normal.woff2"
-                            )
-                            .as_slice(),
-                        )
-                    }),
-                )
-                .route(
-                    "/dashboard/fonts/OFL-Outfit.txt",
-                    get(|| async {
-                        dashboard_asset(
-                            "text/plain; charset=utf-8",
-                            include_str!("../site/assets/fonts/OFL-Outfit.txt"),
-                        )
-                    }),
-                )
-                .route(
-                    "/dashboard/fonts/OFL-JetBrainsMono.txt",
-                    get(|| async {
-                        dashboard_asset(
-                            "text/plain; charset=utf-8",
-                            include_str!("../site/assets/fonts/OFL-JetBrainsMono.txt"),
-                        )
-                    }),
-                )
-                .route(
-                    "/dashboard/theme.css",
-                    get(|| async {
-                        dashboard_asset(
-                            "text/css; charset=utf-8",
-                            include_str!("../site/assets/theme.css"),
-                        )
-                    }),
-                )
-                .route(
-                    "/dashboard/style.css",
-                    get(|| async {
-                        dashboard_asset(
-                            "text/css; charset=utf-8",
-                            include_str!("dashboard/style.css"),
-                        )
-                    }),
-                )
+                .merge(dashboard_routes())
                 .route("/ready", get(ready))
                 .route("/metrics", get(observability::metrics_route))
                 .route("/v1/admin/logs", get(observability::logs))
@@ -1226,6 +1061,176 @@ fn routes(service: Service) -> Router {
             reader_staleness::headers,
         ))
         .with_state(service)
+}
+
+/// The dashboard's static assets (public). Shared by the standalone router
+/// and, when its `dashboard` block is configured, the gateway (OD-004).
+pub(super) fn dashboard_routes<S: Clone + Send + Sync + 'static>() -> Router<S> {
+    Router::new()
+        .route(
+            "/dashboard",
+            get(|| async {
+                dashboard_asset(
+                    "text/html; charset=utf-8",
+                    include_str!("dashboard/index.html"),
+                )
+            }),
+        )
+        .route(
+            "/dashboard/app.js",
+            get(|| async {
+                dashboard_asset(
+                    "text/javascript; charset=utf-8",
+                    include_str!("dashboard/app.js"),
+                )
+            }),
+        )
+        .route(
+            "/dashboard/navigation.js",
+            get(|| async {
+                dashboard_asset(
+                    "text/javascript; charset=utf-8",
+                    include_str!("dashboard/navigation.js"),
+                )
+            }),
+        )
+        .route(
+            "/dashboard/observability.js",
+            get(|| async {
+                dashboard_asset(
+                    "text/javascript; charset=utf-8",
+                    include_str!("dashboard/observability.js"),
+                )
+            }),
+        )
+        .route(
+            "/dashboard/console-tools.js",
+            get(|| async {
+                dashboard_asset(
+                    "text/javascript; charset=utf-8",
+                    include_str!("dashboard/console-tools.js"),
+                )
+            }),
+        )
+        .route(
+            "/dashboard/admin-tools.js",
+            get(|| async {
+                dashboard_asset(
+                    "text/javascript; charset=utf-8",
+                    include_str!("dashboard/admin-tools.js"),
+                )
+            }),
+        )
+        .route(
+            "/dashboard/graph.js",
+            get(|| async {
+                dashboard_asset(
+                    "text/javascript; charset=utf-8",
+                    include_str!("dashboard/graph.js"),
+                )
+            }),
+        )
+        .route(
+            "/dashboard/graph.css",
+            get(|| async {
+                dashboard_asset(
+                    "text/css; charset=utf-8",
+                    include_str!("dashboard/graph.css"),
+                )
+            }),
+        )
+        .route(
+            "/dashboard/graph3d.js",
+            get(|| async {
+                dashboard_asset(
+                    "text/javascript; charset=utf-8",
+                    include_str!("dashboard/graph3d.js"),
+                )
+            }),
+        )
+        .route(
+            "/dashboard/ambience.js",
+            get(|| async {
+                dashboard_asset(
+                    "text/javascript; charset=utf-8",
+                    include_str!("dashboard/ambience.js"),
+                )
+            }),
+        )
+        .route(
+            "/dashboard/three.min.js",
+            get(|| async {
+                dashboard_asset(
+                    "text/javascript; charset=utf-8",
+                    include_str!("../site/assets/vendor/three/three.min.js"),
+                )
+            }),
+        )
+        .route(
+            "/dashboard/three.LICENSE",
+            get(|| async {
+                dashboard_asset(
+                    "text/plain; charset=utf-8",
+                    include_str!("../site/assets/vendor/three/LICENSE"),
+                )
+            }),
+        )
+        .route(
+            "/dashboard/fonts/outfit-latin-wght-normal.woff2",
+            get(|| async {
+                dashboard_asset(
+                    "font/woff2",
+                    include_bytes!("../site/assets/fonts/outfit-latin-wght-normal.woff2")
+                        .as_slice(),
+                )
+            }),
+        )
+        .route(
+            "/dashboard/fonts/jetbrains-mono-latin-wght-normal.woff2",
+            get(|| async {
+                dashboard_asset(
+                    "font/woff2",
+                    include_bytes!("../site/assets/fonts/jetbrains-mono-latin-wght-normal.woff2")
+                        .as_slice(),
+                )
+            }),
+        )
+        .route(
+            "/dashboard/fonts/OFL-Outfit.txt",
+            get(|| async {
+                dashboard_asset(
+                    "text/plain; charset=utf-8",
+                    include_str!("../site/assets/fonts/OFL-Outfit.txt"),
+                )
+            }),
+        )
+        .route(
+            "/dashboard/fonts/OFL-JetBrainsMono.txt",
+            get(|| async {
+                dashboard_asset(
+                    "text/plain; charset=utf-8",
+                    include_str!("../site/assets/fonts/OFL-JetBrainsMono.txt"),
+                )
+            }),
+        )
+        .route(
+            "/dashboard/theme.css",
+            get(|| async {
+                dashboard_asset(
+                    "text/css; charset=utf-8",
+                    include_str!("../site/assets/theme.css"),
+                )
+            }),
+        )
+        .route(
+            "/dashboard/style.css",
+            get(|| async {
+                dashboard_asset(
+                    "text/css; charset=utf-8",
+                    include_str!("dashboard/style.css"),
+                )
+            }),
+        )
 }
 
 /// The served OpenAPI document: `openapi.json` unchanged, plus the graph

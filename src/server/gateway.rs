@@ -26,7 +26,9 @@
 //! audience and lineage, so one `shared-pool` backend serves several
 //! tenants. Opted-in reads target the reader, with one writer fallback on
 //! failure or an ineligible reader response (ITEM-021). Writes use the writer.
-//! Untenanted and super-admin requests have no route (OD-004/OD-012).
+//! Dashboard users signed in at the gateway (OD-004) route by their
+//! session's tenant; untenanted and super-admin requests have no route
+//! (OD-012).
 //!
 //! Dedicated responses must stamp an epoch at least as new as the dispatched
 //! and latest same-lineage directory epochs before any response is streamed.
@@ -65,7 +67,7 @@ pub(super) struct Classification {
     pub(super) need: Need,
 }
 
-/// Every registered REST route (187) as (method, template).
+/// Every registered REST route (188) as (method, template).
 const ROUTES: &[(&str, &str)] = &[
     ("GET", "/dashboard"),
     ("GET", "/dashboard/admin-tools.js"),
@@ -135,6 +137,7 @@ const ROUTES: &[(&str, &str)] = &[
     ("POST", "/v1/admin/restores"),
     ("POST", "/v1/admin/restores/select"),
     ("GET", "/v1/admin/serve-status"),
+    ("GET", "/v1/admin/tenant-deployment-operations"),
     ("GET", "/v1/admin/tenant-deployment-operations/{operation}"),
     (
         "POST",
@@ -422,8 +425,9 @@ pub(super) struct Target {
 /// Why an authenticated request has no backend.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum RouteRefusal {
-    /// The credential has no tenant; how such requests pass a gateway is
-    /// still open (OD-004, OD-012).
+    /// The credential has no tenant. Dashboard sessions always carry one
+    /// (OD-004); untenanted and super-admin access through a gateway is
+    /// still open (OD-012).
     NoTenant,
     /// The tenant has no directory record.
     NoRecord,

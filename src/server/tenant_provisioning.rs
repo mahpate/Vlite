@@ -32,7 +32,7 @@ use super::cloud_backup::{Cond, ObjectStore, StoreError};
 use super::control_state::{self, Objects, Receipt, Route, Slot, Snapshot};
 use super::*;
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) use super::control_state::OperationKind as Kind;
 
@@ -391,10 +391,19 @@ impl Sealed {
 
 // ----------------------------------------------------------- operations
 
+const INDETERMINATE: &str = "operation_indeterminate";
+
+/// Whether `error` leaves an outcome unknown: an operation-store write that
+/// may have landed, or a cloud action that may have taken effect. Such an
+/// error must be reconciled, never read as a refusal.
+pub(super) fn outcome_unknown(error: &ApiError) -> bool {
+    matches!(error.code, INDETERMINATE | aca::OUTCOME_UNKNOWN)
+}
+
 fn indeterminate() -> ApiError {
     ApiError::new(
         StatusCode::SERVICE_UNAVAILABLE,
-        "operation_indeterminate",
+        INDETERMINATE,
         "operation write outcome is unknown; retry with the same idempotency key or operation ID",
     )
 }
@@ -657,6 +666,22 @@ impl Operations {
             contents.insert(digest.clone(), content);
         }
         Ok(Loaded { intent, contents })
+    }
+
+    /// ITEM-023: up to `count` operation IDs above `after`, ascending. An
+    /// operation exists iff its intent does, as [`Self::load`] decides;
+    /// every other name under the prefix is ignored. Each call lists the
+    /// whole prefix (`after` and `count` only trim the result), so the
+    /// store's listing cap also caps how many operations can be listed.
+    pub(super) fn ids(&self, after: Option<&str>, count: usize) -> Result<Vec<String>, ApiError> {
+        let root = format!("{}/operations/", self.prefix);
+        let names = self.store.list(&root).map_err(|_| unavailable())?;
+        let ids: BTreeSet<&str> = names
+            .iter()
+            .filter_map(|name| name.strip_prefix(&root)?.strip_suffix("/intent.json"))
+            .filter(|id| is_hex(id, 32) && after.is_none_or(|after| *id > after))
+            .collect();
+        Ok(ids.into_iter().take(count).map(str::to_owned).collect())
     }
 
     // ------------------------------------------------------- journal
@@ -1779,8 +1804,12 @@ pub(super) fn activate_create(
 
 mod aca;
 mod admin;
+mod arm;
+mod digest;
 pub(super) mod guard;
 pub(super) mod projection;
+mod resource_id;
+mod worker;
 
 pub(super) use admin::Deployments;
 pub use admin::{TenantDeployments, TenantDeploymentsConfig, tenant_deployment_command};
@@ -1800,6 +1829,10 @@ pub(super) fn routes() -> Router<Service> {
         .route(
             "/v1/admin/tenant-deployments/{tenant}/retire",
             post(admin::retire),
+        )
+        .route(
+            "/v1/admin/tenant-deployment-operations",
+            get(admin::operation_list),
         )
         .route(
             "/v1/admin/tenant-deployment-operations/{operation}",

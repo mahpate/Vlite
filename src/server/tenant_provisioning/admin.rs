@@ -473,6 +473,29 @@ fn status(deployments: &Deployments, operation_id: &str) -> Result<Value, ApiErr
     view(deployments, &load(deployments, operation_id)?)
 }
 
+/// ITEM-023: one page of [`status`] views, ascending by operation ID after
+/// the exclusive `after`. Reads only the page's records, then the control
+/// state once; `next_after` is set iff more operations follow the page.
+fn list(deployments: &Deployments, after: Option<&str>, limit: usize) -> Result<Value, ApiError> {
+    let mut ids = deployments.ops.ids(after, limit + 1)?;
+    let more = ids.len() > limit;
+    ids.truncate(limit);
+    let mut records = Vec::with_capacity(ids.len());
+    for id in &ids {
+        let intent = load(deployments, id)?;
+        let journal = deployments.ops.journal(id)?;
+        let terminal = deployments.ops.terminal(id)?;
+        records.push((intent, journal, terminal));
+    }
+    let (snapshot, _) = deployments.objects.read()?;
+    let operations: Vec<Value> = records
+        .iter()
+        .map(|(intent, journal, terminal)| render(intent, &snapshot, journal, terminal.as_ref()))
+        .collect();
+    let next_after = if more { ids.last() } else { None };
+    Ok(json!({"operations": operations, "next_after": next_after}))
+}
+
 /// The stored action under `name`, refusing a different request under the
 /// same key.
 fn stored_action(
@@ -877,6 +900,56 @@ pub(super) async fn operation_status(
     Ok(Json(json!({"operation": view})))
 }
 
+/// ITEM-023: the query of `GET /v1/admin/tenant-deployment-operations`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ListQuery {
+    after: Option<String>,
+    limit: Option<String>,
+}
+
+const DEFAULT_LIST_LIMIT: usize = 50;
+const MAX_LIST_LIMIT: usize = 100;
+
+fn invalid_query(message: impl Into<String>) -> ApiError {
+    ApiError::new(StatusCode::BAD_REQUEST, "invalid_query", message)
+}
+
+/// ITEM-023: pages of the redacted status of the recorded operations; it is
+/// read-only, so it records no audit event, like [`operation_status`].
+pub(super) async fn operation_list(
+    State(service): State<Service>,
+    role: Option<Extension<Role>>,
+    principal: Option<Extension<users::Principal>>,
+    query: Result<Query<ListQuery>, QueryRejection>,
+) -> Result<Json<Value>, ApiError> {
+    rest_actor(&service, role, principal)?;
+    let deployments = configured(&service)?;
+    let Query(query) = query.map_err(|_| invalid_query("invalid query parameters"))?;
+    let limit = match query.limit.as_deref() {
+        None => DEFAULT_LIST_LIMIT,
+        // Canonical decimal only: no sign, space or leading zero.
+        Some(text) => text
+            .parse()
+            .ok()
+            .filter(|limit| (1..=MAX_LIST_LIMIT).contains(limit) && limit.to_string() == text)
+            .ok_or_else(|| {
+                invalid_query(format!(
+                    "limit must be a decimal integer from 1 to {MAX_LIST_LIMIT}"
+                ))
+            })?,
+    };
+    if query
+        .after
+        .as_deref()
+        .is_some_and(|after| !is_hex(after, 32))
+    {
+        return Err(invalid_query("after must be an operation ID"));
+    }
+    let page = blocking(move || list(&deployments, query.after.as_deref(), limit)).await?;
+    Ok(Json(page))
+}
+
 pub(super) async fn operation_action(
     State(service): State<Service>,
     Path((operation, action)): Path<(String, String)>,
@@ -897,7 +970,7 @@ pub(super) async fn operation_action(
 
 // -------------------------------------------------------------------- CLI
 
-const USAGE: &str = "vlite-server tenant-deployment <create|readers|migrate|retire> --request-file <file> [--tenant <id>] | status --operation <id> | <resume|cancel|acknowledge-delivery|replace-credentials|rollback|release> --operation <id> --request-file <file>; every verb also takes --target-file <file> --object <name> --admin-dir <dir> [--shared-key-file <file>]";
+const USAGE: &str = "vlite-server tenant-deployment <create|readers|migrate|retire> --request-file <file> [--tenant <id>] | status --operation <id> | work [--operation <id>] | <resume|cancel|acknowledge-delivery|replace-credentials|rollback|release> --operation <id> --request-file <file>; every verb also takes --target-file <file> --object <name> --admin-dir <dir> [--shared-key-file <file>]";
 
 /// Bound for a request file: the operation records' own bound.
 fn read_request(path: &std::path::Path) -> Result<Vec<u8>, String> {
@@ -927,9 +1000,73 @@ pub(super) enum Command {
         verb: String,
         request: Vec<u8>,
     },
+    /// ITEM-022: one control-worker attempt ([`super::worker`]).
+    Work {
+        operation: Option<String>,
+        attempt: String,
+    },
 }
 
 const CLI_ACTOR: &str = "cli:tenant-deployment";
+
+/// ITEM-022: one control-worker invocation ([`super::worker::work`]) with
+/// its outcome audited. Idle when nothing can be claimed; an attempt that
+/// did not provision is an error whose message names the operation, the
+/// attempt and the outcome (`blocked`, `failed` or `unknown`).
+pub(super) fn work(
+    deployments: &Deployments,
+    log: Option<&audit::Log>,
+    proofs: &super::worker::Proofs,
+    adapter: &super::worker::Adapter<'_>,
+    operation: Option<&str>,
+    attempt: &str,
+) -> Result<Value, ApiError> {
+    let Some(done) = super::worker::work(
+        &deployments.objects,
+        &deployments.ops,
+        proofs,
+        adapter,
+        operation,
+        attempt,
+    )?
+    else {
+        return Ok(json!({"outcome": "idle"}));
+    };
+    let (id, outcome) = (&done.intent.operation_id, done.outcome.as_str());
+    let mut event = json!({
+        "event": "tenant_deployment_attempt",
+        "actor": CLI_ACTOR,
+        "operation_id": id,
+        "attempt": attempt,
+        "outcome": outcome,
+    });
+    if let Some(error) = &done.error {
+        event["code"] = json!(error.code);
+    }
+    let recorded = audit_event(log, event);
+    match done.error {
+        None => Ok(json!({
+            "outcome": outcome,
+            "operation_id": id,
+            "attempt": attempt,
+            "audit_recorded": recorded,
+            // A failed readback must not mask the recorded outcome.
+            "operation": view(deployments, &done.intent).ok(),
+        })),
+        Some(mut error) => {
+            let unrecorded = if recorded {
+                ""
+            } else {
+                "; the audit event was not recorded"
+            };
+            error.message = format!(
+                "{}; operation {id}, attempt {attempt}, outcome {outcome}{unrecorded}",
+                error.message
+            );
+            Err(error)
+        }
+    }
+}
 
 /// Runs one command against open stores (blocking); the CLI's testable core.
 pub(super) fn run(
@@ -987,6 +1124,15 @@ pub(super) fn run(
             audit_event(log, action_event(CLI_ACTOR, &operation, &verb));
             Ok(result)
         }
+        Command::Work { operation, attempt } => work(
+            deployments,
+            log,
+            // No production proof exists yet (OD-006), so preflight refuses.
+            &super::worker::Proofs::default(),
+            &super::worker::production_arm,
+            operation.as_deref(),
+            &attempt,
+        ),
     }
 }
 
@@ -1010,7 +1156,7 @@ pub fn tenant_deployment_command(args: &[OsString]) -> Result<Value, String> {
         "readers" => Some(Kind::SetReaders),
         "migrate" => Some(Kind::Migrate),
         "retire" => Some(Kind::Retire),
-        "status" => None,
+        "status" | "work" => None,
         other if Verb::parse(other).is_some() => None,
         _ => return Err(usage("the verb is not recognized")),
     };
@@ -1023,7 +1169,7 @@ pub fn tenant_deployment_command(args: &[OsString]) -> Result<Value, String> {
     match kind {
         Some(Kind::Create) => allowed.push("--request-file"),
         Some(_) => allowed.extend(["--request-file", "--tenant"]),
-        None if verb == "status" => allowed.push("--operation"),
+        None if verb == "status" || verb == "work" => allowed.push("--operation"),
         None => allowed.extend(["--operation", "--request-file"]),
     }
     let mut values = flags(rest, &allowed, USAGE)?;
@@ -1049,6 +1195,14 @@ pub fn tenant_deployment_command(args: &[OsString]) -> Result<Value, String> {
         },
         None if verb == "status" => Command::Status {
             operation: utf8("--operation", required("--operation")?)?,
+        },
+        None if verb == "work" => Command::Work {
+            operation: values
+                .remove("--operation")
+                .map(|value| utf8("--operation", value))
+                .transpose()?,
+            attempt: super::worker::attempt_id()
+                .map_err(|error| format!("{}: {}", error.code, error.message))?,
         },
         None => Command::Act {
             operation: utf8("--operation", required("--operation")?)?,
@@ -1094,7 +1248,7 @@ pub fn tenant_deployment_command(args: &[OsString]) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::cloud_backup::fake::Memory;
+    use crate::server::cloud_backup::fake::{Fault, Memory, Op};
     use crate::server::control_state::Route;
     use crate::server::{BearerToken, credentials};
     use axum::body::Body;
@@ -1690,6 +1844,226 @@ mod tests {
         assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 
+    const LIST: &str = "/v1/admin/tenant-deployment-operations";
+
+    /// ITEM-023 (TEST-015): the list is refused exactly like its sibling
+    /// status route, and a read-only token is not an administrator.
+    #[tokio::test]
+    async fn operation_list_needs_configuration_and_administrator_authentication() {
+        let unconfigured = fixture_with(false, Some(TOKEN));
+        let (status, body) = unconfigured.call("GET", LIST, None).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"]["code"], "tenant_deployments_not_configured");
+        let open = fixture_with(true, None);
+        let (status, body) = open.call_as(None, "GET", LIST, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+        assert_eq!(body["error"]["code"], "admin_auth_required");
+        let f = fixture();
+        let (status, _) = f.call_as(None, "GET", LIST, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let reader = "tenant_deployment_reader_0123456789_ABCDEFGHIJ";
+        f.service.admin.auth.lock().unwrap().read_only = Some(BearerToken::new(reader).unwrap());
+        let sibling = format!("{LIST}/{}", "0".repeat(32));
+        for path in [LIST, sibling.as_str()] {
+            let (status, body) = f.call_as(Some(reader), "GET", path, None).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{path}: {body}");
+            assert_eq!(body["error"]["code"], "read_only", "{path}");
+        }
+    }
+
+    /// ITEM-023 (TEST-015): pages of exactly the sibling's redacted status,
+    /// ascending by operation ID after an exclusive cursor.
+    #[tokio::test]
+    async fn operation_list_pages_the_redacted_status_by_operation_id() {
+        let f = fixture();
+        let (status, body) = f.call("GET", LIST, None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body, json!({"operations": [], "next_after": null}));
+        let reserved = f.create("list-reserved-secret-key").await;
+        let cancelled = f.create("list-cancelled-secret-key").await;
+        let (status, body) = f
+            .action(&cancelled, "cancel", "list-cancel-secret-key", json!({}))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let readers = json!({
+            "idempotency_key": "list-readers-secret-key",
+            "request": {"kind": "set_readers", "tenant_id": ROUTED, "fleet": {"state": "absent"}},
+        });
+        let path = format!("/v1/admin/tenant-deployments/{ROUTED}/readers");
+        let (status, accepted) = f.call("POST", &path, Some(readers)).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{accepted}");
+        let mut ids: Vec<String> = [&reserved, &cancelled, &accepted["operation"]]
+            .iter()
+            .map(|operation| operation["operation_id"].as_str().unwrap().to_owned())
+            .collect();
+        ids.sort();
+        let mut statuses = Vec::new();
+        for id in &ids {
+            let (status, body) = f.call("GET", &format!("{LIST}/{id}"), None).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            statuses.push(body["operation"].clone());
+        }
+        let mut phases: Vec<&str> = statuses
+            .iter()
+            .map(|operation| operation["phase"].as_str().unwrap())
+            .collect();
+        phases.sort();
+        assert_eq!(phases, ["accepted", "cancelled", "reserved"]);
+        for (query, expected) in [
+            (
+                String::new(),
+                json!({"operations": statuses, "next_after": null}),
+            ),
+            (
+                "?limit=3".to_owned(),
+                json!({"operations": statuses, "next_after": null}),
+            ),
+            (
+                "?limit=2".to_owned(),
+                json!({"operations": statuses[..2], "next_after": ids[1]}),
+            ),
+            (
+                format!("?after={}&limit=2", ids[1]),
+                json!({"operations": statuses[2..], "next_after": null}),
+            ),
+            (
+                format!("?limit=1&after={}", ids[0]),
+                json!({"operations": statuses[1..2], "next_after": ids[1]}),
+            ),
+            (
+                format!("?after={}", "0".repeat(32)),
+                json!({"operations": statuses, "next_after": null}),
+            ),
+            (
+                format!("?after={}", ids[2]),
+                json!({"operations": [], "next_after": null}),
+            ),
+            (
+                format!("?after={}", "f".repeat(32)),
+                json!({"operations": [], "next_after": null}),
+            ),
+        ] {
+            let (status, body) = f.call("GET", &format!("{LIST}{query}"), None).await;
+            assert_eq!(status, StatusCode::OK, "{query}: {body}");
+            assert_eq!(body, expected, "{query}");
+        }
+        let (_, body) = f.call("GET", LIST, None).await;
+        let text = body.to_string();
+        for secret in [
+            "list-reserved-secret-key",
+            "list-cancelled-secret-key",
+            "list-cancel-secret-key",
+            "list-readers-secret-key",
+            &sha("list-reserved-secret-key"),
+            SECRET,
+            PROFILE,
+            TOKEN,
+            "idempotency",
+        ] {
+            assert!(!text.contains(secret), "the list leaks {secret}: {text}");
+        }
+    }
+
+    /// ITEM-023: a malformed, out-of-range, repeated or unknown query
+    /// parameter is refused like kv's and logs' list queries.
+    #[tokio::test]
+    async fn operation_list_refuses_invalid_queries() {
+        let f = fixture();
+        let afters = [
+            "a".repeat(31),
+            "a".repeat(33),
+            "A".repeat(32),
+            "g".repeat(32),
+        ];
+        for query in [
+            "limit=0",
+            "limit=101",
+            "limit=-1",
+            "limit=%2B1",
+            "limit=+1",
+            "limit=%201",
+            "limit=1.0",
+            "limit=abc",
+            "limit=",
+            "limit=01",
+            "limit=1&limit=2",
+            "after=",
+            "after=not-an-operation-id",
+            "cursor=x",
+            "limit=1&tenant=x",
+        ]
+        .map(str::to_owned)
+        .into_iter()
+        .chain(afters.map(|after| format!("after={after}")))
+        {
+            let (status, body) = f.call("GET", &format!("{LIST}?{query}"), None).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{query}: {body}");
+            assert_eq!(body["error"]["code"], "invalid_query", "{query}");
+        }
+        for query in ["limit=1", "limit=100"] {
+            let (status, body) = f.call("GET", &format!("{LIST}?{query}"), None).await;
+            assert_eq!(status, StatusCode::OK, "{query}: {body}");
+        }
+    }
+
+    /// ITEM-023: an operation is listed iff its intent exists, as status
+    /// decides, and other names under the prefix are ignored. A page reads
+    /// only its own records; one it cannot read fails it as status fails.
+    #[tokio::test]
+    async fn operation_list_reads_only_its_page_and_ignores_stray_names() {
+        let f = fixture();
+        let mut ids = Vec::new();
+        for key in ["list-a", "list-b", "list-c"] {
+            let operation = f.create(key).await;
+            ids.push(operation["operation_id"].as_str().unwrap().to_owned());
+        }
+        ids.sort();
+        let (status, all) = f.call("GET", LIST, None).await;
+        assert_eq!(status, StatusCode::OK, "{all}");
+        for stray in [
+            format!("{PREFIX}/stray.json"),
+            format!("{PREFIX}/contents/{}", sha("stray")),
+            format!("{PREFIX}/operations/not-an-operation/intent.json"),
+            format!("{PREFIX}/operations/{}/intent.json", "A".repeat(32)),
+            format!("{PREFIX}/operations/{}/journal.json", "b".repeat(32)),
+            format!("{PREFIX}/operations/{}/actions/{}.json", ids[0], sha("x")),
+        ] {
+            f.memory.set_raw(&stray, b"{}");
+        }
+        assert_eq!(
+            f.call("GET", LIST, None).await,
+            (StatusCode::OK, all.clone())
+        );
+        let operations = all["operations"].as_array().unwrap();
+        // The third record is unreadable: only a page holding it fails.
+        f.memory.fault(
+            Op::Get,
+            &format!("{}/", ids[2]),
+            Fault::Refuse,
+            0,
+            usize::MAX,
+        );
+        let (status, body) = f.call("GET", &format!("{LIST}?limit=2"), None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            body,
+            json!({"operations": operations[..2], "next_after": ids[1]})
+        );
+        let single = f.call("GET", &format!("{LIST}/{}", ids[2]), None).await;
+        assert_eq!(single.0, StatusCode::SERVICE_UNAVAILABLE, "{}", single.1);
+        let after = format!("{LIST}?after={}", ids[1]);
+        assert_eq!(f.call("GET", &after, None).await, single);
+        // A corrupt intent fails its page with status's error too.
+        f.memory.set_raw(
+            &format!("{PREFIX}/operations/{}/intent.json", ids[0]),
+            b"not json",
+        );
+        let single = f.call("GET", &format!("{LIST}/{}", ids[0]), None).await;
+        assert_eq!(single.1["error"]["code"], "operation_state_invalid");
+        let first = format!("{LIST}?limit=1");
+        assert_eq!(f.call("GET", &first, None).await, single);
+    }
+
     #[tokio::test]
     async fn legacy_create_is_unchanged() {
         let f = fixture();
@@ -1817,6 +2191,51 @@ mod tests {
         let error =
             tenant_deployment_command(&args(&["status", "--request-file", "x"])).unwrap_err();
         assert!(error.starts_with("invalid_arguments"), "{error}");
+    }
+
+    /// ITEM-022: `work` takes only an optional `--operation` beside the
+    /// store flags, and holds the admin directory like every verb.
+    #[test]
+    fn cli_work_takes_an_optional_operation_under_the_admin_lock() {
+        let args = |values: &[&str]| values.iter().map(OsString::from).collect::<Vec<_>>();
+        for refused in [
+            &["work", "--request-file", "x"][..],
+            &["work", "--tenant", "t"],
+            &["work", "--operation"],
+            &["work"],
+        ] {
+            let error = tenant_deployment_command(&args(refused)).unwrap_err();
+            assert!(error.starts_with("invalid_arguments"), "{error}");
+        }
+        assert!(USAGE.contains("| work [--operation <id>] |"));
+        let directory = tempfile::tempdir().unwrap();
+        let (config, value) = runtime_files(directory.path());
+        let admin = directory.path().join("admin");
+        let opened = TenantDeploymentsConfig::read(&config)
+            .unwrap()
+            .open(&admin)
+            .unwrap();
+        let mut work = vec![
+            "work",
+            "--operation",
+            "0",
+            "--target-file",
+            value["target_file"].as_str().unwrap(),
+            "--object",
+            "control/state.json",
+            "--admin-dir",
+            admin.to_str().unwrap(),
+        ];
+        let error = tenant_deployment_command(&args(&work)).unwrap_err();
+        assert!(error.starts_with("admin_dir_busy"), "{error}");
+        drop(opened);
+        // Refused before any store request: the target's port is closed.
+        work.extend([
+            "--shared-key-file",
+            value["shared_key_file"].as_str().unwrap(),
+        ]);
+        let error = tenant_deployment_command(&args(&work)).unwrap_err();
+        assert!(error.starts_with("operation_not_found"), "{error}");
     }
 
     /// A `--tenant-deployments-file` naming a loopback emulator target

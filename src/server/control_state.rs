@@ -491,6 +491,11 @@ impl Snapshot {
         tenants::admit(&self.tenants, tenant).map(drop)
     }
 
+    /// `admit`, returning the admitted tenant (its name, for display).
+    pub(super) fn admitted(&self, tenant: &str) -> Result<tenants::Tenant, ApiError> {
+        tenants::admit(&self.tenants, tenant)
+    }
+
     /// The tenant's quota record, as `tenants::Store::quota` answers it.
     pub(super) fn tenant_quota(&self, tenant: &str) -> Result<Option<tenants::Tenant>, ApiError> {
         tenants::quota_in(&self.tenants, tenant)

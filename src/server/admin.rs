@@ -15,12 +15,16 @@ pub(super) enum Role {
     /// Scoped `vlk_` credential; holds no secret.
     Scoped(Arc<super::credentials::Grant>),
 }
+/// `Role::Scoped`'s name; a gateway dashboard session reports it too
+/// (`users::gateway_session`).
+pub(super) const SCOPED_ROLE: &str = "scoped";
+
 impl Role {
     pub(super) fn name(&self) -> &'static str {
         match self {
             Self::Admin => "admin",
             Self::ReadOnly => "read_only",
-            Self::Scoped(_) => "scoped",
+            Self::Scoped(_) => SCOPED_ROLE,
         }
     }
 }
@@ -769,31 +773,66 @@ async fn capabilities(
 /// Who the presented token is, for display only. Authorization still comes
 /// from `role` and `scope`; labels never contain secrets.
 fn identity(s: &Service, role: &Role, open: bool, user: Option<&super::users::Principal>) -> Value {
+    // A trusted backend has no tenant store; its fresh control state names
+    // the tenant (display only, so a stale view just omits the name).
     let tenant_name = |id: &Option<String>| {
-        id.as_ref().and_then(|id| {
-            s.admin
-                .tenants
-                .as_ref()
-                .and_then(|tenants| tenants.name(id))
-        })
+        let id = id.as_ref()?;
+        match (&s.trust, &s.admin.tenants) {
+            (Some(trust), _) => trust.tenant_quota(id).ok().flatten().map(|t| t.name),
+            (None, Some(tenants)) => tenants.name(id),
+            (None, None) => None,
+        }
     };
-    if let Some(user) = user {
-        let tenant = tenant_name(&user.tenant_id);
-        let mut label = user.username.clone();
-        if let Some(id) = &user.tenant_id {
+    // A signed-in dashboard user, direct or (OD-004) forwarded by a gateway.
+    let user_json = |user_id: Option<&str>,
+                     username: &str,
+                     account_role: super::users::AccountRole,
+                     tenant_id: &Option<String>,
+                     must_change_password: bool| {
+        let tenant = tenant_name(tenant_id);
+        let mut label = username.to_owned();
+        if let Some(id) = tenant_id {
             label.push_str(&format!(" · {}", tenant.as_deref().unwrap_or(id)));
         }
-        label.push_str(&format!(" · {}", user.role.label()));
-        return json!({"kind":"user","label":label,"user_id":user.user_id,
-            "username":user.username,"account_role":user.role.name(),
-            "tenant_id":user.tenant_id,"tenant_name":tenant,
-            "must_change_password":user.must_change_password});
+        label.push_str(&format!(" · {}", account_role.label()));
+        json!({"kind":"user","label":label,"user_id":user_id,
+            "username":username,"account_role":account_role.name(),
+            "tenant_id":tenant_id,"tenant_name":tenant,
+            "must_change_password":must_change_password})
+    };
+    if let Some(user) = user {
+        return user_json(
+            Some(&user.user_id),
+            &user.username,
+            user.role,
+            &user.tenant_id,
+            user.must_change_password,
+        );
     }
     match role {
         Role::Admin if open => json!({"kind":"open",
             "label":"Open access (no admin token configured; every caller is admin)"}),
         Role::Admin => json!({"kind":"super_admin","label":"Super admin (bootstrap admin token)"}),
         Role::ReadOnly => json!({"kind":"read_only","label":"Read-only token"}),
+        // OD-004: a dashboard user a gateway signed in, forwarded to a
+        // trusted backend as a session grant.
+        Role::Scoped(grant)
+            if !grant.api_credential
+                && super::credentials::user_account_id(&grant.id).is_some() =>
+        {
+            let account_role = if grant.allows(super::credentials::Op::Write) {
+                super::users::AccountRole::Editor
+            } else {
+                super::users::AccountRole::Viewer
+            };
+            user_json(
+                super::credentials::user_account_id(&grant.id),
+                &grant.name,
+                account_role,
+                &grant.tenant_id,
+                false,
+            )
+        }
         Role::Scoped(grant) => {
             let tenant_name = tenant_name(&grant.tenant_id);
             let mut label = format!("API key \"{}\" ({})", grant.name, grant.id);

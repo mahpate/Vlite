@@ -7,7 +7,7 @@
 //! `HttpOnly; SameSite=Strict` cookie, so a restart signs everyone out. A
 //! bearer token always wins over a cookie. Cookie requests must be
 //! same-origin, and state-changing ones must also send `X-VLite-Request`.
-use super::credentials::{Grant, Op};
+use super::credentials::{EDITOR_OPS, Grant, Op, VIEWER_OPS, user_principal_id};
 use super::*;
 use argon2::{Algorithm, Argon2, Params, Version};
 use axum::http::HeaderValue;
@@ -19,6 +19,8 @@ use std::{
     path::{Path as FilePath, PathBuf},
     time::Duration,
 };
+
+pub(super) mod gateway_session;
 
 const FILE: &str = "users.json";
 const SCHEMA: u32 = 1;
@@ -86,19 +88,6 @@ impl AccountRole {
         }
     }
 }
-
-const EDITOR_OPS: &[Op] = &[
-    Op::Read,
-    Op::Search,
-    Op::SearchBuild,
-    Op::Write,
-    Op::Import,
-    Op::Index,
-    Op::Collections,
-    Op::GraphRead,
-    Op::GraphWrite,
-];
-const VIEWER_OPS: &[Op] = &[Op::Read, Op::Search, Op::GraphRead];
 
 /// Per-account graph operation cap. The effective level is the lower of this
 /// and the role's (editor: write, viewer: read); a viewer can never hold
@@ -514,6 +503,12 @@ fn valid_token(value: &str) -> bool {
 
 /// The presented session token; the `__Host-` cookie wins over the plain one.
 fn session_token(headers: &HeaderMap) -> Option<String> {
+    cookie_value(headers, valid_token, false)
+}
+
+/// The first session cookie value `valid` accepts; the `__Host-` cookie wins
+/// over the plain one, and with `host_only` the plain one is ignored.
+fn cookie_value(headers: &HeaderMap, valid: fn(&str) -> bool, host_only: bool) -> Option<String> {
     let (mut host, mut plain) = (None, None);
     for value in headers.get_all(header::COOKIE) {
         let Ok(text) = value.to_str() else {
@@ -524,12 +519,12 @@ fn session_token(headers: &HeaderMap) -> Option<String> {
                 continue;
             };
             let value = value.trim();
-            if !valid_token(value) {
+            if !valid(value) {
                 continue;
             }
             match name.trim() {
                 HOST_COOKIE if host.is_none() => host = Some(value.to_owned()),
-                COOKIE if plain.is_none() => plain = Some(value.to_owned()),
+                COOKIE if plain.is_none() && !host_only => plain = Some(value.to_owned()),
                 _ => {}
             }
         }
@@ -860,18 +855,34 @@ impl Accounts {
     }
 
     /// Milliseconds until a locked key may try again, if any key is locked.
+    /// A key with no record also waits while every record is locked: `fail`
+    /// could not record its failure, so a guess must not be checked at all.
     fn locked(&self, keys: &[String], now: u64) -> Result<Option<u64>, ApiError> {
         let failures = self.failures.lock().map_err(internal)?;
-        Ok(keys
+        let wait = keys
             .iter()
             .filter_map(|key| failures.get(key))
             .map(|f| f.locked_until.saturating_sub(now))
             .filter(|wait| *wait > 0)
-            .max())
+            .max();
+        if wait.is_none()
+            && failures.len() >= MAX_THROTTLE_KEYS
+            && keys.iter().any(|key| !failures.contains_key(key))
+        {
+            let soonest = failures
+                .values()
+                .map(|f| f.locked_until.saturating_sub(now))
+                .min()
+                .unwrap_or(0);
+            return Ok((soonest > 0).then_some(soonest));
+        }
+        Ok(wait)
     }
 
     /// Records a failure per key. Past `free` failures a key locks for 1s,
-    /// 2s, 4s, ... up to 15 minutes; counts reset after an idle hour.
+    /// 2s, 4s, ... up to 15 minutes; counts reset after an idle hour. A full
+    /// table evicts the unlocked key with the fewest failures, so a flood of
+    /// new names cannot cheaply reset a key that has built up failures.
     fn fail(&self, keys: &[(String, u32)], now: u64) -> Result<(), ApiError> {
         let mut failures = self.failures.lock().map_err(internal)?;
         for (key, free) in keys {
@@ -883,7 +894,7 @@ impl Accounts {
                     let oldest = failures
                         .iter()
                         .filter(|(_, f)| f.locked_until <= now)
-                        .min_by_key(|(_, f)| f.last)
+                        .min_by_key(|(_, f)| (f.count, f.last))
                         .map(|(k, _)| k.clone());
                     let Some(oldest) = oldest else {
                         return Err(ApiError::new(
@@ -1149,8 +1160,14 @@ fn read_store(directory: &FilePath) -> std::io::Result<Vec<Account>> {
     std::fs::File::open(&path)?
         .take(MAX_FILE_BYTES + 1)
         .read_to_end(&mut text)?;
-    let file: StoreFile = serde_json::from_slice(&text)
-        .map_err(|_| std::io::Error::other("users.json is invalid"))?;
+    parse_store(&text)
+}
+
+/// Parses and validates `users.json` content (also the gateway's exported
+/// copy, `gateway_session`).
+fn parse_store(text: &[u8]) -> std::io::Result<Vec<Account>> {
+    let file: StoreFile =
+        serde_json::from_slice(text).map_err(|_| std::io::Error::other("users.json is invalid"))?;
     let (mut ids, mut names) = (HashSet::new(), HashSet::new());
     if file.schema != SCHEMA
         || file.users.len() > CAPACITY
@@ -1454,19 +1471,7 @@ fn sign_in(
         AccountRole::SuperAdmin => admin::Role::Admin,
         _ => {
             let lineage = service.lineage.ok_or_else(accounts_require_upgrade)?;
-            #[allow(unused_mut)]
-            let mut grant = Grant::for_user(
-                format!("user:{}", account.id),
-                account.username.clone(),
-                account.tenant_id.clone(),
-                &account.ops(),
-                lineage,
-                expires,
-            );
-            if let Some(graphs) = account.graphs.as_ref().filter(|_| !grant.graphs.is_empty()) {
-                grant.graphs.clone_from(graphs);
-            }
-            admin::Role::Scoped(Arc::new(grant))
+            admin::Role::Scoped(Arc::new(user_grant(&account, lineage, expires)))
         }
     };
     Ok(SignedIn {
@@ -1481,6 +1486,22 @@ fn sign_in(
             key,
         },
     })
+}
+
+/// The scoped grant a tenant editor or viewer session acts with.
+fn user_grant(account: &Account, lineage: u64, expires: u64) -> Grant {
+    let mut grant = Grant::for_user(
+        user_principal_id(&account.id),
+        account.username.clone(),
+        account.tenant_id.clone(),
+        &account.ops(),
+        lineage,
+        expires,
+    );
+    if let Some(graphs) = account.graphs.as_ref().filter(|_| !grant.graphs.is_empty()) {
+        grant.graphs.clone_from(graphs);
+    }
+    grant
 }
 
 /// Validates a role/tenant pairing against live tenants. Takes the tenants
@@ -1516,6 +1537,11 @@ fn user_view(service: &Service, account: &Account) -> Value {
         .tenant_id
         .as_deref()
         .and_then(|id| service.admin.tenants.as_ref()?.name(id));
+    account_view(account, tenant_name)
+}
+
+/// Public account fields with the tenant name already resolved.
+fn account_view(account: &Account, tenant_name: Option<String>) -> Value {
     #[allow(unused_mut)]
     let mut view = json!({
         "id": account.id,
@@ -1594,7 +1620,9 @@ struct LoginInput {
 }
 
 /// Public: verifies a username and password and starts a cookie session.
-/// Failures look identical whether or not the username exists.
+/// Failures look identical whether or not the username exists. A gateway
+/// signs in with `gateway_session::GatewaySessions::login`, which mirrors
+/// these checks without the audit record; change both together.
 async fn login(
     State(service): State<Service>,
     headers: HeaderMap,
@@ -1646,7 +1674,7 @@ async fn login(
             // Unknown names are not logged: people sometimes type a password there.
             let limiter = other
                 .as_ref()
-                .map_or_else(|| "login:unknown".to_owned(), |a| format!("user:{}", a.id));
+                .map_or_else(|| "login:unknown".to_owned(), |a| user_principal_id(&a.id));
             if log.should_record_denial(&limiter, "/v1/auth/login") {
                 let mut event = json!({"event":"user_login_failed","ip":ip});
                 if let Some(account) = &other {
@@ -1851,7 +1879,7 @@ async fn change_password(
             account.version += 1;
             account.updated_unix_ms = now();
             let updated = account.clone();
-            let event = json!({"event":"user_password_changed","actor":format!("user:{user_id}"),
+            let event = json!({"event":"user_password_changed","actor":user_principal_id(&user_id),
                 "user_id":user_id,"username":updated.username});
             store.commit(&log, users, next, event)?;
             Ok(updated)
@@ -2340,6 +2368,47 @@ mod tests {
             accounts.locked(&keys, 2_000 + FAILURE_DECAY_MS).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn a_full_throttle_table_holds_new_names_and_evicts_the_fewest_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        let accounts = Accounts::load(dir.path(), &settings()).unwrap();
+        let now = 10_000;
+        let locked = |count| Failures {
+            count,
+            last: now,
+            locked_until: now + 5_000,
+        };
+        {
+            let mut failures = accounts.failures.lock().unwrap();
+            for i in 0..MAX_THROTTLE_KEYS {
+                failures.insert(format!("u:{i}"), locked(10));
+            }
+        }
+        let new = ["u:new".to_owned()];
+        // Every record is locked, so a new name's failure could not be
+        // recorded: it waits instead of being checked.
+        assert_eq!(accounts.locked(&new, now).unwrap(), Some(5_000));
+        let refused = accounts.fail(&[("u:new".to_owned(), 0)], now).unwrap_err();
+        assert_eq!(refused.code, "too_many_attempts");
+
+        {
+            let mut failures = accounts.failures.lock().unwrap();
+            failures.get_mut("u:0").unwrap().locked_until = now;
+            *failures.get_mut("u:1").unwrap() = Failures {
+                count: 2,
+                last: now,
+                locked_until: 0,
+            };
+        }
+        assert_eq!(accounts.locked(&new, now).unwrap(), None);
+        accounts.fail(&[("u:new".to_owned(), 0)], now).unwrap();
+        let failures = accounts.failures.lock().unwrap();
+        assert_eq!(failures.len(), MAX_THROTTLE_KEYS);
+        assert!(failures.contains_key("u:new"));
+        assert!(failures.contains_key("u:0"), "more failures are kept");
+        assert!(!failures.contains_key("u:1"), "the fewest are evicted");
     }
 
     #[test]

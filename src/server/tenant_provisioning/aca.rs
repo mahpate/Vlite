@@ -1,9 +1,11 @@
 //! design-tenant-provisioning EPIC-004 ITEM-009/011: Azure Container Apps
 //! effects behind a mockable ARM port, journaled by the ITEM-003 contract.
 //!
-//! [`Arm`] is the port; nothing in production implements it, so no cloud
-//! action can be dispatched (OD-002: no platform proof that a former
-//! actuator stopped, and no qualified effects adapter). Every effect goes
+//! [`Arm`] is the port. ITEM-020's [`super::arm::ArmClient`] implements it,
+//! but production never builds one: the worker's single seam
+//! ([`super::worker::production_arm`]) still refuses, so no cloud action can
+//! be dispatched (OD-002: no platform proof that a former actuator stopped,
+//! and no qualified effects adapter). Every effect goes
 //! through one [`Driver`], which claims the operation first: without an
 //! `ActuatorStopped` proof a second attempt is refused before the port is
 //! called.
@@ -18,12 +20,15 @@
 //!   dispatches again. A resource that exists before its first dispatch is
 //!   refused, never adopted (so neither is the singleton); a prerequisite
 //!   the profile names as pre-existing is only read and verified.
-//! - ITEM-011: [`preflight`] needs a supported profile and qualification,
-//!   quota and budget proofs that no production code can produce yet
-//!   (OD-006), so it refuses; [`Driver::cleanup`] deletes, after a cancel,
-//!   only apps this operation created; [`Driver::retire`] removes the
-//!   verified route, stops the apps and seals `retired`. Data, archive and
-//!   every pre-existing or non-app resource are always retained.
+//! - ITEM-011: [`Profile::resolve`] reads a create operation's retained
+//!   writer profile under the strict EPIC-008 schema (no other operation
+//!   kind has one: `profile_unsupported`); [`preflight`] then needs
+//!   qualification, quota and budget proofs that no production code can
+//!   produce yet (OD-006), so it refuses; [`Driver::cleanup`] deletes,
+//!   after a cancel, only apps this operation created; [`Driver::retire`]
+//!   removes the verified route, stops the apps and seals `retired`. Data,
+//!   archive and every pre-existing or non-app resource are always
+//!   retained.
 //! - EPIC-005 ITEM-012/013 (offline): [`Driver::reserve_readers`] anchors a
 //!   reader change on the tenant's latest sealed receipt and plans the
 //!   route it will publish; [`Driver::set_readers`] creates or updates the
@@ -137,10 +142,18 @@ pub(super) struct Observed {
     pub(super) revisions: Revisions,
 }
 
-/// The ARM effects port. No production implementation exists (OD-002).
+/// The ARM effects port. [`super::arm::ArmClient`] implements it; nothing in
+/// production builds one yet (OD-002, [`super::worker::production_arm`]).
 pub(super) trait Arm {
-    /// Starts `call`; returns the cloud's asynchronous operation ID.
+    /// Starts `call`. `Ok` is a handle [`Arm::poll`] can watch; it may name
+    /// an effect the platform never accepted (an outcome unknown when the
+    /// request was sent), whose poll then never reports `Succeeded` on its
+    /// own. `Err(Refused)` means the call took no effect; `Err(Unknown)`
+    /// means whether it did is unknown and there is nothing to poll.
     fn begin(&self, call: &Call) -> Result<String, ArmError>;
+    /// One status check of `operation`. [`Driver`] polls a bounded number
+    /// of times without sleeping, so an implementation paces itself
+    /// (including any throttling back-off) before it answers.
     fn poll(&self, operation: &str) -> Result<Poll, ArmError>;
     /// The resource, or None when it does not exist.
     fn read(&self, resource: &str) -> Result<Option<Observed>, ArmError>;
@@ -148,7 +161,8 @@ pub(super) trait Arm {
 
 // --------------------------------------------------------------- profile
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub(super) enum Ownership {
     /// Created and owned by the operation.
     Owned,
@@ -172,25 +186,154 @@ pub(super) struct Demand {
     pub(super) memory_mib: u64,
 }
 
+/// EPIC-008: the approved writer deployment profile, the content a create
+/// operation retains as its `writer_profile`:
+/// `{"resources":[{"id":…,"ownership":"owned"|"verified","body":{…}}]}`
+/// and nothing else at either level. `id` is a strict `Microsoft.App`
+/// resource ID ([`resource_id::parse`]). An `owned` resource is a container
+/// app (never the live singleton) the operation creates with `body` as its
+/// ARM PUT body; a `verified` one already exists and is only read back
+/// against `body`, the subset it must match. No body carries secret
+/// material (secrets are separate secret-version references) or the owner
+/// tag (the adapter adds it), and every app runs a single revision.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Document {
+    resources: Vec<Entry>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Entry {
+    id: String,
+    ownership: Ownership,
+    body: Value,
+}
+
+/// A deployment profile: its resources in order, their peak demand and
+/// each resource's desired body.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Profile {
     resources: Vec<Desired>,
     peak: Demand,
+    bodies: BTreeMap<String, Value>,
 }
 
 impl Profile {
-    /// No approved profile schema exists yet (OD-006): a retained profile
-    /// is never interpreted as a deployable resource plan.
-    pub(super) fn resolve(_loaded: &Loaded) -> Result<Self, ApiError> {
-        Err(conflict(
-            "profile_unsupported",
-            "no approved deployment profile schema exists yet (OD-006); nothing is provisioned",
-        ))
+    /// A create operation's retained writer profile, read under the strict
+    /// [`Document`] schema; every refusal is a 422 that never echoes the
+    /// profile. No other operation kind has an approved profile schema yet
+    /// (OD-006). A resolved profile still provisions nothing without every
+    /// [`preflight`] proof.
+    pub(super) fn resolve(loaded: &Loaded) -> Result<Self, ApiError> {
+        let Payload::Create { writer_profile, .. } = &loaded.intent.payload else {
+            return Err(conflict(
+                "profile_unsupported",
+                "no approved deployment profile schema exists for this operation kind yet (OD-006); nothing is provisioned",
+            ));
+        };
+        // `load` verified every retained content, so it is present there.
+        let bytes = loaded.contents.get(writer_profile).ok_or_else(|| {
+            ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "operation_input_unavailable",
+                "retained operation content is missing or corrupt",
+            )
+        })?;
+        Self::parse(bytes)
+    }
+
+    fn parse(bytes: &[u8]) -> Result<Self, ApiError> {
+        let Ok(Document { resources: entries }) = serde_json::from_slice::<Document>(bytes) else {
+            return Err(invalid(
+                "writer profile does not match the deployment profile schema",
+            ));
+        };
+        if entries.is_empty() {
+            return Err(invalid("writer profile names no resources"));
+        }
+        let mut names = std::collections::BTreeSet::new();
+        let mut peak = Demand {
+            apps: 0,
+            cores_milli: 0,
+            memory_mib: 0,
+        };
+        let (mut resources, mut bodies) = (Vec::new(), BTreeMap::new());
+        for Entry {
+            id,
+            ownership,
+            body,
+        } in entries
+        {
+            let Some((kind, name)) = resource_id::parse(&id) else {
+                return Err(invalid("writer profile names an unsupported resource ID"));
+            };
+            // ARM compares the segments of a resource ID case-insensitively.
+            if !names.insert(id.to_ascii_lowercase()) {
+                return Err(invalid("writer profile names a resource twice"));
+            }
+            let app = kind == resource_id::Type::ContainerApp;
+            let owned = ownership == Ownership::Owned;
+            if owned && !app {
+                return Err(invalid("the operation may own only container apps"));
+            }
+            if owned && resource_id::singleton(name) {
+                return Err(invalid(
+                    "the operation never owns a live singleton resource",
+                ));
+            }
+            check_body(&body, app)?;
+            if app {
+                peak.apps = peak.apps.checked_add(1).ok_or_else(out_of_range)?;
+            }
+            if owned {
+                let (cores_milli, memory_mib) = demand(&body)?;
+                peak.cores_milli =
+                    (peak.cores_milli.checked_add(cores_milli)).ok_or_else(out_of_range)?;
+                peak.memory_mib =
+                    (peak.memory_mib.checked_add(memory_mib)).ok_or_else(out_of_range)?;
+            }
+            resources.push(Desired {
+                resource: id.clone(),
+                config_digest: digest::config_digest(&body),
+                app,
+                ownership,
+            });
+            bodies.insert(id, body);
+        }
+        let profile = Self {
+            resources,
+            peak,
+            bodies,
+        };
+        if !profile.valid() {
+            return Err(invalid("deployment profile is invalid"));
+        }
+        Ok(profile)
+    }
+
+    /// Each resource's desired body by ID; the ARM adapter is built from it.
+    pub(super) fn bodies(&self) -> &BTreeMap<String, Value> {
+        &self.bodies
     }
 
     #[cfg(test)]
     pub(super) fn for_test(resources: Vec<Desired>, peak: Demand) -> Self {
-        Self { resources, peak }
+        Self {
+            resources,
+            peak,
+            bodies: BTreeMap::new(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn resources(&self) -> &[Desired] {
+        &self.resources
+    }
+
+    #[cfg(test)]
+    pub(super) fn peak(&self) -> Demand {
+        self.peak
     }
 
     fn valid(&self) -> bool {
@@ -208,6 +351,162 @@ impl Profile {
             })
             && u32::try_from(apps).is_ok_and(|apps| apps <= self.peak.apps)
     }
+}
+
+/// A profile body is an object without secret material or the owner tag;
+/// an app's runs a single revision.
+fn check_body(body: &Value, app: bool) -> Result<(), ApiError> {
+    if !body.is_object() {
+        return Err(invalid("every writer profile body must be a JSON object"));
+    }
+    if secret(body) {
+        return Err(invalid(
+            "writer profile bodies must not carry secret material",
+        ));
+    }
+    match at(body, &["tags"])? {
+        None => {}
+        Some(Value::Object(tags)) if !tags.keys().any(|k| k.eq_ignore_ascii_case(OWNER_TAG)) => {}
+        Some(_) => {
+            return Err(invalid(
+                "writer profile tags must be an object without the owner tag",
+            ));
+        }
+    }
+    let mode = ["properties", "configuration", "activeRevisionsMode"];
+    if app && at(body, &mode)?.and_then(Value::as_str) != Some("Single") {
+        return Err(invalid(
+            "every container app must use activeRevisionsMode Single",
+        ));
+    }
+    Ok(())
+}
+
+/// Whether a key at any depth names secret material. A key-name heuristic
+/// only: a reference (`…SecretRef`) passes, and plaintext under a neutral
+/// key (e.g. `env[].value`) is not detected.
+fn secret(value: &Value) -> bool {
+    const NAMES: [&str; 7] = [
+        "password",
+        "secret",
+        "connectionstring",
+        "accountkey",
+        "sastoken",
+        "sharedkey",
+        "privatekey",
+    ];
+    match value {
+        Value::Object(map) => map.iter().any(|(key, value)| {
+            let key = key.to_ascii_lowercase();
+            (!key.ends_with("secretref") && NAMES.iter().any(|name| key.contains(name)))
+                || secret(value)
+        }),
+        Value::Array(items) => items.iter().any(secret),
+        _ => false,
+    }
+}
+
+/// The value at `path`, None where a step is absent or not an object. ARM
+/// may read a key in another letter case, so every key on the path must be
+/// spelled exactly and without another-case twin: a body never states one
+/// value to these checks and another to ARM.
+fn at<'a>(mut value: &'a Value, path: &[&str]) -> Result<Option<&'a Value>, ApiError> {
+    for key in path {
+        let Value::Object(map) = value else {
+            return Ok(None);
+        };
+        let mut spelled = map.iter().filter(|(k, _)| k.eq_ignore_ascii_case(key));
+        value = match (spelled.next(), spelled.next()) {
+            (None, _) => return Ok(None),
+            (Some((k, v)), None) if k.as_str() == *key => v,
+            _ => {
+                return Err(invalid(
+                    "a writer profile body spells a key the schema reads in another letter case",
+                ));
+            }
+        };
+    }
+    Ok(Some(value))
+}
+
+/// An owned app's peak demand in millicores and MiB: every container and
+/// init container at `maxReplicas`, twice for the overlap of a
+/// single-revision rollout. Integer arithmetic only, every step checked.
+fn demand(body: &Value) -> Result<(u64, u64), ApiError> {
+    let replicas = at(body, &["properties", "template", "scale", "maxReplicas"])?
+        .and_then(Value::as_u64)
+        .filter(|replicas| *replicas >= 1)
+        .ok_or_else(|| {
+            invalid("an owned container app needs an integral maxReplicas of at least 1")
+        })?;
+    let containers = at(body, &["properties", "template", "containers"])?
+        .and_then(Value::as_array)
+        .filter(|containers| !containers.is_empty())
+        .ok_or_else(|| invalid("an owned container app needs at least one container"))?;
+    let init: &[Value] = match at(body, &["properties", "template", "initContainers"])? {
+        None => &[],
+        Some(Value::Array(init)) => init,
+        Some(_) => return Err(invalid("initContainers must be a list")),
+    };
+    let (mut cores_milli, mut memory_mib) = (0u64, 0u64);
+    for container in containers.iter().chain(init) {
+        let cpu = millicores(at(container, &["resources", "cpu"])?).ok_or_else(|| {
+            invalid("every container needs a positive cpu with at most 3 decimals")
+        })?;
+        let memory = mebibytes(at(container, &["resources", "memory"])?)
+            .ok_or_else(|| invalid("every container needs a positive memory of whole MiB in Gi"))?;
+        cores_milli = cores_milli.checked_add(cpu).ok_or_else(out_of_range)?;
+        memory_mib = memory_mib.checked_add(memory).ok_or_else(out_of_range)?;
+    }
+    let factor = replicas.checked_mul(2).ok_or_else(out_of_range)?;
+    Ok((
+        cores_milli.checked_mul(factor).ok_or_else(out_of_range)?,
+        memory_mib.checked_mul(factor).ok_or_else(out_of_range)?,
+    ))
+}
+
+fn out_of_range() -> ApiError {
+    invalid("the writer profile's peak demand is out of range")
+}
+
+/// A cpu, a positive JSON number of cores with at most 3 decimals, in
+/// millicores. Without `arbitrary_precision`, the number's text is the
+/// shortest that round-trips it (`0.5`, `2`, `1e-7`).
+fn millicores(cpu: Option<&Value>) -> Option<u64> {
+    let Some(Value::Number(cpu)) = cpu else {
+        return None;
+    };
+    let text = cpu.to_string();
+    let decimals = text
+        .split_once('.')
+        .map_or(0, |(_, fraction)| fraction.len());
+    scaled(&text, 1000).filter(|milli| decimals <= 3 && *milli > 0)
+}
+
+/// A memory, a positive `<decimal>Gi` string of whole MiB, in MiB.
+fn mebibytes(memory: Option<&Value>) -> Option<u64> {
+    let gibibytes = memory?.as_str()?.strip_suffix("Gi")?;
+    scaled(gibibytes, 1024).filter(|mib| *mib > 0)
+}
+
+/// A plain decimal (`2`, `0.5`: no sign, exponent or space) times `unit`,
+/// when that is a whole number that fits.
+fn scaled(decimal: &str, unit: u64) -> Option<u64> {
+    let (whole, fraction) = decimal.split_once('.').unwrap_or((decimal, "0"));
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    if !digits(whole) || !digits(fraction) {
+        return None;
+    }
+    let fraction = fraction.trim_end_matches('0');
+    let scale = 10u64.checked_pow(u32::try_from(fraction.len()).ok()?)?;
+    let part = match fraction {
+        "" => 0,
+        fraction => fraction.parse::<u64>().ok()?.checked_mul(unit)?,
+    };
+    if part % scale != 0 {
+        return None;
+    }
+    (whole.parse::<u64>().ok()?.checked_mul(unit)?).checked_add(part / scale)
 }
 
 /// Qualification evidence for the profile (feature-aca-ha gates). Only
@@ -438,10 +737,13 @@ fn endpoint_valid(endpoint: &str) -> bool {
 
 // ---------------------------------------------------------------- errors
 
+/// The code of every cloud action whose outcome is unknown.
+pub(super) const OUTCOME_UNKNOWN: &str = "cloud_outcome_unknown";
+
 fn unknown() -> ApiError {
     ApiError::new(
         StatusCode::SERVICE_UNAVAILABLE,
-        "cloud_outcome_unknown",
+        OUTCOME_UNKNOWN,
         "the cloud action's outcome is unknown; resume the operation to reconcile it",
     )
 }

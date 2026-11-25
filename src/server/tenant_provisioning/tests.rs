@@ -362,6 +362,40 @@ fn stored_intent_with_unknown_fields_is_refused_on_recovery() {
     assert_eq!(w.ops.load(&id).unwrap_err().code, "operation_state_invalid");
 }
 
+/// ITEM-023: operation IDs come from intent names alone, ascending, after an
+/// exclusive cursor and bounded; every other name is ignored.
+#[test]
+fn operation_ids_are_listed_from_intent_names_in_order() {
+    let w = world();
+    let mut ids: Vec<String> = ["list-1", "list-2", "list-3"]
+        .iter()
+        .map(|key| w.accept(key, &create_payload("contoso")).unwrap().intent)
+        .map(|intent| intent.operation_id)
+        .collect();
+    ids.sort();
+    for stray in [
+        format!("{PREFIX}/intent.json"),
+        format!("{PREFIX}/contents/{}", sha(b"stray")),
+        format!("{PREFIX}/operations/{}/journal.json", "b".repeat(32)),
+        format!("{PREFIX}/operations/{}/intent.json", "A".repeat(32)),
+        format!("{PREFIX}/operations/{}/intent.json", "a".repeat(33)),
+        format!("{PREFIX}/operations/{}/intent.json.tmp", "c".repeat(32)),
+        format!("{PREFIX}/operations/x/{}/intent.json", ids[0]),
+        format!("{PREFIX}/operations/{}/actions/{}.json", ids[0], sha(b"x")),
+        format!("{PREFIX}-other/operations/{}/intent.json", "d".repeat(32)),
+    ] {
+        w.memory.set_raw(&stray, b"{}");
+    }
+    assert_eq!(w.ops.ids(None, 10).unwrap(), ids);
+    assert_eq!(w.ops.ids(None, 2).unwrap(), ids[..2]);
+    assert_eq!(w.ops.ids(Some(ids[0].as_str()), 10).unwrap(), ids[1..]);
+    assert_eq!(w.ops.ids(Some(ids[0].as_str()), 1).unwrap(), ids[1..2]);
+    assert!(w.ops.ids(Some(ids[2].as_str()), 10).unwrap().is_empty());
+    w.memory.fault(Op::List, PREFIX, Fault::Refuse, 0, 1);
+    let error = w.ops.ids(None, 10).unwrap_err();
+    assert_eq!(error.code, "operation_store_unavailable");
+}
+
 // ------------------------------------------------------------- ITEM-002
 
 #[test]
@@ -1795,13 +1829,19 @@ mod epic_004 {
     // --------------------------------------------------------- ITEM-011
 
     #[test]
-    fn preflight_refuses_every_missing_proof_and_no_profile_schema_exists() {
+    fn preflight_refuses_every_missing_proof_and_resolve_refuses_the_legacy_profile() {
         let w = world();
         let intent = w.intent_for_t(KEY);
         let loaded = w.ops.load(&intent.operation_id).unwrap();
+        // `PROFILE` predates the EPIC-008 writer profile schema.
+        let error = Profile::resolve(&loaded).unwrap_err();
         assert_eq!(
-            Profile::resolve(&loaded).unwrap_err().code,
-            "profile_unsupported"
+            (error.status, error.code, error.message.as_str()),
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "operation_request_invalid",
+                "writer profile does not match the deployment profile schema"
+            )
         );
         let profile = || Profile::for_test(vec![desired(APP1, true, Ownership::Owned)], PEAK);
         let (q, b) = (Qualification::for_test(), BudgetApproval::for_test());
@@ -5198,6 +5238,606 @@ mod epic_004 {
                 .flat_map(|r| r.pins)
                 .map(|p| p.id)
                 .collect()
+        }
+    }
+}
+
+// ------------------------------------------------------------- EPIC-008
+
+mod epic_008 {
+    //! design-tenant-provisioning EPIC-008: a create operation's retained
+    //! writer profile, read by `Profile::resolve` under the strict
+    //! deployment profile schema. Nothing is dispatched to any cloud.
+    use super::*;
+    use aca::{BudgetApproval, Demand, Ownership, Preflighted, Profile, Qualification, QuotaProof};
+
+    const SCOPE: &str = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-1/providers/Microsoft.App";
+    /// The approved example: the existing environment and the tenant's
+    /// storage are verified, the writer app is owned.
+    const EXAMPLE: &str = r#"{"resources":[
+ {"id":"/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-1/providers/Microsoft.App/managedEnvironments/vlite-env","ownership":"verified","body":{"location":"westus2"}},
+ {"id":"/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-1/providers/Microsoft.App/managedEnvironments/vlite-env/storages/tenant-a-data","ownership":"verified","body":{"properties":{"azureFile":{"accountName":"acct","shareName":"tenant-a","accessMode":"ReadWrite"}}}},
+ {"id":"/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-1/providers/Microsoft.App/containerApps/tenant-a-writer","ownership":"owned","body":{"location":"westus2","properties":{"environmentId":"/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-1/providers/Microsoft.App/managedEnvironments/vlite-env","configuration":{"activeRevisionsMode":"Single"},"template":{"containers":[{"name":"vlite","image":"example.azurecr.io/vlite@sha256:0000000000000000000000000000000000000000000000000000000000000000","resources":{"cpu":0.5,"memory":"1Gi"}}],"scale":{"minReplicas":1,"maxReplicas":1}}}}}
+]}"#;
+    const SCHEMA: &str = "writer profile does not match the deployment profile schema";
+    const CASE: &str = "a writer profile body spells a key the schema reads in another letter case";
+    const SINGLE: &str = "every container app must use activeRevisionsMode Single";
+    const REPLICAS: &str = "an owned container app needs an integral maxReplicas of at least 1";
+    const CONTAINERS: &str = "an owned container app needs at least one container";
+    const CPU: &str = "every container needs a positive cpu with at most 3 decimals";
+    const MEMORY: &str = "every container needs a positive memory of whole MiB in Gi";
+    const RANGE: &str = "the writer profile's peak demand is out of range";
+
+    fn example() -> Value {
+        serde_json::from_str(EXAMPLE).unwrap()
+    }
+
+    fn id(path: &str) -> String {
+        format!("{SCOPE}/{path}")
+    }
+
+    /// A stored create operation whose writer profile is `bytes`, loaded.
+    fn loaded(bytes: &[u8]) -> Loaded {
+        let ops = Operations::new(Arc::new(Memory::default()), PREFIX);
+        let contents = [bytes.to_vec(), INIT.to_vec()];
+        let payload = create_with("contoso", &sha(bytes));
+        let intent = ops
+            .accept(ADMIN, KEY, &payload, &contents, NOW)
+            .unwrap()
+            .intent;
+        ops.load(&intent.operation_id).unwrap()
+    }
+
+    fn resolve(profile: &Value) -> Result<Profile, ApiError> {
+        Profile::resolve(&loaded(&serde_json::to_vec(profile).unwrap()))
+    }
+
+    #[track_caller]
+    fn refused_with(result: Result<Profile, ApiError>, message: &str) {
+        let error = result.unwrap_err();
+        assert_eq!(
+            (error.status, error.code, error.message.as_str()),
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "operation_request_invalid",
+                message
+            )
+        );
+    }
+
+    /// The example with `change` applied is refused with `message`.
+    #[track_caller]
+    fn refused(change: impl FnOnce(&mut Value), message: &str) {
+        let mut profile = example();
+        change(&mut profile);
+        refused_with(resolve(&profile), message);
+    }
+
+    /// The example with `change` applied resolves.
+    #[track_caller]
+    fn resolves(change: impl FnOnce(&mut Value)) -> Profile {
+        let mut profile = example();
+        change(&mut profile);
+        resolve(&profile).unwrap()
+    }
+
+    /// The owned writer app's body.
+    fn writer(profile: &mut Value) -> &mut Value {
+        &mut profile["resources"][2]["body"]
+    }
+
+    fn template(profile: &mut Value) -> &mut Value {
+        &mut writer(profile)["properties"]["template"]
+    }
+
+    fn container(profile: &mut Value) -> &mut Value {
+        &mut template(profile)["containers"][0]
+    }
+
+    fn push(profile: &mut Value, resource: Value) {
+        profile["resources"].as_array_mut().unwrap().push(resource);
+    }
+
+    fn remove(value: &mut Value, key: &str) {
+        value.as_object_mut().unwrap().remove(key).unwrap();
+    }
+
+    #[test]
+    fn the_example_resolves_to_its_resources_digests_bodies_and_peak() {
+        let profile = Profile::resolve(&loaded(EXAMPLE.as_bytes())).unwrap();
+        let example = example();
+        let entries = example["resources"].as_array().unwrap();
+        let expected = [
+            (
+                id("managedEnvironments/vlite-env"),
+                false,
+                Ownership::Verified,
+            ),
+            (
+                id("managedEnvironments/vlite-env/storages/tenant-a-data"),
+                false,
+                Ownership::Verified,
+            ),
+            (id("containerApps/tenant-a-writer"), true, Ownership::Owned),
+        ];
+        assert_eq!(profile.resources().len(), expected.len());
+        assert_eq!(profile.bodies().len(), expected.len());
+        for ((desired, entry), (resource, app, ownership)) in
+            profile.resources().iter().zip(entries).zip(expected)
+        {
+            let body = &entry["body"];
+            assert_eq!(desired.resource, resource);
+            assert_eq!((desired.app, desired.ownership), (app, ownership));
+            assert_eq!(desired.config_digest, digest::config_digest(body));
+            assert_eq!(&profile.bodies()[&resource], body);
+        }
+        assert_eq!(
+            profile.peak(),
+            Demand {
+                apps: 1,
+                cores_milli: 1000,
+                memory_mib: 2048
+            }
+        );
+    }
+
+    #[test]
+    fn a_verified_singleton_app_is_accepted_and_counts_only_toward_apps() {
+        // Kept exactly as given, fixed segments in another case included.
+        let singleton = "/SUBSCRIPTIONS/00000000-0000-0000-0000-000000000000/resourcegroups/rg-1/providers/microsoft.app/containerApps/vlite-app";
+        let profile = resolves(|p| {
+            push(
+                p,
+                json!({
+                    "id": singleton,
+                    "ownership": "verified",
+                    "body": {"properties": {"configuration": {"activeRevisionsMode": "Single"}}}
+                }),
+            );
+        });
+        let added = &profile.resources()[3];
+        assert_eq!(
+            (added.resource.as_str(), added.app, added.ownership),
+            (singleton, true, Ownership::Verified)
+        );
+        assert_eq!(
+            profile.peak(),
+            Demand {
+                apps: 2,
+                cores_milli: 1000,
+                memory_mib: 2048
+            }
+        );
+    }
+
+    #[test]
+    fn owned_apps_count_every_container_at_max_replicas_twice() {
+        let profile = resolves(|p| {
+            template(p)["scale"]["maxReplicas"] = json!(3);
+            template(p)["containers"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"name": "side", "resources": {"cpu": 0.25, "memory": "0.5Gi"}}));
+            template(p)["initContainers"] =
+                json!([{"name": "init", "resources": {"cpu": 0.125, "memory": "1.75Gi"}}]);
+            let mut second = p["resources"][2].clone();
+            second["id"] = json!(id("containerApps/tenant-a-writer-2"));
+            second["body"]["properties"]["template"] = json!({
+                "containers": [{"name": "vlite", "resources": {"cpu": 2, "memory": "4Gi"}}],
+                "scale": {"maxReplicas": 1}
+            });
+            push(p, second);
+        });
+        // (500 + 250 + 125) m and (1024 + 512 + 1792) MiB at 2 x 3 replicas,
+        // then 2000 m and 4096 MiB at 2 x 1.
+        assert_eq!(
+            profile.peak(),
+            Demand {
+                apps: 2,
+                cores_milli: 9250,
+                memory_mib: 28160
+            }
+        );
+        // Exact at the smallest units: 1.999 cores and 1 MiB.
+        let profile = resolves(|p| {
+            container(p)["resources"] = json!({"cpu": 1.999, "memory": "0.0009765625Gi"});
+        });
+        assert_eq!(
+            profile.peak(),
+            Demand {
+                apps: 1,
+                cores_milli: 3998,
+                memory_mib: 2
+            }
+        );
+    }
+
+    #[test]
+    fn only_the_strict_schema_is_read() {
+        refused_with(Profile::resolve(&loaded(PROFILE)), SCHEMA);
+        refused_with(Profile::resolve(&loaded(b"{\"resources\":")), SCHEMA);
+        refused_with(Profile::resolve(&loaded(&[0xff, 0xfe])), SCHEMA);
+        refused(|p| p["version"] = json!(1), SCHEMA);
+        refused(|p| p["resources"][0]["name"] = json!("vlite-env"), SCHEMA);
+        for ownership in [
+            json!("adopted"),
+            json!("Owned"),
+            json!("VERIFIED"),
+            json!(null),
+        ] {
+            refused(|p| p["resources"][0]["ownership"] = ownership, SCHEMA);
+        }
+        for field in ["id", "ownership", "body"] {
+            refused(|p| remove(&mut p["resources"][0], field), SCHEMA);
+        }
+        refused(|p| p["resources"][0]["id"] = json!(7), SCHEMA);
+        refused(|p| p["resources"] = json!({}), SCHEMA);
+        refused(|p| *p = json!(null), SCHEMA);
+        refused(
+            |p| p["resources"] = json!([]),
+            "writer profile names no resources",
+        );
+    }
+
+    #[test]
+    fn ids_are_strict_and_unique_and_only_non_singleton_apps_are_owned() {
+        for bad in [
+            APP.to_owned(),
+            String::new(),
+            id("containerApps/Tenant-A-Writer"),
+            id("jobs/tenant-a-writer"),
+            id("containerApps/tenant-a-writer/revisions/r1"),
+            SCOPE.replace("Microsoft.App", "Microsoft.Storage") + "/storageAccounts/acct",
+        ] {
+            refused(
+                |p| p["resources"][2]["id"] = json!(bad),
+                "writer profile names an unsupported resource ID",
+            );
+        }
+        const TWICE: &str = "writer profile names a resource twice";
+        refused(
+            |p| {
+                let env = p["resources"][0].clone();
+                push(p, env);
+            },
+            TWICE,
+        );
+        refused(
+            |p| {
+                let mut env = p["resources"][0].clone();
+                env["id"] = json!(id("MANAGEDENVIRONMENTS/VLITE-ENV"));
+                push(p, env);
+            },
+            TWICE,
+        );
+        const APPS: &str = "the operation may own only container apps";
+        refused(|p| p["resources"][0]["ownership"] = json!("owned"), APPS);
+        refused(|p| p["resources"][1]["ownership"] = json!("owned"), APPS);
+        refused(
+            |p| p["resources"][2]["id"] = json!(id("containerApps/vlite-app")),
+            "the operation never owns a live singleton resource",
+        );
+    }
+
+    #[test]
+    fn bodies_are_objects_without_secret_material_or_the_owner_tag() {
+        for body in [json!(null), json!([]), json!("{}"), json!(1)] {
+            refused(
+                |p| p["resources"][0]["body"] = body,
+                "every writer profile body must be a JSON object",
+            );
+        }
+        const SECRET: &str = "writer profile bodies must not carry secret material";
+        refused(
+            |p| writer(p)["properties"]["configuration"]["secrets"] = json!([]),
+            SECRET,
+        );
+        refused(
+            |p| p["resources"][1]["body"]["properties"]["azureFile"]["accountKey"] = json!("k"),
+            SECRET,
+        );
+        refused(
+            |p| container(p)["env"] = json!([{"name": "a", "AccountKey": "k"}]),
+            SECRET,
+        );
+        refused(
+            |p| p["resources"][0]["body"]["x"] = json!([[{"y": {"PASSWORD": "p"}}]]),
+            SECRET,
+        );
+        refused(|p| writer(p)["Secrets"] = json!(null), SECRET);
+        for key in [
+            "clientSecret",
+            "connectionString",
+            "certificatePassword",
+            "sasToken",
+            "sharedKey",
+            "PRIVATEKEY",
+        ] {
+            refused(|p| writer(p)[key] = json!("v"), SECRET);
+            refused(
+                |p| container(p)["env"] = json!([{"name": "a", "x": [{ key: "v" }]}]),
+                SECRET,
+            );
+        }
+        const TAGS: &str = "writer profile tags must be an object without the owner tag";
+        for key in ["vlite-tenant", "VLite-Tenant", "VLITE-TENANT"] {
+            refused(
+                |p| p["resources"][0]["body"]["tags"] = json!({ key: "x" }),
+                TAGS,
+            );
+        }
+        for tags in [json!(null), json!([]), json!("vlite-tenant")] {
+            refused(|p| writer(p)["tags"] = tags, TAGS);
+        }
+        refused(|p| writer(p)["Tags"] = json!({"vlite-tenant": "x"}), CASE);
+        // A secret reference and other tags are not refused.
+        let profile = resolves(|p| {
+            writer(p)["tags"] = json!({"team": "a", "owner": "vlite-tenant"});
+            writer(p)["properties"]["configuration"]["registries"] =
+                json!([{"server": "example.azurecr.io", "passwordSecretRef": "registry"}]);
+            container(p)["env"] = json!([{"name": "a", "secretRef": "registry"}]);
+        });
+        assert_eq!(profile.resources().len(), 3);
+    }
+
+    #[test]
+    fn every_app_runs_a_single_revision() {
+        for mode in [
+            json!("Multiple"),
+            json!("single"),
+            json!("SINGLE"),
+            json!(null),
+            json!(true),
+        ] {
+            refused(
+                |p| writer(p)["properties"]["configuration"]["activeRevisionsMode"] = mode,
+                SINGLE,
+            );
+        }
+        refused(
+            |p| {
+                remove(
+                    &mut writer(p)["properties"]["configuration"],
+                    "activeRevisionsMode",
+                )
+            },
+            SINGLE,
+        );
+        refused(
+            |p| writer(p)["properties"]["configuration"] = json!("Single"),
+            SINGLE,
+        );
+        // A verified app is held to it too.
+        refused(
+            |p| {
+                push(
+                    p,
+                    json!({
+                        "id": id("containerApps/vlite-app"),
+                        "ownership": "verified",
+                        "body": {"location": "westus2"}
+                    }),
+                );
+            },
+            SINGLE,
+        );
+        // A key the schema reads is spelled exactly, alone or beside another
+        // case of it: ARM may read that one in its place.
+        refused(
+            |p| {
+                let properties = writer(p)
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("properties")
+                    .unwrap();
+                writer(p)["Properties"] = properties;
+            },
+            CASE,
+        );
+        refused(
+            |p| {
+                writer(p)["properties"]["Configuration"] =
+                    json!({"activeRevisionsMode": "Multiple"})
+            },
+            CASE,
+        );
+        refused(
+            |p| writer(p)["properties"]["configuration"]["activeRevisionsmode"] = json!("Multiple"),
+            CASE,
+        );
+    }
+
+    #[test]
+    fn an_owned_app_states_its_replicas_and_every_container_resource() {
+        refused(
+            |p| remove(&mut template(p)["scale"], "maxReplicas"),
+            REPLICAS,
+        );
+        refused(|p| remove(template(p), "scale"), REPLICAS);
+        for replicas in [
+            json!(0),
+            json!(-1),
+            json!(1.5),
+            json!(1.0),
+            json!("1"),
+            json!(null),
+        ] {
+            refused(|p| template(p)["scale"]["maxReplicas"] = replicas, REPLICAS);
+        }
+        refused(|p| template(p)["scale"]["MaxReplicas"] = json!(1000), CASE);
+        refused(|p| template(p)["containers"] = json!([]), CONTAINERS);
+        refused(|p| template(p)["containers"] = json!({}), CONTAINERS);
+        refused(|p| remove(template(p), "containers"), CONTAINERS);
+        refused(
+            |p| template(p)["initContainers"] = json!({}),
+            "initContainers must be a list",
+        );
+        for cpu in [
+            json!(0),
+            json!(0.0),
+            json!(0.1234),
+            json!("0.5"),
+            json!(-0.5),
+            json!(1e-7),
+            json!(1e300),
+            json!(null),
+        ] {
+            refused(|p| container(p)["resources"]["cpu"] = cpu, CPU);
+        }
+        refused(|p| remove(&mut container(p)["resources"], "cpu"), CPU);
+        refused(|p| remove(container(p), "resources"), CPU);
+        refused(|p| container(p)["resources"]["CPU"] = json!(4), CASE);
+        for memory in [
+            json!("0.1Gi"),
+            json!("1G"),
+            json!("1gi"),
+            json!("1024Mi"),
+            json!("0Gi"),
+            json!("1.Gi"),
+            json!(".5Gi"),
+            json!("+1Gi"),
+            json!(" 1Gi"),
+            json!(1),
+        ] {
+            refused(|p| container(p)["resources"]["memory"] = memory, MEMORY);
+        }
+        refused(|p| remove(&mut container(p)["resources"], "memory"), MEMORY);
+        // Init containers are held to the same rules, in any letter case.
+        refused(
+            |p| {
+                template(p)["initContainers"] = json!([{"name": "init", "resources": {"cpu": 0.5}}])
+            },
+            MEMORY,
+        );
+        refused(
+            |p| {
+                template(p)["InitContainers"] =
+                    json!([{"name": "init", "resources": {"cpu": 4, "memory": "8Gi"}}])
+            },
+            CASE,
+        );
+    }
+
+    #[test]
+    fn peak_demand_arithmetic_is_checked() {
+        refused(
+            |p| template(p)["scale"]["maxReplicas"] = json!(u64::MAX),
+            RANGE,
+        );
+        refused(
+            |p| template(p)["scale"]["maxReplicas"] = json!(1u64 << 62),
+            RANGE,
+        );
+        // Two containers that each fit but not together.
+        refused(
+            |p| {
+                container(p)["resources"]["memory"] = json!("16000000000000000Gi");
+                let again = container(p).clone();
+                template(p)["containers"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(again);
+            },
+            RANGE,
+        );
+        // Two apps that each fit but not together.
+        refused(
+            |p| {
+                template(p)["scale"]["maxReplicas"] = json!(1u64 << 52);
+                container(p)["resources"]["cpu"] = json!(1);
+                let mut second = p["resources"][2].clone();
+                second["id"] = json!(id("containerApps/tenant-a-writer-2"));
+                push(p, second);
+            },
+            RANGE,
+        );
+        // One value beyond the range is itself invalid.
+        refused(
+            |p| container(p)["resources"]["memory"] = json!("18014398509481984Gi"),
+            MEMORY,
+        );
+        refused(|p| container(p)["resources"]["cpu"] = json!(u64::MAX), CPU);
+    }
+
+    #[test]
+    fn missing_writer_profile_content_is_unavailable() {
+        let mut l = loaded(EXAMPLE.as_bytes());
+        l.contents.remove(&sha(EXAMPLE.as_bytes())).unwrap();
+        let error = Profile::resolve(&l).unwrap_err();
+        assert_eq!(
+            (error.status, error.code),
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "operation_input_unavailable"
+            )
+        );
+    }
+
+    #[test]
+    fn no_other_operation_kind_has_a_profile_schema() {
+        let mut l = loaded(EXAMPLE.as_bytes());
+        // Even a schema-valid retained profile is not read for them.
+        let content = sha(EXAMPLE.as_bytes());
+        for payload in [
+            Payload::SetReaders {
+                tenant_id: T.into(),
+                fleet: Fleet::Absent {},
+            },
+            Payload::Retire {
+                tenant_id: T.into(),
+                expected_receipt: "receipt".into(),
+                reason: "done".into(),
+                data_disposition: DataDisposition::Retain,
+            },
+            Payload::Migrate {
+                tenant_id: T.into(),
+                expected_source_route: "route".into(),
+                expected_source_lineage: 1,
+                target_profile: content.clone(),
+                resources: vec![APP.into()],
+                migration_profile: content.clone(),
+                verification_policy: content.clone(),
+                onboarding_policy: content,
+            },
+        ] {
+            l.intent.payload = payload;
+            let error = Profile::resolve(&l).unwrap_err();
+            assert_eq!(
+                (error.status, error.code),
+                (StatusCode::CONFLICT, "profile_unsupported")
+            );
+        }
+    }
+
+    #[test]
+    fn a_resolved_profile_still_needs_every_production_proof() {
+        let profile = || Profile::resolve(&loaded(EXAMPLE.as_bytes())).unwrap();
+        let code = |r: Result<Preflighted, ApiError>| r.err().unwrap().code;
+        // Production holds no qualification, quota or budget proof.
+        assert_eq!(
+            code(aca::preflight(profile(), None, None, None)),
+            "qualification_missing"
+        );
+        let (q, b) = (Qualification::for_test(), BudgetApproval::for_test());
+        let peak = profile().peak();
+        let room = QuotaProof::for_test(peak);
+        assert!(aca::preflight(profile(), Some(&q), Some(&room), Some(&b)).is_ok());
+        for short in [
+            Demand { apps: 0, ..peak },
+            Demand {
+                cores_milli: peak.cores_milli - 1,
+                ..peak
+            },
+            Demand {
+                memory_mib: peak.memory_mib - 1,
+                ..peak
+            },
+        ] {
+            let short = QuotaProof::for_test(short);
+            assert_eq!(
+                code(aca::preflight(profile(), Some(&q), Some(&short), Some(&b))),
+                "quota_exceeded"
+            );
         }
     }
 }

@@ -1330,13 +1330,8 @@ fn serve_until_unpin(
         reader.read_line(&mut first).unwrap();
         let fields: Vec<&str> = first.split_whitespace().collect();
         let method = fields[0];
-        let name = fields[1]
-            .split('?')
-            .next()
-            .unwrap()
-            .rsplit('/')
-            .next()
-            .unwrap();
+        let (path, query) = fields[1].split_once('?').unwrap_or((fields[1], ""));
+        let name = path.rsplit('/').next().unwrap();
         let mut length = 0;
         loop {
             let mut line = String::new();
@@ -1370,6 +1365,18 @@ fn serve_until_unpin(
             stream
                 .write_all(b"HTTP/1.1 201 Created\r\nETag: \"1\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
                 .unwrap();
+        } else if query.contains("comp=list") {
+            // A record pin counts reader pin objects; this set has none.
+            assert_eq!(method, "GET", "{first}");
+            assert!(query.contains("prefix=cli%2Freader-pins%2F"), "{first}");
+            let listing = b"<EnumerationResults><Blobs /><NextMarker /></EnumerationResults>";
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                listing.len()
+            )
+            .unwrap();
+            stream.write_all(listing).unwrap();
         } else {
             assert!(matches!(method, "GET" | "HEAD"), "{first}");
             let bytes = objects.get(name).unwrap_or_else(|| panic!("{first}"));
@@ -1867,6 +1874,78 @@ fn gateway_commands_validate_configuration_and_keep_keys_out_of_output() {
     ] {
         let stderr = mutate(change);
         assert!(stderr.contains("gateway_config_invalid"), "{stderr}");
+    }
+    // OD-004: the opt-in `dashboard` block is as strict, and neither the
+    // users export nor the session key reaches the output.
+    let hash = format!(
+        "$argon2id$v=19$m=19456,t=2,p=1${}${}",
+        "A".repeat(22),
+        "A".repeat(43)
+    );
+    let export = |role: &str, tenant: Value| {
+        json!({"schema":1,"users":[{"id":"11111111111111111111111111111111",
+            "username":"alice","role":role,"tenant_id":tenant,"disabled":false,
+            "must_change_password":false,"password":hash,"created_unix_ms":1,
+            "updated_unix_ms":1,"version":1}]})
+        .to_string()
+    };
+    let tenant_users = root.join("dashboard-users.json");
+    std::fs::write(
+        &tenant_users,
+        export("viewer", json!("0123456789abcdef0123456789abcdef")),
+    )
+    .unwrap();
+    let admin_users = root.join("dashboard-admins.json");
+    std::fs::write(&admin_users, export("super_admin", Value::Null)).unwrap();
+    let session_key = root.join("dashboard-session.key");
+    let secret = "KioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKio=";
+    std::fs::write(&session_key, secret).unwrap();
+    let short_key = root.join("dashboard-short.key");
+    std::fs::write(&short_key, "c2hvcnQtc2Vzc2lvbi1rZXk=").unwrap();
+    let dashboard = |users: &std::path::Path, key: &std::path::Path, extra: Value| {
+        let mut block = json!({"users_file":users,"session_key_file":key});
+        block
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let stderr = mutate(&|v: &mut Value| v["dashboard"] = block.clone());
+        assert!(stderr.contains("gateway_config_invalid"), "{stderr}");
+        for secret in [secret, "c2hvcnQtc2Vzc2lvbi1rZXk", hash.as_str()] {
+            assert!(!stderr.contains(secret), "{stderr}");
+        }
+        stderr
+    };
+    let cases: [(&std::path::Path, &std::path::Path, Value, &str); 6] = [
+        (
+            &tenant_users,
+            &session_key,
+            json!({"surprise":true}),
+            "unknown field `surprise`",
+        ),
+        (
+            &root.join("missing.json"),
+            &session_key,
+            json!({}),
+            "dashboard users file",
+        ),
+        (&admin_users, &session_key, json!({}), "super admins"),
+        (&tenant_users, &short_key, json!({}), "at least 32"),
+        (
+            &tenant_users,
+            &root.join("missing.key"),
+            json!({}),
+            "dashboard session key",
+        ),
+        (
+            &tenant_users,
+            &session_key,
+            json!({"lifetime_ms":1000}),
+            "dashboard.lifetime_ms",
+        ),
+    ];
+    for (users, key, extra, expected) in cases {
+        let stderr = dashboard(users, key, extra);
+        assert!(stderr.contains(expected), "{expected}: {stderr}");
     }
     std::fs::write(&config, vec![b' '; 70 * 1024]).unwrap();
     let (ok, _, stderr) = run(&gateway, false);

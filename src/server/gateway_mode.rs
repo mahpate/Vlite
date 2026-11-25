@@ -33,15 +33,25 @@
 //! `502 write_outcome_unknown`, a sent read is `503 draining`, and a
 //! streaming response ends with an error; nothing is retried or re-routed.
 //!
-//! Not yet: login, the dashboard and super-admin operations through a
-//! gateway (OD-004/OD-012). Dedicated responses require a valid epoch stamp
-//! checked against the freshest usable same-lineage directory before streaming;
-//! an epoch refusal is final, with no retry or writer fallback.
+//! With a `dashboard` block (OD-004), a gateway also serves the dashboard,
+//! password sign-in and cookie sessions for tenant editor and viewer
+//! accounts (`users::gateway_session`): a cookie request without an
+//! `Authorization` header is authorized as its signed-in user's scoped grant
+//! and forwarded like a credential's, with the principal `user:<id>`.
+//! Sign-in has its own slots (`LOGIN_SLOTS`) instead of an in-flight one, and
+//! its body must arrive whole within `upstream_timeout_ms`.
+//! Without the block those routes stay unserved, and a cookie is never read.
+//!
+//! Not yet: super-admin operations through a gateway (OD-012). Dedicated
+//! responses require a valid epoch stamp checked against the freshest usable
+//! same-lineage directory before streaming; an epoch refusal is final, with
+//! no retry or writer fallback.
 
 use super::control_state::{self, Feed, Snapshot, Source};
 use super::gateway::{self, Operation, RouteRefusal};
 use super::gateway_trust::{MAX_CONFIG_BYTES, MAX_MS, read_bounded};
 use super::principal_envelope::{self, GatewayKeyBundle, Signer};
+use super::users::gateway_session::{self, GatewaySessions, MAX_LOGIN_BYTES};
 use super::*;
 use axum::body::{Body, Bytes};
 use axum::extract::Request;
@@ -66,6 +76,9 @@ const MAX_BUCKETS: usize = 1_000_000;
 /// after cancellation, and separately how long the control-state poller gets to
 /// stop before it is left to finish its read on its own.
 const SHUTDOWN_SETTLE: Duration = Duration::from_secs(1);
+/// Dashboard sign-ins a replica handles at once, outside `max_in_flight`;
+/// more than the password hashing permits, so a slow body cannot idle them.
+const LOGIN_SLOTS: usize = 16;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -93,16 +106,21 @@ pub(super) struct GatewayFile {
     upstream_timeout_ms: u64,
     /// Bound on per-credential edge rate-limit buckets.
     max_buckets: usize,
+    /// OD-004: dashboard sign-in and sessions for tenant accounts.
+    #[serde(default)]
+    dashboard: Option<gateway_session::DashboardFile>,
 }
 
 fn invalid(detail: impl std::fmt::Display) -> String {
     format!("gateway_config_invalid: {detail}")
 }
 
-/// A validated gateway configuration with its signer; nothing contacted.
+/// A validated gateway configuration with its signer and dashboard
+/// sessions; nothing contacted.
 pub(super) struct Settings {
     pub(super) file: GatewayFile,
     pub(super) signer: Signer,
+    pub(super) dashboard: Option<GatewaySessions>,
 }
 
 pub(super) fn read_config(path: &Path) -> Result<Settings, String> {
@@ -168,7 +186,17 @@ pub(super) fn read_config(path: &Path) -> Result<Settings, String> {
     ));
     seed.fill(0);
     let signer = signer.map_err(invalid)?;
-    Ok(Settings { file, signer })
+    let dashboard = file
+        .dashboard
+        .as_ref()
+        .map(|dashboard| dashboard.load(file.bind.ip().is_loopback()))
+        .transpose()
+        .map_err(invalid)?;
+    Ok(Settings {
+        file,
+        signer,
+        dashboard,
+    })
 }
 
 /// Runs a gateway until `shutdown` resolves, then drains: `/ready` answers
@@ -184,7 +212,11 @@ pub async fn run_gateway(
         [flag, path] if flag == "--config" => PathBuf::from(path),
         _ => return Err(format!("invalid_arguments: usage: {GATEWAY_USAGE}")),
     };
-    let Settings { file, signer } = read_config(&path)?;
+    let Settings {
+        file,
+        signer,
+        dashboard,
+    } = read_config(&path)?;
     let upstream = Duration::from_millis(file.upstream_timeout_ms);
     // No client-wide `timeout`: reqwest would count it from the connect to
     // the end of the body and cut a long streamed response short. A connect
@@ -235,12 +267,14 @@ pub async fn run_gateway(
         draining: AtomicBool::new(false),
         cancel: tokio::sync::watch::Sender::new(false),
         in_flight: Arc::new(Semaphore::new(file.max_in_flight)),
+        login_slots: Arc::new(Semaphore::new(LOGIN_SLOTS)),
         buckets: Buckets::new(file.max_buckets),
         max_request_bytes: file.max_request_bytes,
         envelope_lifetime_ms: file.envelope_lifetime_ms,
         max_replicas: file.max_replicas,
+        dashboard,
     });
-    let router = Router::new().fallback(handle).with_state(gateway.clone());
+    let router = router(gateway.clone());
     let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
     let server = axum::serve(listener, router).with_graceful_shutdown(async move {
         let _ = stop_rx.wait_for(|stop| *stop).await;
@@ -252,7 +286,8 @@ pub async fn run_gateway(
         json!({"event":"gateway_started","address":address.to_string(),
             "generation":feed.current().map(|snapshot| snapshot.generation()).ok(),
             "key_generation":keys.generation,"active_kid":keys.active_kid,"kids":keys.kids,
-            "max_replicas":file.max_replicas,
+            "max_replicas":file.max_replicas,"dashboard":gateway.dashboard.is_some(),
+            "dashboard_session_kids":gateway.dashboard.as_ref().map(|sessions| sessions.kids()),
             "write_capacity":"gateway replicas add no write capacity and are not writer HA: \
                 each tenant has one writer"})
         .to_string(),
@@ -381,28 +416,62 @@ struct Gateway {
     /// Set when the drain deadline passes: every request still running ends.
     cancel: tokio::sync::watch::Sender<bool>,
     in_flight: Arc<Semaphore>,
+    /// Sign-ins in progress, apart from `in_flight` (`LOGIN_SLOTS`).
+    login_slots: Arc<Semaphore>,
     buckets: Buckets,
     max_request_bytes: usize,
     envelope_lifetime_ms: u64,
     max_replicas: u32,
+    /// OD-004 dashboard sign-in; `None` without a `dashboard` block.
+    dashboard: Option<GatewaySessions>,
 }
 
 async fn handle(State(gateway): State<Arc<Gateway>>, request: Request) -> Response {
+    // Sign-in refusals, like its answers, are never stored by a browser or
+    // proxy.
+    let auth = request.uri().path().starts_with("/v1/auth/");
     match gateway.forward(request).await {
         Ok(response) => response,
-        Err(error) => error.into_response(),
+        Err(error) => {
+            let mut response = error.into_response();
+            if auth {
+                response.headers_mut().insert(
+                    header::CACHE_CONTROL,
+                    axum::http::HeaderValue::from_static("no-store"),
+                );
+            }
+            response
+        }
     }
+}
+
+/// The gateway's HTTP surface: everything goes through `forward`, except the
+/// dashboard's static assets when a `dashboard` block is configured.
+fn router(gateway: Arc<Gateway>) -> Router {
+    let routes = if gateway.dashboard.is_some() {
+        super::dashboard_routes()
+    } else {
+        Router::new()
+    };
+    routes
+        .fallback(handle)
+        .method_not_allowed_fallback(handle)
+        .with_state(gateway)
 }
 
 fn not_found() -> ApiError {
     ApiError::new(StatusCode::NOT_FOUND, "not_found", "route not found")
 }
 
-fn unauthorized() -> ApiError {
+fn unauthorized(dashboard: bool) -> ApiError {
     ApiError::new(
         StatusCode::UNAUTHORIZED,
         "unauthorized",
-        "a tenant API credential (Bearer vlk_...) is required",
+        if dashboard {
+            "a tenant API credential (Bearer vlk_...) or a dashboard session cookie is required"
+        } else {
+            "a tenant API credential (Bearer vlk_...) is required"
+        },
     )
 }
 
@@ -439,6 +508,41 @@ impl Gateway {
         Ok(json!({"status":"ready","generation":snapshot.generation()}))
     }
 
+    /// `POST /v1/auth/login` under one of `LOGIN_SLOTS`: the checks that
+    /// need no body first, then the body, read whole within
+    /// `upstream_timeout` (not per piece, so trickling cannot stretch it).
+    async fn login(
+        &self,
+        sessions: &GatewaySessions,
+        headers: &HeaderMap,
+        body: Body,
+    ) -> Result<Response, ApiError> {
+        sessions.admit_login(headers)?;
+        if declared_length(headers).is_some_and(|length| length > MAX_LOGIN_BYTES as u64) {
+            return Err(too_large(MAX_LOGIN_BYTES));
+        }
+        let _slot = self.login_slots.clone().try_acquire_owned().map_err(|_| {
+            ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "overloaded",
+                "too many sign-ins in progress; retry later",
+            )
+        })?;
+        let mut cancel = self.cancel.subscribe();
+        let body = tokio::select! {
+            biased;
+            () = cancelled(&mut cancel) => {
+                return Err(drain_cancelled("login_body", Operation::Read, false));
+            }
+            body = tokio::time::timeout(
+                self.upstream_timeout,
+                receive_body(body, MAX_LOGIN_BYTES, self.upstream_timeout),
+            ) => body.map_err(|_| body_timeout())??,
+        };
+        let snapshot = self.feed.current()?;
+        sessions.login(headers, &body, &snapshot).await
+    }
+
     async fn forward(self: Arc<Self>, request: Request) -> Result<Response, ApiError> {
         let (parts, body) = request.into_parts();
         let path = parts.uri.path();
@@ -456,6 +560,14 @@ impl Gateway {
                 self.ready()?
             };
             return Ok(Json(body).into_response());
+        }
+        // Sign-in takes its own slots, before `in_flight`: a browser that
+        // trickles or stalls a login body never costs API traffic a slot.
+        if let Some(sessions) = &self.dashboard
+            && parts.method == Method::POST
+            && path == "/v1/auth/login"
+        {
+            return self.login(sessions, &parts.headers, body).await;
         }
         let permit = self.in_flight.clone().try_acquire_owned().map_err(|_| {
             ApiError::new(
@@ -480,14 +592,51 @@ impl Gateway {
                     "method not allowed",
                 ),
             })?;
-        // Login, sessions and the dashboard are not served by a gateway yet.
+        // Sign-in and sessions are answered here, never forwarded; without a
+        // `dashboard` block the public routes stay unserved. `config` and
+        // `login` are always answered here; for the other session routes a
+        // request with an Authorization header is an API request and is
+        // forwarded as one.
+        let now = admin::now_ms() as u64;
+        let cookies = self
+            .dashboard
+            .as_ref()
+            .filter(|_| !parts.headers.contains_key(header::AUTHORIZATION));
+        if let Some(sessions) = &self.dashboard {
+            match classification.template {
+                "/v1/auth/config" => return Ok(sessions.config()),
+                "/v1/auth/login" => return self.login(sessions, &parts.headers, body).await,
+                _ => {}
+            }
+        }
+        if let Some(sessions) = cookies {
+            match classification.template {
+                "/v1/auth/logout" => return sessions.logout(&parts.headers),
+                "/v1/auth/session" => {
+                    let snapshot = self.feed.current()?;
+                    return Ok(sessions.session(&parts.headers, &snapshot, now));
+                }
+                "/v1/auth/password" => {
+                    let snapshot = self.feed.current()?;
+                    return Ok(sessions.password(&parts.headers, &snapshot, now));
+                }
+                _ => {}
+            }
+        }
         if classification.public {
             return Err(not_found());
         }
         let snapshot = self.feed.current()?;
-        let token = tenant_bearer(&parts.headers).ok_or_else(unauthorized)?;
-        let now = admin::now_ms() as u64;
-        let grant = snapshot.authenticate(token, now)?;
+        let (grant, refresh) = match (tenant_bearer(&parts.headers), cookies) {
+            (Some(token), _) => (snapshot.authenticate(token, now)?, None),
+            (None, Some(sessions)) if sessions.presented(&parts.headers).is_some() => {
+                match sessions.resolve(&parts.method, &parts.headers, &snapshot, now) {
+                    Ok(resolved) => (resolved.grant, resolved.refresh),
+                    Err(refused) => return Ok(*refused),
+                }
+            }
+            _ => return Err(unauthorized(self.dashboard.is_some())),
+        };
         let tenant = grant
             .tenant_id
             .as_deref()
@@ -516,12 +665,9 @@ impl Gateway {
         }
         let mut target = gateway::route_target(classification, &grant, &snapshot)
             .map_err(RouteRefusal::error)?;
-        let declared = parts
-            .headers
-            .get(header::CONTENT_LENGTH)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<u64>().ok());
-        if declared.is_some_and(|length| length > self.max_request_bytes as u64) {
+        if declared_length(&parts.headers)
+            .is_some_and(|length| length > self.max_request_bytes as u64)
+        {
             return Err(too_large(self.max_request_bytes));
         }
         let mut cancel = self.cancel.subscribe();
@@ -633,6 +779,10 @@ impl Gateway {
         let mut response = Response::new(Body::from_stream(Relay::new(receiver)));
         *response.status_mut() = status;
         *response.headers_mut() = headers;
+        // `response_headers` dropped any backend Set-Cookie; this is ours.
+        if let Some(cookie) = refresh {
+            response.headers_mut().append(header::SET_COOKIE, cookie);
+        }
         Ok(response)
     }
 }
@@ -790,9 +940,31 @@ fn too_large(limit: usize) -> ApiError {
     )
 }
 
+/// The request's `Content-Length`, when it is a number.
+fn declared_length(headers: &HeaderMap) -> Option<u64> {
+    headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+}
+
+fn body_timeout() -> ApiError {
+    log_stderr(
+        "warn",
+        "gateway",
+        json!({"event":"request_body_timeout"}).to_string(),
+    );
+    ApiError::new(
+        StatusCode::REQUEST_TIMEOUT,
+        "request_body_timeout",
+        "the request body stalled; nothing was sent",
+    )
+}
+
 /// Reads a request body of at most `limit` bytes, giving each wait for the
-/// next piece `idle`, so a client that stops sending cannot hold an
-/// in-flight slot.
+/// next piece `idle`, so a client that stops sending cannot hold its slot.
+/// A client that keeps sending slowly can, for up to `limit` waits; a
+/// caller that must bound the whole read wraps it in its own deadline.
 async fn receive_body(body: Body, limit: usize, idle: Duration) -> Result<Bytes, ApiError> {
     use tokio_stream::StreamExt;
     let mut stream = body.into_data_stream();
@@ -807,18 +979,7 @@ async fn receive_body(body: Body, limit: usize, idle: Duration) -> Result<Bytes,
                 received.extend_from_slice(&piece);
             }
             Ok(Some(Err(_))) => return Err(too_large(limit)),
-            Err(_) => {
-                log_stderr(
-                    "warn",
-                    "gateway",
-                    json!({"event":"request_body_timeout"}).to_string(),
-                );
-                return Err(ApiError::new(
-                    StatusCode::REQUEST_TIMEOUT,
-                    "request_body_timeout",
-                    "the request body stalled; nothing was sent",
-                ));
-            }
+            Err(_) => return Err(body_timeout()),
         }
     }
 }
@@ -1356,14 +1517,18 @@ pub fn control_state_command(args: &[OsString]) -> Result<Value, String> {
 }
 
 #[cfg(test)]
+#[path = "gateway_dashboard_tests.rs"]
+mod dashboard_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
-    const TENANT: &str = "0123456789abcdef0123456789abcdef";
+    pub(super) const TENANT: &str = "0123456789abcdef0123456789abcdef";
 
-    struct Upstream {
-        endpoint: String,
-        requests: Arc<Mutex<Vec<(HeaderMap, Bytes)>>>,
+    pub(super) struct Upstream {
+        pub(super) endpoint: String,
+        pub(super) requests: Arc<Mutex<Vec<(HeaderMap, Bytes)>>>,
         task: tokio::task::JoinHandle<()>,
     }
 
@@ -1373,7 +1538,11 @@ mod tests {
         }
     }
 
-    async fn upstream(status: StatusCode, headers: HeaderMap, delay: Duration) -> Upstream {
+    pub(super) async fn upstream(
+        status: StatusCode,
+        headers: HeaderMap,
+        delay: Duration,
+    ) -> Upstream {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let captured = requests.clone();
         let router = Router::new().fallback(move |request: Request| {
@@ -1423,6 +1592,13 @@ mod tests {
     fn gateway_with_route(
         record: control_state::Route,
     ) -> (Arc<Gateway>, String, control_state::Objects) {
+        gateway_with_dashboard(record, None)
+    }
+
+    pub(super) fn gateway_with_dashboard(
+        record: control_state::Route,
+        dashboard: Option<GatewaySessions>,
+    ) -> (Arc<Gateway>, String, control_state::Objects) {
         let (credentials, tokens) =
             credentials::tests::issued(&[("aaaaaaaaaaaa", Some(TENANT))], 0x1234);
         let tenants = tenants::Store::for_test(vec![tenants::Tenant::for_test(TENANT, None)]);
@@ -1444,23 +1620,27 @@ mod tests {
             .unwrap(),
         );
         feed.poll_once().unwrap();
-        (
-            Arc::new(Gateway {
-                feed,
-                signer: Signer::from_seed("gw-1", &[7; 32]).unwrap(),
-                client: reqwest::Client::builder().no_proxy().build().unwrap(),
-                upstream_timeout: Duration::from_millis(100),
-                draining: AtomicBool::new(false),
-                cancel: tokio::sync::watch::Sender::new(false),
-                in_flight: Arc::new(Semaphore::new(8)),
-                buckets: Buckets::new(8),
-                max_request_bytes: 1024,
-                envelope_lifetime_ms: 5_000,
-                max_replicas: 1,
-            }),
-            tokens[0].clone(),
-            objects,
-        )
+        (gateway_on(feed, dashboard), tokens[0].clone(), objects)
+    }
+
+    /// Another gateway replica on the same control state: nothing else is
+    /// shared, its dashboard sessions included.
+    pub(super) fn gateway_on(feed: Arc<Feed>, dashboard: Option<GatewaySessions>) -> Arc<Gateway> {
+        Arc::new(Gateway {
+            feed,
+            signer: Signer::from_seed("gw-1", &[7; 32]).unwrap(),
+            client: reqwest::Client::builder().no_proxy().build().unwrap(),
+            upstream_timeout: Duration::from_millis(100),
+            draining: AtomicBool::new(false),
+            cancel: tokio::sync::watch::Sender::new(false),
+            in_flight: Arc::new(Semaphore::new(8)),
+            login_slots: Arc::new(Semaphore::new(LOGIN_SLOTS)),
+            buckets: Buckets::new(8),
+            max_request_bytes: 1024,
+            envelope_lifetime_ms: 5_000,
+            max_replicas: 1,
+            dashboard,
+        })
     }
 
     async fn routed_request(gateway: Arc<Gateway>, token: &str, write: bool) -> Response {
@@ -1627,7 +1807,7 @@ mod tests {
         }
     }
 
-    fn map(pairs: &[(&'static str, &'static str)]) -> HeaderMap {
+    pub(super) fn map(pairs: &[(&'static str, &'static str)]) -> HeaderMap {
         let mut headers = HeaderMap::new();
         for (name, value) in pairs {
             headers.append(
@@ -2017,7 +2197,7 @@ mod tests {
             .expect("the relay answers promptly")
     }
 
-    async fn error_code(response: Response) -> String {
+    pub(super) async fn error_code(response: Response) -> String {
         let body = axum::body::to_bytes(response.into_body(), 4096)
             .await
             .unwrap();

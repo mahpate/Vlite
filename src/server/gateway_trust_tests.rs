@@ -382,6 +382,88 @@ async fn backend_holds_the_highest_generation_and_accepts_rotation_overlap() {
     );
 }
 
+/// OD-004: a gateway forwards a signed-in dashboard user as a `user:`
+/// principal. The backend serves it as the same session grant a standalone
+/// sign-in gets: tenant data within the role's operations, never admin
+/// routes, shown as a user (not an API key) in `/v1/capabilities`.
+#[tokio::test]
+async fn gateway_user_principals_get_the_standalone_session_scope() {
+    let key = env::signer("k1", 1);
+    let Backend { router, lineage } = trusted(&[&key], 1, HOUR, false);
+    let header = principal_envelope::HEADER;
+    let user = |tenant: &str, ops: &[credentials::Op]| {
+        let mut claims = claims(Some(tenant), lineage, ops, 1);
+        claims.principal = credentials::Principal::of(&credentials::Grant::for_user(
+            format!("user:{}", "5a".repeat(16)),
+            "alice".into(),
+            Some(tenant.to_owned()),
+            ops,
+            lineage,
+            now() + HOUR,
+        ));
+        key.sign(&claims).unwrap()
+    };
+    use credentials::Op;
+    let editor = user(
+        T1,
+        &[
+            Op::Read,
+            Op::Search,
+            Op::SearchBuild,
+            Op::Write,
+            Op::Import,
+            Op::Index,
+            Op::Collections,
+        ],
+    );
+    let viewer = user(T1, &[Op::Read, Op::Search]);
+    let (status, body) = call(&router, "POST", "/v1/collections", &[(header, &editor)]).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let (status, body) = call(&router, "GET", "/v1/collections", &[(header, &viewer)]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["items"][0]["name"], "made");
+    let (status, body) = call(&router, "POST", "/v1/collections", &[(header, &viewer)]).await;
+    assert_eq!(
+        (status, body["error"]["code"].as_str()),
+        (StatusCode::FORBIDDEN, Some("forbidden_scope"))
+    );
+    for token in [&editor, &viewer] {
+        for path in ["/v1/admin/credentials", "/v1/admin/users", "/metrics"] {
+            let (status, _) = call(&router, "GET", path, &[(header, token)]).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{path}");
+        }
+    }
+    // Another tenant's signed-in user does not see T1's collection.
+    let (status, body) = call(
+        &router,
+        "GET",
+        "/v1/collections",
+        &[(header, &user(T2, &[Op::Read]))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["items"], json!([]));
+
+    let (status, body) = call(&router, "GET", "/v1/capabilities", &[(header, &viewer)]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["role"], "scoped");
+    let identity = &body["identity"];
+    assert_eq!(identity["kind"], "user", "{identity}");
+    assert_eq!(identity["username"], "alice");
+    assert_eq!(identity["user_id"], "5a".repeat(16));
+    assert_eq!(identity["account_role"], "viewer");
+    assert_eq!(identity["tenant_id"], T1);
+    assert_eq!(identity["tenant_name"], "test tenant");
+    assert_eq!(identity["must_change_password"], false);
+    assert_eq!(identity["label"], "alice · test tenant · Viewer");
+    let (_, body) = call(&router, "GET", "/v1/capabilities", &[(header, &editor)]).await;
+    assert_eq!(body["identity"]["account_role"], "editor");
+    // An API credential envelope is still shown as an API key.
+    let api = key.sign(&claims(Some(T1), lineage, READ, 1)).unwrap();
+    let (_, body) = call(&router, "GET", "/v1/capabilities", &[(header, &api)]).await;
+    assert_eq!(body["identity"]["kind"], "scoped");
+}
+
 /// A `--gateway-trust-file` in `dir` with `view` (its `control_state` or
 /// `control_projection` members), through the real parser. The bundle
 /// holds `env::signer("k1", 1)`.

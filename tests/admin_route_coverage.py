@@ -101,6 +101,8 @@ INVENTORY = {
     ("DELETE", "/v1/admin/cloud-backup/sets/{id}/pins/{pin}"): ("admin-tools.js", "cloud-backup-unpin"),
     ("GET", "/v1/admin/auto-failover"): ("admin-tools.js", "auto-failover-refresh"),
     ("PUT", "/v1/admin/auto-failover"): ("admin-tools.js", "auto-failover-toggle"),
+    # Users > Tenant deployments: read-only list of recorded operations (design EPIC-011).
+    ("GET", "/v1/admin/tenant-deployment-operations"): ("admin-tools.js", "tenant-deployment-refresh"),
     # Live monitor > Server role and replication panel, refreshed with the other observability reads.
     ("GET", "/v1/admin/serve-status"): ("observability.js", "obs-refresh"),
 }
@@ -108,8 +110,8 @@ INVENTORY = {
 # Admin routes deliberately without a dashboard control. Each needs a reason, and
 # the dashboard must not half-implement one.
 _TENANT_DEPLOYMENTS = (
-    "design-tenant-provisioning EPIC-002: managed tenant deployments are API/CLI only "
-    "until the provisioning UI epic; cloud execution is blocked (OD-002)"
+    "design-tenant-provisioning EPIC-002: managed tenant deployment intents and actions are API/CLI only; "
+    "the dashboard panel (EPIC-011) lists operations read-only for now; cloud execution is blocked (OD-002)"
 )
 BACKEND_ONLY = {
     ("POST", "/v1/admin/tenant-deployments"): _TENANT_DEPLOYMENTS,

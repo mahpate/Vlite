@@ -58,6 +58,46 @@ fn bit(op: Op) -> u16 {
     1 << OPS.iter().position(|(o, _)| *o == op).expect("listed op")
 }
 
+/// Grant id prefix of a signed-in dashboard account (`users::user_grant`).
+const USER_PREFIX: &str = "user:";
+
+/// The grant id (and audit actor) of dashboard account `account_id`.
+pub(super) fn user_principal_id(account_id: &str) -> String {
+    format!("{USER_PREFIX}{account_id}")
+}
+
+/// The dashboard account a `user_principal_id` names; `None` for any other
+/// grant id.
+pub(super) fn user_account_id(principal_id: &str) -> Option<&str> {
+    principal_id.strip_prefix(USER_PREFIX)
+}
+
+/// Operations of an editor account (`users::AccountRole::Editor`), before
+/// its graph knobs narrow them. The single source for the role, the
+/// gateway-forwarded principal check (`user_ops`) and the identity view.
+pub(super) const EDITOR_OPS: &[Op] = &[
+    Op::Read,
+    Op::Search,
+    Op::SearchBuild,
+    Op::Write,
+    Op::Import,
+    Op::Index,
+    Op::Collections,
+    Op::GraphRead,
+    Op::GraphWrite,
+];
+/// Operations of a viewer account (`users::AccountRole::Viewer`).
+pub(super) const VIEWER_OPS: &[Op] = &[Op::Read, Op::Search, Op::GraphRead];
+
+/// Every operation an editor or viewer account can hold; a forwarded user
+/// principal naming any other is refused.
+fn user_ops() -> u16 {
+    EDITOR_OPS
+        .iter()
+        .chain(VIEWER_OPS)
+        .fold(0, |mask, op| mask | bit(*op))
+}
+
 fn parse_ops(names: &[String]) -> Result<u16, ApiError> {
     if names.is_empty() {
         return Err(unprocessable("operations must not be empty"));
@@ -300,10 +340,15 @@ impl Entry {
         let id_ok = self.id.len() == 12 && self.id.bytes().all(|b| ID_ALPHABET.contains(&b));
         let hash_ok = self.secret_sha256.len() == 64
             && self.secret_sha256.bytes().all(|b| b.is_ascii_hexdigit());
+        (id_ok && hash_ok).then_some(())?;
+        self.validate_scope()
+    }
+
+    /// Every rule except the id and secret-hash shapes. A forwarded user
+    /// principal (OD-004) has neither, so it is checked against these alone.
+    fn validate_scope(&self) -> Option<()> {
         let lineage_ok = u64::from_str_radix(&self.lineage, 16).is_ok_and(|l| l != 0);
-        (id_ok
-            && hash_ok
-            && lineage_ok
+        (lineage_ok
             && self
                 .requests_per_second
                 .is_none_or(|r| r > 0 && r <= 1_000_000)
@@ -400,7 +445,29 @@ impl Principal {
     }
 
     /// The grant, or `None` when the principal breaks a credential rule.
+    ///
+    /// OD-004: a gateway forwards a signed-in tenant dashboard user as
+    /// `user:<32 hex>`. Such a principal is accepted only in the shape
+    /// `Grant::for_user` gives an editor or viewer (a tenant, the tenant's
+    /// whole scope, no rate or quota limit, editor operations at most) and
+    /// yields a session grant, never an API credential. Builds without this
+    /// rule refuse it (fail closed).
     pub(super) fn grant(&self) -> Option<Grant> {
+        let user = user_account_id(&self.id);
+        if let Some(user) = user {
+            let shaped = user.len() == 32
+                && user.bytes().all(|b| b.is_ascii_hexdigit())
+                && self.tenant_id.is_some()
+                && self.all
+                && self.collections.is_empty()
+                && self.requests_per_second.is_none()
+                && self.max_vectors.is_none()
+                && self.max_vectors_per_collection.is_none()
+                && parse_ops(&self.operations).is_ok_and(|ops| ops & !user_ops() == 0);
+            if !shaped {
+                return None;
+            }
+        }
         let entry = Entry {
             id: self.id.clone(),
             name: self.name.clone(),
@@ -420,8 +487,14 @@ impl Principal {
             max_vectors_per_collection: self.max_vectors_per_collection,
             graphs: self.graphs.clone(),
         };
-        entry.validate()?;
-        entry.grant()
+        if user.is_none() {
+            entry.validate()?;
+            return entry.grant();
+        }
+        entry.validate_scope()?;
+        let mut grant = entry.grant()?;
+        grant.api_credential = false;
+        Some(grant)
     }
 }
 
@@ -1657,5 +1730,76 @@ pub(super) mod tests {
             .filter_map(|e| e["event"].as_str().map(str::to_owned))
             .collect::<Vec<_>>();
         assert_eq!(names, ["credential_created", "credential_created_failed"]);
+    }
+
+    /// OD-004: a gateway forwards a signed-in tenant user as a `user:<32 hex>`
+    /// principal. It round-trips as a session grant (never an API
+    /// credential), and only in the shape `Grant::for_user` makes.
+    #[test]
+    fn user_principals_round_trip_only_as_tenant_session_grants() {
+        let tenant = "ab".repeat(16);
+        let id = format!("user:{}", "0f".repeat(16));
+        let user = |tenant: Option<String>| {
+            Grant::for_user(
+                id.clone(),
+                "alice".into(),
+                tenant,
+                &[Op::Read, Op::Search, Op::GraphRead],
+                0x1234,
+                99,
+            )
+        };
+        let grant = Principal::of(&user(Some(tenant.clone()))).grant().unwrap();
+        assert_eq!(grant.id, id);
+        assert!(!grant.api_credential);
+        assert_eq!(grant.tenant_id.as_deref(), Some(tenant.as_str()));
+        assert_eq!(grant.lineage, 0x1234);
+        assert_eq!(grant.expires, 99);
+        assert!(grant.all && grant.collections.is_empty());
+        assert!(grant.allows(Op::Read) && grant.allows(Op::GraphRead));
+        assert!(!grant.allows(Op::Write) && !grant.allows(Op::Diagnostics));
+        assert_eq!(grant.graphs, ["*"]);
+
+        // Refused: no tenant, a malformed id, limits a session never has,
+        // or a collection list instead of the tenant's whole scope.
+        assert!(Principal::of(&user(None)).grant().is_none());
+        for bad in [
+            "user:1",
+            "user:",
+            "user:zz",
+            "users:0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+        ] {
+            let mut grant = user(Some(tenant.clone()));
+            grant.id = bad.to_owned();
+            assert!(Principal::of(&grant).grant().is_none(), "{bad}");
+        }
+        let mut limited = user(Some(tenant.clone()));
+        limited.requests_per_second = Some(5);
+        assert!(Principal::of(&limited).grant().is_none());
+        let mut quota = user(Some(tenant.clone()));
+        quota.max_vectors = Some(5);
+        assert!(Principal::of(&quota).grant().is_none());
+        let mut listed = user(Some(tenant.clone()));
+        listed.all = false;
+        listed.collections = vec![(format!("t{tenant}__docs"), 1)];
+        assert!(Principal::of(&listed).grant().is_none());
+        // Only operations an editor or viewer account can hold.
+        for op in [Op::Diagnostics, Op::Backup] {
+            let elevated = Grant::for_user(
+                id.clone(),
+                "alice".into(),
+                Some(tenant.clone()),
+                &[Op::Read, op],
+                0x1234,
+                99,
+            );
+            assert!(Principal::of(&elevated).grant().is_none(), "{op:?}");
+        }
+
+        // An API credential principal is unchanged.
+        let mut api = user(Some(tenant));
+        api.id = "abcdefghijkl".to_owned();
+        let api = Principal::of(&api).grant().unwrap();
+        assert!(api.api_credential);
     }
 }

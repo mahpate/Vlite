@@ -179,7 +179,9 @@ impl Log {
 /// keys, tokens, secrets, user names and request content never enter it.
 pub(super) fn actor(role: &admin::Role, principal: Option<&users::Principal>) -> String {
     match (role, principal) {
-        (admin::Role::Admin, Some(principal)) => format!("user:{}", principal.user_id),
+        (admin::Role::Admin, Some(principal)) => {
+            super::credentials::user_principal_id(&principal.user_id)
+        }
         (admin::Role::Admin, None) => "admin_token".to_owned(),
         (admin::Role::ReadOnly, _) => "read_only_token".to_owned(),
         (admin::Role::Scoped(grant), _) => grant.id.clone(),
