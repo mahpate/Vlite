@@ -132,7 +132,7 @@ native = NativeLibrary()
         </div>
         <div class="tabpanel" role="tabpanel" id="p-rust" aria-labelledby="t-rust" hidden>
 <button class="copy" data-copy="c-rust">Copy</button>
-<pre class="code" id="c-rust"><span class="c-c">// Cargo.toml: vlite = { git = "https://github.com/mahpate/Vlite", tag = "v0.7.11" }</span>
+<pre class="code" id="c-rust"><span class="c-c">// Cargo.toml: vlite = { git = "https://github.com/mahpate/Vlite", tag = "v0.7.12" }</span>
 <span class="c-k">use</span> vlite::Database;
 
 <span class="c-k">fn</span> main() -&gt; vlite::Result&lt;()&gt; {
@@ -281,7 +281,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\devbox.ps1 -Token
       <div class="glow-panel">
         <div class="section-head"><div class="kicker">Know the boundaries</div><h2>Data safety you can reason about</h2><p>Corruption fails closed. Indexes rebuild from records. Default periodic durability can lose the last flush interval on power loss; full syncs every commit.</p></div>
         <p class="callout">Limits: the live dataset fits in RAM. One writer or several read-only owners per file. Durability depends on your filesystem.</p>
-        <nav class="landing-evidence" aria-label="Technical evidence"><a href="architecture.html">Architecture &#8594;</a><a href="docs/REFERENCE.html">Data-safety contracts &#8594;</a><a href="compare.html">Benchmarks &#8594;</a><a href="docs/RELEASE-0.7.11.html">Release notes &#8594;</a></nav>
+        <nav class="landing-evidence" aria-label="Technical evidence"><a href="architecture.html">Architecture &#8594;</a><a href="docs/REFERENCE.html">Data-safety contracts &#8594;</a><a href="compare.html">Benchmarks &#8594;</a><a href="docs/RELEASE-0.7.12.html">Release notes &#8594;</a></nav>
       </div>
     </div>
   </section>
