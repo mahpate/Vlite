@@ -17,6 +17,10 @@
 //!   only to URLs under the configured base; redirects are not followed, a
 //!   monitor or next-page URL elsewhere is never called and a mutating
 //!   request is never retried;
+//! - a revision inventory holds only the app's own revisions, read along
+//!   its own list: a listed name or ID of another resource, or a next page
+//!   off that list, leaves it incomplete, so it proves no stop and nothing
+//!   listed is deactivated;
 //! - [`ArmError::Refused`] means nothing mutating took effect; anything
 //!   uncertain is [`ArmError::Unknown`].
 //!
@@ -318,11 +322,15 @@ impl ArmClient {
         }
     }
 
-    /// Every revision of the app `app` with its `active` flag as listed, or
-    /// `None` unless every page was read and every entry is well-formed.
-    /// Next-page links are followed only under the base, for at most
-    /// [`MAX_PAGES`] pages.
+    /// Every revision of the app `app` (at `id`) with its `active` flag as
+    /// listed, or `None` unless every page was read and every entry is a
+    /// well-formed revision of this app (see [`revision`]). Next pages are
+    /// followed only along this app's own list ([`Self::continuation`]),
+    /// for at most [`MAX_PAGES`] pages.
     fn inventory(&self, id: &str, token: &str, app: &Value) -> Option<Vec<(Revision, bool)>> {
+        let (_, own) = resource_id::parse(id)?;
+        // App names never contain `--`, so no other app's revision has this prefix.
+        let prefix = format!("{own}--");
         let body = self.body(id);
         let mut shadow = app.clone();
         let mut revisions: Vec<(Revision, bool)> = Vec::new();
@@ -337,7 +345,7 @@ impl ArmClient {
             }
             let page = reply.json()?;
             for item in page.get("value")?.as_array()? {
-                let listed = revision(item, &mut shadow, body)?;
+                let listed = revision(item, id, &prefix, &mut shadow, body)?;
                 let name = &listed.0.name;
                 if revisions
                     .iter()
@@ -350,11 +358,31 @@ impl ArmClient {
             next = match page.get("nextLink") {
                 None | Some(Value::Null) => None,
                 Some(Value::String(link)) if link.is_empty() => None,
-                Some(Value::String(link)) => Some(Url::parse(link).ok()?),
+                Some(Value::String(link)) => Some(self.continuation(id, link)?),
                 Some(_) => return None,
             };
         }
         next.is_none().then_some(revisions)
+    }
+
+    /// A next-page `link` of the revision list of `id`, `None` unless it is
+    /// under the base, on exactly that list's path (ARM IDs compare ASCII
+    /// case-insensitively) and asks exactly [`API_VERSION`] once, with no
+    /// `$filter` (we never send one, and it would hide revisions). Any other
+    /// query, such as a skip token, is the provider's own.
+    fn continuation(&self, id: &str, link: &str) -> Option<Url> {
+        let url = Url::parse(link).ok()?;
+        let pairs = || url.query_pairs();
+        let versions: Vec<_> = pairs()
+            .filter(|(key, _)| key.eq_ignore_ascii_case("api-version"))
+            .collect();
+        let bound = self.under(&url)
+            && url
+                .path()
+                .eq_ignore_ascii_case(self.url(id, "/revisions").path())
+            && matches!(versions.as_slice(), [(_, version)] if version == API_VERSION)
+            && !pairs().any(|(key, _)| key.eq_ignore_ascii_case("$filter"));
+        bound.then_some(url)
     }
 
     /// A persisted handle parsed back: a monitor URL under the base with a
@@ -707,15 +735,34 @@ fn owned(found: &Value, owner: &str) -> Result<(), ArmError> {
     }
 }
 
-/// One listed revision with its `active` flag, `None` when malformed. It is
-/// active while flagged or still running replicas; a missing replica count
-/// is malformed, never zero. Its digest is the app's (`shadow`) with this
-/// revision's template.
-fn revision(item: &Value, shadow: &mut Value, body: Option<&Value>) -> Option<(Revision, bool)> {
+/// One listed revision of the app at `id` with its `active` flag, `None`
+/// when malformed or not that app's: its name must be `prefix` (`{app}--`)
+/// and a nonempty suffix, and its ID, when listed, exactly
+/// `{id}/revisions/{name}` (both ASCII case-insensitively, as ARM compares
+/// them). It is active while flagged or still running replicas; a missing
+/// replica count is malformed, never zero. Its digest is the app's
+/// (`shadow`) with this revision's template.
+fn revision(
+    item: &Value,
+    id: &str,
+    prefix: &str,
+    shadow: &mut Value,
+    body: Option<&Value>,
+) -> Option<(Revision, bool)> {
     let name = item.get("name")?.as_str()?;
     let safe = |c: u8| c.is_ascii_alphanumeric() || c == b'-';
-    if name.is_empty() || name.len() > NAME_MAX || !name.bytes().all(safe) {
+    let own = name.len() > prefix.len()
+        && name
+            .get(..prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(prefix));
+    if !own || name.len() > NAME_MAX || !name.bytes().all(safe) {
         return None;
+    }
+    match item.get("id") {
+        None => {}
+        Some(Value::String(listed))
+            if listed.eq_ignore_ascii_case(&format!("{id}/revisions/{name}")) => {}
+        Some(_) => return None,
     }
     let properties = item.get("properties")?;
     let flagged = properties.get("active")?.as_bool()?;
@@ -1006,11 +1053,12 @@ mod tests {
         echo
     }
 
-    /// A revision list entry of app-1.
+    /// A revision list entry, listed under the app its name starts with.
     fn entry(name: &str, active: bool, replicas: u64, image: &str) -> Value {
         let weight = if active { 100 } else { 0 };
+        let owner = name.split_once("--").map_or(name, |(owner, _)| owner);
         json!({
-            "id": format!("{}/revisions/{name}", app("app-1")),
+            "id": format!("{}/revisions/{name}", app(owner)),
             "name": name,
             "type": "Microsoft.App/containerApps/revisions",
             "properties": {
@@ -1923,6 +1971,202 @@ mod tests {
         );
         fake.finish();
         assert!(other_fake.finish().is_empty());
+    }
+
+    #[test]
+    fn an_inventory_holds_only_the_apps_own_revisions() {
+        let (listener, base) = bind();
+        let id = app("app-1");
+        let list = format!("{id}/revisions");
+        let own = format!("{list}/app-1--r1");
+        // The name and ID shape a retained 2026-07-01 probe listed (and read
+        // directly) for its app.
+        let probe = app("stop-app-bff6d3c4e2");
+        let ours = || on(line("GET", &id), ok(found(IMAGE, Some(OWNER))));
+        let listed = |items: Vec<Value>| on(line("GET", &list), page(items, None));
+        // An inactive revision listed as `name` without an ID...
+        let named = |name: &str| {
+            let mut item = entry(name, false, 0, IMAGE);
+            item.as_object_mut().unwrap().remove("id");
+            item
+        };
+        // ...and app-1--r1 listed under `listed_id`.
+        let listed_as = |listed_id: Value| {
+            let mut item = entry("app-1--r1", false, 0, IMAGE);
+            item["id"] = listed_id;
+            item
+        };
+        let names = [
+            "app-10--r1",
+            "app-1-x--r1",
+            "app-2--r1",
+            "app-1--",
+            "app-1",
+            "app-1-r1",
+            "r1",
+        ];
+        let ids = [
+            json!(format!("{}/revisions/app-1--r1", app("app-2"))),
+            json!(format!("{list}/app-1--r2")),
+            json!(format!("{own}/replicas/x")),
+            json!(id),
+            json!(own.replace("rg-1", "rg-2")),
+            json!(own.replace("Microsoft.App", "Microsoft.Web")),
+            json!("app-1--r1"),
+            json!(7),
+            Value::Null,
+        ];
+        let mut steps = vec![token()];
+        for item in names
+            .into_iter()
+            .map(&named)
+            .chain(ids.iter().cloned().map(&listed_as))
+        {
+            steps.extend([ours(), listed(vec![item])]);
+        }
+        // Another app's flagged revision beside our own.
+        let mixed = vec![
+            entry("app-1--r1", true, 1, IMAGE),
+            entry("app-2--r1", true, 1, IMAGE),
+        ];
+        steps.extend([ours(), listed(mixed)]);
+        steps.extend([ours(), listed(vec![named("app-2--r1")])]);
+        // ARM IDs and names compare ASCII case-insensitively; the ID is optional.
+        let recased = own.replace("resourceGroups/rg-1", "resourcegroups/RG-1");
+        steps.extend([ours(), listed(vec![named("app-1--r1")])]);
+        steps.extend([ours(), listed(vec![listed_as(json!(recased))])]);
+        steps.extend([ours(), listed(vec![entry("APP-1--R1", false, 0, IMAGE)])]);
+        steps.push(on(line("GET", &probe), ok(found(IMAGE, None))));
+        steps.push(on(
+            line("GET", &format!("{probe}/revisions")),
+            page(
+                vec![entry("stop-app-bff6d3c4e2--observe", true, 1, IMAGE)],
+                None,
+            ),
+        ));
+        let fake = serve(listener, steps);
+        let arm = adapter(&base, mapped(&id), None);
+        let revisions = || arm.read(&id).unwrap().unwrap().revisions;
+        for case in names
+            .iter()
+            .map(|name| name.to_string())
+            .chain(ids.iter().map(Value::to_string))
+        {
+            assert_eq!(revisions(), Revisions::Incomplete, "{case}");
+        }
+        // Nothing listed is deactivated, not even our own revision.
+        assert_eq!(
+            arm.begin(&call(&id, Verb::Stop)),
+            Err(refused("revision_inventory_incomplete"))
+        );
+        // Another app's stopped revision never proves ours stopped.
+        assert_eq!(arm.poll(&format!("stop:{id}")), Err(ArmError::Unknown));
+        let digest = digest::config_digest(&desired(IMAGE));
+        for name in ["app-1--r1", "app-1--r1", "APP-1--R1"] {
+            assert_eq!(
+                revisions(),
+                Revisions::Complete(vec![Revision {
+                    name: name.into(),
+                    active: false,
+                    config_digest: digest.clone(),
+                }]),
+                "{name}"
+            );
+        }
+        assert_eq!(
+            arm.read(&probe).unwrap().unwrap().revisions,
+            Revisions::Complete(vec![Revision {
+                name: "stop-app-bff6d3c4e2--observe".into(),
+                active: true,
+                config_digest: "unmapped".into(),
+            }])
+        );
+        fake.finish();
+    }
+
+    #[test]
+    fn next_pages_continue_only_the_apps_revision_list() {
+        let id = app("app-1");
+        let list = format!("{id}/revisions");
+        let pinned = format!("api-version={API_VERSION}");
+        let ours = || on(line("GET", &id), ok(found(IMAGE, Some(OWNER))));
+        // The first page of app-1's list, linking to `next` under `base`.
+        let first = |base: &str, next: &str, active: bool| {
+            let items = vec![entry("app-1--r1", active, u64::from(active), IMAGE)];
+            on(
+                line("GET", &list),
+                page(items, Some(&format!("{base}{next}"))),
+            )
+        };
+        let elsewhere = [
+            format!("{}/revisions?{pinned}&$skiptoken=2", app("app-2")),
+            format!("{}?{pinned}&$skiptoken=2", list.replace("rg-1", "rg-2")),
+            format!("{id}?{pinned}"),
+            format!("{list}/app-1--r1?{pinned}"),
+            format!("{SCOPE}/containerApps?{pinned}"),
+            format!("{list}?api-version=2024-03-01&$skiptoken=2"),
+            format!("{list}?$skiptoken=2"),
+            format!("{list}?{pinned}&{pinned}&$skiptoken=2"),
+            format!("{list}?{pinned}&$filter=properties/active%20eq%20false&$skiptoken=2"),
+            format!("{list}?{pinned}&%24FILTER=x&$skiptoken=2"),
+        ];
+        for next in &elsewhere {
+            let (listener, base) = bind();
+            let fake = serve(listener, vec![token(), ours(), first(&base, next, false)]);
+            let arm = adapter(&base, mapped(&id), None);
+            let revisions = arm.read(&id).unwrap().unwrap().revisions;
+            assert_eq!(revisions, Revisions::Incomplete, "{next}");
+            // The link itself is never requested.
+            fake.finish();
+        }
+        // An active revision on such a page is never deactivated.
+        let (listener, base) = bind();
+        let fake = serve(
+            listener,
+            vec![token(), ours(), first(&base, &elsewhere[0], true)],
+        );
+        let arm = adapter(&base, mapped(&id), None);
+        assert_eq!(
+            arm.begin(&call(&id, Verb::Stop)),
+            Err(refused("revision_inventory_incomplete"))
+        );
+        fake.finish();
+        // The provider may recase the path and add its own continuation.
+        let (listener, base) = bind();
+        let recased = list
+            .replace("resourceGroups/rg-1", "resourcegroups/RG-1")
+            .replace("containerApps", "containerapps");
+        let next = format!("{recased}?$skipToken=abc&{pinned}");
+        let fake = serve(
+            listener,
+            vec![
+                token(),
+                ours(),
+                first(&base, &next, false),
+                on(
+                    format!("GET {next}"),
+                    page(vec![entry("app-1--r2", true, 1, IMAGE)], None),
+                ),
+            ],
+        );
+        let arm = adapter(&base, mapped(&id), None);
+        let digest = digest::config_digest(&desired(IMAGE));
+        assert_eq!(
+            arm.read(&id).unwrap().unwrap().revisions,
+            Revisions::Complete(vec![
+                Revision {
+                    name: "app-1--r1".into(),
+                    active: false,
+                    config_digest: digest.clone(),
+                },
+                Revision {
+                    name: "app-1--r2".into(),
+                    active: true,
+                    config_digest: digest,
+                },
+            ])
+        );
+        fake.finish();
     }
 
     #[test]
