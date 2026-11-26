@@ -5591,6 +5591,126 @@ mod epic_008 {
     }
 
     #[test]
+    fn env_values_are_accepted_only_for_listed_non_secret_names() {
+        const SECRET: &str = "writer profile bodies must not carry secret material";
+        for name in [
+            "VLITE_SERVE_MODE",
+            "VLITE_TRUSTED_PROXY",
+            "VLITE_ADMIN_DIR",
+            "VLITE_ADMIN_USERNAME",
+            "VLITE_SESSION_IDLE_MINUTES",
+            "VLITE_SESSION_MAX_HOURS",
+            "VLITE_AUTO_MAINTENANCE_INTERVAL_SECS",
+            "VLITE_BACKUP_INTERVAL_SECS",
+            "VLITE_BACKUP_RETENTION_ENABLED",
+            "VLITE_BACKUP_RETAIN_LAST",
+            "VLITE_BACKUP_RETAIN_DAYS",
+            "VLITE_BACKUP_DRILL_EVERY",
+            "VLITE_BACKUP_DRILL_MAX_BYTES",
+            "VLITE_SLOW_QUERY_MS",
+            "VLITE_METRICS_WITH_MEMORY",
+            "RUST_LOG",
+        ] {
+            resolves(|p| container(p)["env"] = json!([{"name": name, "value": "setting"}]));
+        }
+        for name in [
+            "VLITE_AUTH_TOKEN",
+            "VLITE_READ_ONLY_TOKEN",
+            "VLITE_ENCRYPTION_KEY",
+            "VLITE_ENCRYPTION_KEY_HEX",
+            "VLITE_EMBEDDING_KEY",
+            "VLITE_EMBEDDING_URL",
+            "vlite_serve_mode",
+            "rust_log",
+            "UNKNOWN",
+        ] {
+            for key in ["env", "Env", "ENV"] {
+                refused(
+                    |p| container(p)[key] = json!([{"name": name, "value": "material"}]),
+                    SECRET,
+                );
+                resolves(|p| container(p)[key] = json!([{"name": name, "secretRef": "reference"}]));
+            }
+        }
+        resolves(|p| container(p)["env"] = json!([]));
+        refused(
+            |p| {
+                writer(p)["properties"]["template"]["initContainers"] = json!([{
+                    "name": "init",
+                    "resources": {"cpu": 0.5, "memory": "1Gi"},
+                    "env": [{"name": "VLITE_AUTH_TOKEN", "value": "material"}]
+                }]);
+            },
+            SECRET,
+        );
+        refused(
+            |p| {
+                p["resources"][0]["body"]["nested"] =
+                    json!([[{"ENV": [{"name": "UNKNOWN", "value": "material"}]}]]);
+            },
+            SECRET,
+        );
+    }
+
+    #[test]
+    fn env_entries_carry_only_a_name_and_one_source() {
+        const SECRET: &str = "writer profile bodies must not carry secret material";
+        for env in [
+            json!(null),
+            json!({}),
+            json!("value"),
+            json!(true),
+            json!(1),
+        ] {
+            for key in ["env", "Env", "ENV"] {
+                refused(|p| container(p)[key] = env.clone(), SECRET);
+            }
+        }
+        for entry in [
+            json!(null),
+            json!([]),
+            json!("entry"),
+            json!(1),
+            json!(true),
+            json!({"value": "setting"}),
+            json!({"secretRef": "reference"}),
+            json!({"name": "", "value": "setting"}),
+            json!({"name": "", "secretRef": "reference"}),
+            json!({"name": null, "secretRef": "reference"}),
+            json!({"name": 1, "value": "setting"}),
+            json!({"name": "VLITE_SERVE_MODE"}),
+            json!({"name": "VLITE_SERVE_MODE", "value": "setting", "secretRef": "reference"}),
+            json!({"name": "VLITE_SERVE_MODE", "value": "setting", "extra": "data"}),
+            json!({"name": "a", "secretRef": "reference", "extra": "data"}),
+            json!({"name": "VLITE_SERVE_MODE", "Value": "setting"}),
+            json!({"name": "VLITE_SERVE_MODE", "value": "setting", "Value": "material"}),
+            json!({"Name": "VLITE_SERVE_MODE", "value": "setting"}),
+            json!({"name": "a", "SecretRef": "reference"}),
+        ] {
+            refused(|p| container(p)["env"] = json!([entry]), SECRET);
+        }
+        for source in ["value", "secretRef"] {
+            for value in [
+                json!(null),
+                json!(1),
+                json!(true),
+                json!([]),
+                json!({"secretRef": "reference"}),
+            ] {
+                refused(
+                    |p| {
+                        container(p)["env"] = json!([{"name": "VLITE_SERVE_MODE", source: value}]);
+                    },
+                    SECRET,
+                );
+            }
+            resolves(|p| {
+                container(p)["env"] = json!([{"name": "VLITE_SERVE_MODE", source: ""}]);
+            });
+        }
+    }
+
+    #[test]
     fn every_app_runs_a_single_revision() {
         for mode in [
             json!("Multiple"),

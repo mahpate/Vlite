@@ -129,6 +129,35 @@ function New-TestSecrets([string]$Role, [hashtable]$Candidate = $config) {
 }
 
 Assert (Test-VLiteHaParameters $config) 'Valid fixture rejected.'
+$objectNameFixture = Get-Content -Raw -LiteralPath (Join-Path $repo 'tests/fixtures/ha/control-object-name-cases.json') |
+    ConvertFrom-Json -AsHashtable
+Assert ($objectNameFixture.cases.Count -gt 0) 'Control-object name fixture is empty.'
+foreach ($case in $objectNameFixture.cases) {
+    $name = [string]$case.name
+    if ($case.ContainsKey('repeat')) { $name = ($name * [int]$case.repeat) -join '' }
+    $candidate = $config.Clone()
+    $candidate.ControlObject = $name
+    if ($case.valid) {
+        try { New-VLiteHaGatewayConfig $candidate | Out-Null }
+        catch { throw "PowerShell rejected valid control-object name $($name | ConvertTo-Json -Compress): $($_.Exception.Message)" }
+    } else {
+        Assert-Throws { New-VLiteHaGatewayConfig $candidate } 'ControlObject'
+    }
+}
+$prefixFixture = Get-Content -Raw -LiteralPath (Join-Path $repo 'tests/fixtures/ha/storage-prefix-cases.json') |
+    ConvertFrom-Json -AsHashtable
+Assert ($prefixFixture.cases.Count -gt 0) 'Storage-prefix fixture is empty.'
+foreach ($case in $prefixFixture.cases) {
+    $prefix = [string]$case.prefix
+    if ($case.ContainsKey('repeat')) { $prefix = ($prefix * [int]$case.repeat) -join '' }
+    if ($case.ContainsKey('suffix')) { $prefix += [string]$case.suffix }
+    if ($case.valid) {
+        try { Assert-VLiteHaBlobPrefix $prefix 'fixture' }
+        catch { throw "PowerShell rejected valid storage prefix $($prefix | ConvertTo-Json -Compress): $($_.Exception.Message)" }
+    } else {
+        Assert-Throws { Assert-VLiteHaBlobPrefix $prefix 'fixture' } 'prefix'
+    }
+}
 $gatewayConfig = New-VLiteHaGatewayConfig $config
 $trustConfig = $config.Clone(); $trustConfig.Audience = $config.WriterAudience
 $trust = New-VLiteHaTrustConfig $trustConfig

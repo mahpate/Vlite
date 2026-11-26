@@ -41,6 +41,8 @@ mod compaction;
 mod control_state;
 mod credentials;
 mod failover;
+mod failover_harness;
+mod failover_proof;
 mod features;
 #[cfg(test)]
 mod fencing_fault_tests;

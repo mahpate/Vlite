@@ -1,0 +1,24 @@
+{
+  "cases": [
+    { "prefix": "a/", "valid": true },
+    { "prefix": "a.b_c-9/", "valid": true },
+    { "prefix": "a/b/", "valid": true },
+    { "prefix": "a", "repeat": 199, "suffix": "/", "valid": true },
+    { "prefix": "a/", "repeat": 100, "valid": true },
+    { "prefix": "", "valid": false },
+    { "prefix": "/", "valid": false },
+    { "prefix": "a", "valid": false },
+    { "prefix": "/a/", "valid": false },
+    { "prefix": "a//b/", "valid": false },
+    { "prefix": "a//", "valid": false },
+    { "prefix": "a///", "valid": false },
+    { "prefix": "./", "valid": false },
+    { "prefix": "a/./b/", "valid": false },
+    { "prefix": "a/../b/", "valid": false },
+    { "prefix": "A/", "valid": false },
+    { "prefix": "a?/", "valid": false },
+    { "prefix": "caf\u00e9/", "valid": false },
+    { "prefix": "a\n/", "valid": false },
+    { "prefix": "a", "repeat": 200, "suffix": "/", "valid": false }
+  ]
+}

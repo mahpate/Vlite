@@ -33,13 +33,20 @@ use crate::server::ApiError;
 use crate::server::cloud_backup::azure::{self, IdentitySource, ManagementCredential};
 use reqwest::blocking::Client;
 use reqwest::{Method, Url};
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
+use std::sync::Mutex;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// The public-cloud management endpoint.
 const BASE: &str = "https://management.azure.com";
 /// The `Microsoft.App` api-version of every URL the adapter builds.
 const API_VERSION: &str = "2026-07-01";
+/// Frozen interpretation of pre-envelope handles, independent of future defaults.
+const LEGACY_API_VERSION: &str = "2026-07-01";
+/// Observation policy, not a provider SLA or permission to retry a mutation.
+const POLL_BUDGET_MS: u64 = 1_800_000;
 /// The most of any response body read: a resource or one revision page.
 const BODY_MAX: u64 = 4 * 1024 * 1024;
 /// The most revision pages one inventory reads; more is incomplete.
@@ -51,6 +58,8 @@ const UNMAPPED: &str = "unmapped";
 const CODE_MAX: usize = 128;
 /// The longest revision name addressed.
 const NAME_MAX: usize = 128;
+/// The ARM resource type of a listed revision.
+const REVISION_TYPE: &str = "Microsoft.App/containerApps/revisions";
 
 const ASYNC: &str = "async:";
 const LOCATION: &str = "location:";
@@ -76,6 +85,7 @@ pub(super) struct ArmClient {
     bodies: BTreeMap<String, Value>,
     credential: ManagementCredential,
     http: Client,
+    clock: Clock,
 }
 
 impl ArmClient {
@@ -122,6 +132,7 @@ impl ArmClient {
             // Its token client bypasses any proxy on purpose: IMDS is link-local.
             credential: ManagementCredential::new(identity, client_id)?,
             http: azure::client(no_proxy)?,
+            clock: Clock::default(),
         })
     }
 
@@ -143,12 +154,16 @@ impl ArmClient {
     /// `{base}{id}{suffix}?api-version=…`; `id` is a parsed resource ID and
     /// `suffix` checked path text, so neither escapes the path.
     fn url(&self, id: &str, suffix: &str) -> Url {
+        self.url_version(id, suffix, API_VERSION)
+    }
+
+    fn url_version(&self, id: &str, suffix: &str, api: &str) -> Url {
         let mut url = self.base.clone();
         url.set_path(&format!(
             "{}{id}{suffix}",
             self.base.path().trim_end_matches('/')
         ));
-        url.set_query(Some(&format!("api-version={API_VERSION}")));
+        url.set_query(Some(&format!("api-version={api}")));
         url
     }
 
@@ -173,6 +188,18 @@ impl ArmClient {
         headers: &[(&str, &str)],
         body: Option<Vec<u8>>,
     ) -> Option<Reply> {
+        self.send_during(method, url, token, headers, body, None)
+    }
+
+    fn send_during(
+        &self,
+        method: Method,
+        url: &Url,
+        token: &str,
+        headers: &[(&str, &str)],
+        body: Option<Vec<u8>>,
+        observation: Option<&Observation>,
+    ) -> Option<Reply> {
         if !self.under(url) {
             return None;
         }
@@ -180,6 +207,11 @@ impl ArmClient {
             .http
             .request(method, url.clone())
             .header("authorization", token);
+        if let Some(observation) = observation {
+            // Per-request timeout overrides the client's 120-second limit;
+            // shorten that limit for expiry, never lengthen it.
+            request = request.timeout(observation.remaining().ok()?.min(Duration::from_secs(120)));
+        }
         for (name, value) in headers {
             request = request.header(*name, *value);
         }
@@ -196,19 +228,40 @@ impl ArmClient {
         };
         let async_operation = header("azure-asyncoperation");
         let location = header("location");
-        Some(Reply {
+        let reply = Reply {
             status: response.status().as_u16(),
             async_operation,
             location,
             body: azure::read_limited(response, BODY_MAX).ok(),
-        })
+        };
+        if let Some(observation) = observation {
+            observation.remaining().ok()?;
+        }
+        Some(reply)
     }
 
     /// The resource `id` as a JSON object, `None` when ARM says it does not
     /// exist; `Err` names why neither is known.
     fn get(&self, id: &str, token: &str) -> Result<Option<Value>, String> {
+        self.get_during(id, token, None)
+    }
+
+    fn get_during(
+        &self,
+        id: &str,
+        token: &str,
+        observation: Option<&Observation>,
+    ) -> Result<Option<Value>, String> {
+        let api = observation.map_or(API_VERSION, |context| context.envelope.api.as_str());
         let reply = self
-            .send(Method::GET, &self.url(id, ""), token, &[], None)
+            .send_during(
+                Method::GET,
+                &self.url_version(id, "", api),
+                token,
+                &[],
+                None,
+                observation,
+            )
             .ok_or("unavailable")?;
         match reply.status {
             404 => Ok(None),
@@ -264,31 +317,32 @@ impl ArmClient {
         token: &str,
         body: Vec<u8>,
         fallback: Handle,
+        envelope: &Envelope,
     ) -> Result<String, ArmError> {
         let create = matches!(fallback, Handle::Resource(..));
         let headers = [("content-type", "application/json"), ("if-none-match", "*")];
         let headers = if create { &headers[..] } else { &headers[..1] };
         let url = self.url(id, "");
         match accepted(self.send(Method::PUT, &url, token, headers, Some(body))) {
-            Ok(reply) => Ok(self.monitor(&reply, fallback)),
-            Err(ArmError::Unknown) => Ok(fallback.persisted()),
+            Ok(reply) => self.monitor(&reply, fallback, envelope),
+            Err(ArmError::Unknown) => envelope.with_operation(&fallback),
             Err(refused) => Err(refused),
         }
     }
 
     /// DELETE; an app ARM reports gone at once, or whose DELETE may have
     /// taken effect, is `absent:`, still verified by polling.
-    fn delete(&self, id: &str, token: &str) -> Result<String, ArmError> {
+    fn delete(&self, id: &str, token: &str, envelope: &Envelope) -> Result<String, ArmError> {
         let absent = Handle::Absent(id);
         let reply = self.send(Method::DELETE, &self.url(id, ""), token, &[], None);
         if reply.as_ref().is_some_and(|reply| reply.status == 404) {
-            return Ok(absent.persisted());
+            return envelope.with_operation(&absent);
         }
-        Ok(match accepted(reply) {
-            Ok(reply) if reply.status == 202 => self.monitor(&reply, absent),
-            Ok(_) | Err(ArmError::Unknown) => absent.persisted(),
-            Err(refused) => return Err(refused),
-        })
+        match accepted(reply) {
+            Ok(reply) if reply.status == 202 => self.monitor(&reply, absent, envelope),
+            Ok(_) | Err(ArmError::Unknown) => envelope.with_operation(&absent),
+            Err(refused) => Err(refused),
+        }
     }
 
     /// Deactivates every revision flagged active in a complete inventory of
@@ -297,7 +351,13 @@ impl ArmClient {
     /// a deactivation was refused and none may have taken effect;
     /// `stop-failed:` (a terminal failure) when one was refused after
     /// another may have; otherwise `stop:`, polled until none is active.
-    fn stop(&self, id: &str, token: &str, found: &Value) -> Result<String, ArmError> {
+    fn stop(
+        &self,
+        id: &str,
+        token: &str,
+        found: &Value,
+        envelope: &Envelope,
+    ) -> Result<String, ArmError> {
         let revisions = self
             .inventory(id, token, found)
             .ok_or_else(|| refused("revision_inventory_incomplete"))?;
@@ -317,8 +377,8 @@ impl ArmClient {
         }
         match (effect, refusal) {
             (false, Some(code)) => Err(ArmError::Refused(code)),
-            (true, Some(code)) => Ok(Handle::StopFailed(id, &code).persisted()),
-            (_, None) => Ok(Handle::Stop(id).persisted()),
+            (true, Some(code)) => envelope.with_operation(&Handle::StopFailed(id, &code)),
+            (_, None) => envelope.with_operation(&Handle::Stop(id)),
         }
     }
 
@@ -328,18 +388,29 @@ impl ArmClient {
     /// followed only along this app's own list ([`Self::continuation`]),
     /// for at most [`MAX_PAGES`] pages.
     fn inventory(&self, id: &str, token: &str, app: &Value) -> Option<Vec<(Revision, bool)>> {
+        self.inventory_during(id, token, app, None)
+    }
+
+    fn inventory_during(
+        &self,
+        id: &str,
+        token: &str,
+        app: &Value,
+        observation: Option<&Observation>,
+    ) -> Option<Vec<(Revision, bool)>> {
         let (_, own) = resource_id::parse(id)?;
         // App names never contain `--`, so no other app's revision has this prefix.
         let prefix = format!("{own}--");
         let body = self.body(id);
         let mut shadow = app.clone();
         let mut revisions: Vec<(Revision, bool)> = Vec::new();
-        let mut next = Some(self.url(id, "/revisions"));
+        let api = observation.map_or(API_VERSION, |context| context.envelope.api.as_str());
+        let mut next = Some(self.url_version(id, "/revisions", api));
         for _ in 0..MAX_PAGES {
             let Some(url) = next.take() else {
                 break;
             };
-            let reply = self.send(Method::GET, &url, token, &[], None)?;
+            let reply = self.send_during(Method::GET, &url, token, &[], None, observation)?;
             if reply.status != 200 {
                 return None;
             }
@@ -408,10 +479,36 @@ impl ArmClient {
         }
     }
 
+    fn decode(&self, operation: &str) -> Option<Stored> {
+        if !text(operation) {
+            return None;
+        }
+        if operation.starts_with("arm:") {
+            let json = operation.strip_prefix("arm:1:")?;
+            let envelope: Envelope = serde_json::from_str(json).ok()?;
+            if !envelope.valid() {
+                return None;
+            }
+            self.handle(&envelope.op)?;
+            Some(Stored::V1(envelope))
+        } else {
+            self.handle(operation)?;
+            Some(Stored::Legacy {
+                api: LEGACY_API_VERSION,
+                op: operation.into(),
+            })
+        }
+    }
+
     /// The handle to watch an accepted request by: its
     /// `Azure-AsyncOperation`, else its `Location`, when under the base and
     /// short enough to persist with `fallback`; else `fallback` alone.
-    fn monitor(&self, reply: &Reply, fallback: Handle) -> String {
+    fn monitor(
+        &self,
+        reply: &Reply,
+        fallback: Handle,
+        envelope: &Envelope,
+    ) -> Result<String, ArmError> {
         let fallback = Box::new(fallback);
         let watched = |url: &Option<String>| {
             Url::parse(url.as_deref()?)
@@ -424,40 +521,60 @@ impl ArmClient {
         ]
         .into_iter()
         .flatten()
-        .map(|handle| handle.persisted())
-        .find(|handle| text(handle))
-        .unwrap_or_else(|| fallback.persisted())
+        .find_map(|handle| envelope.with_operation(&handle).ok())
+        .map_or_else(|| envelope.with_operation(&fallback), Ok)
     }
 
     /// Polls `handle`. A monitor that no longer answers definitively (a
     /// Location reply other than 2xx or a coded 400/409/422, an
     /// Azure-AsyncOperation reply other than 200) is replaced by its
     /// fallback, a conservative readback of the resource.
-    fn watch(&self, handle: &Handle, token: &str) -> Result<Poll, ArmError> {
-        let fetch = |url: &Url| self.send(Method::GET, url, token, &[], None);
+    fn watch(
+        &self,
+        handle: &Handle,
+        token: &str,
+        observation: &Observation,
+    ) -> Result<Poll, ArmError> {
+        observation.remaining()?;
+        let fetch =
+            |url: &Url| self.send_during(Method::GET, url, token, &[], None, Some(observation));
+        let get = |id: &str| self.get_during(id, token, Some(observation));
+        let completed = |poll, fallback: &Handle| match poll {
+            Poll::Succeeded if matches!(fallback, Handle::Absent(_)) => {
+                self.watch(fallback, token, observation)
+            }
+            poll => Ok(poll),
+        };
+        let check_owner = |found: &Value| {
+            let expected = &observation.envelope.owner;
+            match owner_tag(found)? {
+                Some(actual) if &actual == expected => Ok(()),
+                _ => Err(ArmError::Unknown),
+            }
+        };
         match handle {
             Handle::Location(url, fallback) => {
                 let reply = fetch(url).ok_or(ArmError::Unknown)?;
                 match (reply.status, reply.code()) {
                     (202, _) => Ok(Poll::Running),
-                    (200 | 201 | 204, _) => Ok(Poll::Succeeded),
+                    (200 | 201 | 204, _) => completed(Poll::Succeeded, fallback),
                     (400 | 409 | 422, Some(code)) => Ok(Poll::Failed(code)),
-                    _ => self.watch(fallback, token),
+                    _ => self.watch(fallback, token, observation),
                 }
             }
             Handle::Async(url, fallback) => {
                 let reply = fetch(url).ok_or(ArmError::Unknown)?;
                 if reply.status != 200 {
-                    return self.watch(fallback, token);
+                    return self.watch(fallback, token, observation);
                 }
                 let operation = reply.json().ok_or(ArmError::Unknown)?;
                 let status = operation
                     .get("status")
                     .and_then(Value::as_str)
                     .ok_or(ArmError::Unknown)?;
-                Ok(terminal(status, reply.code()))
+                completed(terminal(status, reply.code()), fallback)
             }
-            Handle::Resource(id, kind) => match self.get(id, token) {
+            Handle::Resource(id, kind) => match get(id) {
                 Ok(Some(_)) if *kind == Type::Storage => Ok(Poll::Succeeded),
                 Ok(Some(found)) => Ok(terminal(state(&found), None)),
                 Ok(None) | Err(_) => Err(ArmError::Unknown),
@@ -466,7 +583,7 @@ impl ArmClient {
                 // The profile body is only the shape the observed body is
                 // projected onto; the comparison is with the digest sent.
                 let body = self.body(id).ok_or(ArmError::Unknown)?;
-                match self.get(id, token) {
+                match get(id) {
                     // Any terminal state of another configuration is stale.
                     Ok(Some(found)) => Ok(match terminal(state(&found), None) {
                         poll if digest::observed_digest(body, &found) == *sent => poll,
@@ -475,15 +592,21 @@ impl ArmClient {
                     Ok(None) | Err(_) => Err(ArmError::Unknown),
                 }
             }
-            Handle::Absent(id) => match self.get(id, token) {
-                Ok(None) => Ok(Poll::Succeeded),
-                Ok(Some(_)) => Ok(Poll::Running),
-                Err(_) => Err(ArmError::Unknown),
-            },
-            Handle::Stop(id) => match self.get(id, token) {
+            Handle::Absent(id) => match get(id) {
                 Ok(None) => Ok(Poll::Succeeded),
                 Ok(Some(found)) => {
-                    let revisions = self.inventory(id, token, &found).ok_or(ArmError::Unknown)?;
+                    check_owner(&found)?;
+                    Ok(Poll::Running)
+                }
+                Err(_) => Err(ArmError::Unknown),
+            },
+            Handle::Stop(id) => match get(id) {
+                Ok(None) => Ok(Poll::Succeeded),
+                Ok(Some(found)) => {
+                    check_owner(&found)?;
+                    let revisions = self
+                        .inventory_during(id, token, &found, Some(observation))
+                        .ok_or(ArmError::Unknown)?;
                     Ok(if revisions.iter().any(|(revision, _)| revision.active) {
                         Poll::Running
                     } else {
@@ -501,6 +624,37 @@ impl Arm for ArmClient {
     fn begin(&self, call: &Call) -> Result<String, ArmError> {
         let plan = self.plan(call)?;
         let id = call.resource.as_str();
+        let started = self.clock.now().ok_or(ArmError::Unknown)?;
+        let deadline = started
+            .checked_add(POLL_BUDGET_MS)
+            .ok_or(ArmError::Unknown)?;
+        UNIX_EPOCH
+            .checked_add(Duration::from_millis(deadline))
+            .ok_or(ArmError::Unknown)?;
+        let envelope = Envelope {
+            api: API_VERSION.into(),
+            deadline,
+            op: match &plan {
+                Plan::Create(_) => Handle::Resource(id, Type::ContainerApp),
+                Plan::Update(_, sent) => Handle::Update(id, sent),
+                Plan::Delete => Handle::Absent(id),
+                Plan::Stop => Handle::Stop(id),
+            }
+            .persisted(),
+            owner: call.owner.clone(),
+            started,
+        };
+        if !text(&call.owner) || envelope.persisted().is_none() {
+            return Err(refused("handle_unpersistable"));
+        }
+        // A partial Stop must remain recordable even with the longest error code.
+        if matches!(plan, Plan::Stop)
+            && envelope
+                .with_operation(&Handle::StopFailed(id, &"x".repeat(CODE_MAX)))
+                .is_err()
+        {
+            return Err(refused("handle_unpersistable"));
+        }
         let token = self.token().ok_or_else(|| refused("token_unavailable"))?;
         // Nothing mutating has been sent yet, so a failed pre-check refuses.
         let found = self
@@ -509,35 +663,68 @@ impl Arm for ArmClient {
         match (plan, found) {
             // Never adopt or overwrite what already exists.
             (Plan::Create(_), Some(_)) => Err(refused("resource_exists")),
-            (Plan::Create(body), None) => {
-                self.write(id, &token, body, Handle::Resource(id, Type::ContainerApp))
-            }
+            (Plan::Create(body), None) => self.write(
+                id,
+                &token,
+                body,
+                Handle::Resource(id, Type::ContainerApp),
+                &envelope,
+            ),
             (Plan::Update(..), None) => Err(refused("resource_missing")),
             (Plan::Update(body, sent), Some(found)) => {
                 owned(&found, &call.owner)?;
-                self.write(id, &token, body, Handle::Update(id, &sent))
+                self.write(id, &token, body, Handle::Update(id, &sent), &envelope)
             }
-            (Plan::Delete, None) => Ok(Handle::Absent(id).persisted()),
+            (Plan::Delete, None) => envelope.with_operation(&Handle::Absent(id)),
             (Plan::Delete, Some(found)) => {
                 owned(&found, &call.owner)?;
-                self.delete(id, &token)
+                self.delete(id, &token, &envelope)
             }
-            (Plan::Stop, None) => Ok(Handle::Stop(id).persisted()),
+            (Plan::Stop, None) => envelope.with_operation(&Handle::Stop(id)),
             (Plan::Stop, Some(found)) => {
                 owned(&found, &call.owner)?;
-                self.stop(id, &token, &found)
+                self.stop(id, &token, &found, &envelope)
             }
         }
     }
 
     fn poll(&self, operation: &str) -> Result<Poll, ArmError> {
         // A handle that is not ours never gets the token.
-        let handle = self.handle(operation).ok_or(ArmError::Unknown)?;
+        let stored = self.decode(operation).ok_or(ArmError::Unknown)?;
+        let envelope = match &stored {
+            Stored::V1(envelope) => envelope,
+            // A legacy string still decodes, but contains no honest original
+            // observation budget. Never fabricate one or redispatch its action.
+            Stored::Legacy { api, op } => {
+                debug_assert_eq!(*api, LEGACY_API_VERSION);
+                debug_assert!(self.handle(op).is_some());
+                return Err(ArmError::Unknown);
+            }
+        };
+        let observation = Observation {
+            envelope,
+            clock: &self.clock,
+        };
+        observation.remaining()?;
+        let handle = self.handle(&envelope.op).ok_or(ArmError::Unknown)?;
+        let mut fallback = &handle;
+        while let Handle::Async(_, inner) | Handle::Location(_, inner) = fallback {
+            fallback = inner;
+        }
+        if let Handle::Update(id, sent) = fallback
+            && self.body(id).map(digest::config_digest).as_deref() != Some(*sent)
+        {
+            return Err(ArmError::Unknown);
+        }
         if let Handle::StopFailed(_, code) = handle {
+            observation.remaining()?;
             return Ok(Poll::Failed(code.into()));
         }
         let token = self.token().ok_or(ArmError::Unknown)?;
-        self.watch(&handle, &token)
+        observation.remaining()?;
+        let result = self.watch(&handle, &token, &observation);
+        observation.remaining()?;
+        result
     }
 
     fn read(&self, resource: &str) -> Result<Option<Observed>, ArmError> {
@@ -579,7 +766,110 @@ enum Plan {
     Stop,
 }
 
-/// An operation handle; [`ArmClient::handle`] parses what
+/// Persisted provenance. Unknown/duplicate fields are not forward-compatible:
+/// they require an adapter that can prove that version's observation semantics.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Envelope {
+    api: String,
+    deadline: u64,
+    op: String,
+    owner: String,
+    started: u64,
+}
+
+impl Envelope {
+    fn valid(&self) -> bool {
+        self.api == API_VERSION
+            && text(&self.owner)
+            && text(&self.op)
+            && self.started.checked_add(POLL_BUDGET_MS) == Some(self.deadline)
+            && UNIX_EPOCH
+                .checked_add(Duration::from_millis(self.deadline))
+                .is_some()
+    }
+
+    fn persisted(&self) -> Option<String> {
+        let encoded = format!("arm:1:{}", serde_json::to_string(self).ok()?);
+        text(&encoded).then_some(encoded)
+    }
+
+    fn with_operation(&self, handle: &Handle) -> Result<String, ArmError> {
+        Self {
+            op: handle.persisted(),
+            ..self.clone()
+        }
+        .persisted()
+        .ok_or(ArmError::Unknown)
+    }
+}
+
+enum Stored {
+    Legacy { api: &'static str, op: String },
+    V1(Envelope),
+}
+
+struct Observation<'a> {
+    envelope: &'a Envelope,
+    clock: &'a Clock,
+}
+
+impl Observation<'_> {
+    fn remaining(&self) -> Result<Duration, ArmError> {
+        let now = self.clock.now().ok_or(ArmError::Unknown)?;
+        if now < self.envelope.started || now >= self.envelope.deadline {
+            return Err(ArmError::Unknown);
+        }
+        Ok(Duration::from_millis(self.envelope.deadline - now))
+    }
+}
+
+type ClockSource = dyn Fn() -> Option<(u64, Instant)> + Send + Sync;
+
+struct Clock {
+    source: Box<ClockSource>,
+    last: Mutex<Option<(u64, Duration, Instant)>>,
+}
+
+impl Default for Clock {
+    fn default() -> Self {
+        Self {
+            source: Box::new(|| {
+                let millis = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .ok()?
+                    .as_millis();
+                Some((u64::try_from(millis).ok()?, Instant::now()))
+            }),
+            last: Mutex::new(None),
+        }
+    }
+}
+
+impl Clock {
+    fn now(&self) -> Option<u64> {
+        let (wall, instant) = (self.source)()?;
+        let mut last = self.last.lock().ok()?;
+        let wall_time = Duration::from_millis(wall);
+        let effective = match *last {
+            Some((prior, effective, at)) => {
+                if wall < prior {
+                    return None;
+                }
+                let elapsed = instant.checked_duration_since(at)?;
+                wall_time.max(effective.checked_add(elapsed)?)
+            }
+            None => wall_time,
+        };
+        *last = Some((wall, effective, instant));
+        u64::try_from(effective.as_millis()).ok()
+    }
+}
+
+/// An inner operation handle; new records wrap it in `arm:1:{json}`
+/// carrying API, owner, original start and observation deadline. Legacy
+/// strings remain decodable without rewriting their journal.
+/// [`ArmClient::handle`] parses what
 /// [`Handle::persisted`] formats. The persisted grammar:
 ///
 /// ```text
@@ -599,8 +889,10 @@ enum Plan {
 /// handle splits at its first space: `url` (under the base) never holds
 /// one, as the `url` crate percent-encodes spaces, and neither does a
 /// fallback, as `resource_id::parse` rejects them. `@` likewise occurs in
-/// no ID, digest or code. A monitor whose combined handle would exceed 2048
-/// bytes is dropped and the fallback alone persisted.
+/// no ID, digest or code. A monitor whose complete envelope would exceed
+/// 2048 bytes is dropped without changing the fallback or its provenance.
+/// Untimed legacy uncertainty, profile drift and expiry require operator
+/// reconciliation; none authorizes another Stop/Delete or releases a claim.
 #[derive(Clone, Debug, PartialEq)]
 enum Handle<'a> {
     Async(Url, Box<Handle<'a>>),
@@ -737,11 +1029,12 @@ fn owned(found: &Value, owner: &str) -> Result<(), ArmError> {
 
 /// One listed revision of the app at `id` with its `active` flag, `None`
 /// when malformed or not that app's: its name must be `prefix` (`{app}--`)
-/// and a nonempty suffix, and its ID, when listed, exactly
-/// `{id}/revisions/{name}` (both ASCII case-insensitively, as ARM compares
-/// them). It is active while flagged or still running replicas; a missing
-/// replica count is malformed, never zero. Its digest is the app's
-/// (`shadow`) with this revision's template.
+/// and a nonempty suffix, its ID, when listed, exactly
+/// `{id}/revisions/{name}`, and its type, when listed, `REVISION_TYPE` (all
+/// ASCII case-insensitively, as ARM compares them). It is active while
+/// flagged or still running replicas; a missing replica count is malformed,
+/// never zero. Its digest is the app's (`shadow`) with this revision's
+/// template.
 fn revision(
     item: &Value,
     id: &str,
@@ -762,6 +1055,11 @@ fn revision(
         None => {}
         Some(Value::String(listed))
             if listed.eq_ignore_ascii_case(&format!("{id}/revisions/{name}")) => {}
+        Some(_) => return None,
+    }
+    match item.get("type") {
+        None => {}
+        Some(Value::String(listed)) if listed.eq_ignore_ascii_case(REVISION_TYPE) => {}
         Some(_) => return None,
     }
     let properties = item.get("properties")?;
@@ -831,10 +1129,20 @@ fn refused(code: &str) -> ArmError {
 
 #[cfg(test)]
 mod tests {
+    use super::super::aca::Driver;
+    use super::super::guard::Guards;
+    use super::super::{
+        Action, ActuatorStopped, DataDisposition, Decision, Intent, Objects, Operations, Payload,
+        Snapshot, StepOutcome, activate, admin, request_cancel, reserve, sha256_hex,
+    };
     use super::*;
+    use crate::server::cloud_backup::fake::Memory;
+    use crate::server::control_state::{Route, Slot};
+    use crate::server::{credentials, tenants};
     use serde_json::json;
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::{TcpListener, TcpStream};
+    use std::sync::Arc;
     use std::thread::JoinHandle;
 
     const SCOPE: &str = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-1/providers/Microsoft.App";
@@ -852,6 +1160,7 @@ mod tests {
     struct Step {
         line: String,
         answer: Option<String>,
+        before_reply: Option<Box<dyn FnOnce() + Send>>,
     }
 
     /// A request as the fake received it (header names lowercased).
@@ -927,7 +1236,12 @@ mod tests {
                 let mut body = vec![0; length];
                 reader.read_exact(&mut body).unwrap();
                 let answer = match steps.next() {
-                    Some(step) if step.line == line => step.answer,
+                    Some(step) if step.line == line => {
+                        if let Some(hook) = step.before_reply {
+                            hook();
+                        }
+                        step.answer
+                    }
                     _ => Some(reply(500, &[], "")),
                 };
                 seen.push(Seen {
@@ -982,6 +1296,7 @@ mod tests {
         Step {
             line: line.into(),
             answer: Some(answer),
+            before_reply: None,
         }
     }
 
@@ -989,6 +1304,7 @@ mod tests {
         Step {
             line: line.into(),
             answer: None,
+            before_reply: None,
         }
     }
 
@@ -1084,7 +1400,14 @@ mod tests {
             header: "hdr-secret".into(),
         };
         let bodies = bodies.into_iter().collect();
-        ArmClient::for_test(base, bodies, identity, client_id.map(str::to_owned)).unwrap()
+        let mut arm =
+            ArmClient::for_test(base, bodies, identity, client_id.map(str::to_owned)).unwrap();
+        let instant = Instant::now();
+        arm.clock = Clock {
+            source: Box::new(move || Some((START, instant))),
+            last: Mutex::new(None),
+        };
+        arm
     }
 
     fn mapped(id: &str) -> Vec<(String, Value)> {
@@ -1118,6 +1441,1278 @@ mod tests {
         body
     }
 
+    const START: u64 = 1_700_000_000_000;
+    const DEADLINE: u64 = START + 1_800_000;
+
+    fn v1(op: impl AsRef<str>) -> String {
+        format!(
+            "arm:1:{}",
+            json!({"api": API_VERSION, "owner": OWNER, "started": START,
+                "deadline": DEADLINE, "op": op.as_ref()})
+        )
+    }
+
+    #[derive(Clone)]
+    struct TestClock {
+        sample: std::sync::Arc<Mutex<Option<(u64, Instant)>>>,
+    }
+
+    impl TestClock {
+        fn install(arm: &mut ArmClient, now: u64) -> Self {
+            let clock = Self {
+                sample: std::sync::Arc::new(Mutex::new(Some((now, Instant::now())))),
+            };
+            let source = clock.clone();
+            arm.clock = Clock {
+                source: Box::new(move || *source.sample.lock().unwrap()),
+                last: Mutex::new(None),
+            };
+            clock
+        }
+
+        fn set(&self, now: u64) {
+            self.sample.lock().unwrap().as_mut().unwrap().0 = now;
+        }
+
+        fn during(&self, mut step: Step, now: u64) -> Step {
+            let clock = self.clone();
+            step.before_reply = Some(Box::new(move || clock.set(now)));
+            step
+        }
+    }
+
+    fn envelope(handle: &str) -> Value {
+        serde_json::from_str(handle.strip_prefix("arm:1:").unwrap()).unwrap()
+    }
+
+    #[test]
+    fn v1_handles_round_trip_every_operation_and_stamp_the_arm_api() {
+        let (listener, base) = bind();
+        let id = app("app-1");
+        let env = format!("{SCOPE}/managedEnvironments/env-1");
+        let storage = format!("{env}/storages/share-1");
+        let fake = serve(
+            listener,
+            vec![
+                token(),
+                on(line("GET", &id), status(404)),
+                on(line("PUT", &id), status(201)),
+            ],
+        );
+        let arm = adapter(&base, mapped(&id), None);
+        let emitted = arm.begin(&call(&id, create())).unwrap();
+        let metadata = envelope(&emitted);
+        assert_eq!(metadata["api"], API_VERSION);
+        assert_eq!(metadata["owner"], OWNER);
+        assert_eq!(metadata["started"], START);
+        assert_eq!(metadata["deadline"], DEADLINE);
+        let digest = digest::config_digest(&desired(IMAGE));
+        let mut operations = vec![format!("stop:{id}"), format!("stop-failed:{id}@Conflict")];
+        for op in [
+            format!("resource:{id}"),
+            format!("resource:{env}"),
+            format!("resource:{storage}"),
+            format!("update:{id}@{digest}"),
+            format!("absent:{id}"),
+            format!("absent:{storage}"),
+        ] {
+            operations.push(format!("async:{base}/operations/x?api-version=opaque {op}"));
+            operations.push(format!("location:{base}/operations/x {op}"));
+            operations.push(op);
+        }
+        for op in operations {
+            let encoded = v1(&op);
+            let decoded = arm.decode(&encoded).unwrap();
+            let Stored::V1(decoded) = decoded else {
+                panic!("versioned handle decoded as legacy");
+            };
+            assert_eq!(arm.handle(&decoded.op).unwrap().persisted(), op);
+            assert_eq!(envelope(&decoded.persisted().unwrap()), envelope(&encoded));
+        }
+        fake.finish();
+    }
+
+    #[test]
+    fn legacy_handles_decode_without_rewriting_the_journal() {
+        use super::super::{Journal, SCHEMA};
+        let (listener, base) = bind();
+        let fake = serve(listener, vec![]);
+        let id = app("app-1");
+        let arm = adapter(&base, mapped(&id), None);
+        let env = format!("{SCOPE}/managedEnvironments/env-1");
+        let storage = format!("{env}/storages/share-1");
+        let mut operations = vec![None];
+        operations.extend(all_operations(&base, &id).into_iter().map(Some));
+        for resource in [env, storage] {
+            for op in [format!("resource:{resource}"), format!("absent:{resource}")] {
+                operations.push(Some(format!("async:{base}/op {op}")));
+                operations.push(Some(format!("location:{base}/op {op}")));
+                operations.push(Some(op));
+            }
+        }
+        for operation in operations {
+            let mut original = json!({
+                "schema": SCHEMA, "operation_id": "old-operation", "generation": 1,
+                "attempt": "old-worker", "closed": false,
+                "steps": [{"sequence": 1, "attempt": "old-worker",
+                    "action": {"resource": id, "operation": "delete",
+                        "request_digest": "a".repeat(64), "destructive": true},
+                    "outcome": {"state": "uncertain"}}]
+            });
+            if let Some(op) = &operation {
+                original["steps"][0]["arm_operation"] = json!(op);
+                assert!(matches!(
+                    arm.decode(op),
+                    Some(Stored::Legacy {
+                        api: LEGACY_API_VERSION,
+                        ..
+                    })
+                ));
+            }
+            let loaded: Journal = serde_json::from_value(original.clone()).unwrap();
+            assert_eq!(serde_json::to_value(loaded).unwrap(), original);
+            original["steps"][0]["outcome"] = json!({"state": "settled", "observed": "deleted"});
+            original["closed"] = json!(true);
+            let settled: Journal = serde_json::from_value(original.clone()).unwrap();
+            assert_eq!(serde_json::to_value(settled).unwrap(), original);
+        }
+        assert!(fake.finish().is_empty());
+    }
+
+    #[test]
+    fn unsupported_handle_schema_or_api_is_unknown_before_token_acquisition() {
+        let (listener, base) = bind();
+        let fake = serve(listener, vec![]);
+        let id = app("app-1");
+        let arm = adapter(&base, mapped(&id), None);
+        let valid = v1(format!("resource:{id}"));
+        let mut invalid = vec![valid.replacen("arm:1:", "arm:2:", 1)];
+        for (key, value) in [
+            ("api", json!("2099-01-01")),
+            ("owner", json!("bad\nowner")),
+            ("started", json!("yesterday")),
+            ("started", json!(u64::MAX)),
+            ("deadline", json!(START - 1)),
+            ("extra", json!(true)),
+            ("op", json!(valid)),
+            (
+                "op",
+                json!(format!("async:http://foreign.invalid/op resource:{id}")),
+            ),
+        ] {
+            let mut changed = envelope(&valid);
+            changed[key] = value;
+            invalid.push(format!("arm:1:{changed}"));
+        }
+        for key in ["api", "owner", "started", "deadline", "op"] {
+            let mut changed = envelope(&valid);
+            changed.as_object_mut().unwrap().remove(key);
+            invalid.push(format!("arm:1:{changed}"));
+        }
+        invalid.push(valid.replacen('{', "{\"api\":\"2026-07-01\",", 1));
+        for op in invalid {
+            assert_eq!(arm.poll(&op), Err(ArmError::Unknown), "{op}");
+        }
+        assert!(fake.finish().is_empty());
+    }
+
+    #[test]
+    fn handle_size_is_checked_before_mutation_and_preserved_on_monitor_fallback() {
+        let (listener, base) = bind();
+        let id = app("app-1");
+        let long = format!("{base}/operations/{}", "x".repeat(2100));
+        let fake = serve(
+            listener,
+            vec![
+                token(),
+                on(line("GET", &id), status(404)),
+                on(
+                    line("PUT", &id),
+                    reply(
+                        201,
+                        &[("azure-asyncoperation", &long), ("location", &long)],
+                        "",
+                    ),
+                ),
+            ],
+        );
+        let arm = adapter(&base, mapped(&id), None);
+        let mut request = call(&id, create());
+        let size = v1(format!("resource:{id}")).len();
+        request.owner.push_str(&"x".repeat(2048 - size));
+        let handle = arm.begin(&request).unwrap();
+        assert_eq!(handle.len(), 2048);
+        assert!(arm.decode(&handle).is_some());
+        let metadata = envelope(&handle);
+        assert_eq!(metadata["owner"], request.owner);
+        assert_eq!(metadata["op"], format!("resource:{id}"));
+        assert_eq!(metadata["started"], START);
+        assert_eq!(metadata["deadline"], DEADLINE);
+        request.owner.push('x');
+        assert!(matches!(arm.begin(&request), Err(ArmError::Refused(_))));
+        request.owner.push_str(&"x".repeat(256));
+        for verb in [update(), Verb::Delete, Verb::Stop] {
+            request.verb = verb;
+            assert!(matches!(arm.begin(&request), Err(ArmError::Refused(_))));
+        }
+        assert_eq!(arm.poll(&format!("{handle} ")), Err(ArmError::Unknown));
+        assert_eq!(fake.finish().len(), 3);
+    }
+
+    fn profile_drift_is_unknown(bodies: Vec<Value>, monitors: bool) {
+        let (listener, base) = bind();
+        let id = app("app-1");
+        let fake = serve(
+            listener,
+            vec![
+                token(),
+                on(line("GET", &id), ok(found(IMAGE, Some(OWNER)))),
+                on(line("PUT", &id), status(200)),
+            ],
+        );
+        let original = adapter(&base, mapped(&id), None);
+        let persisted = original.begin(&call(&id, update())).unwrap();
+        let loaded: String =
+            serde_json::from_str(&serde_json::to_string(&persisted).unwrap()).unwrap();
+        let op = envelope(&loaded)["op"].as_str().unwrap().to_owned();
+        for body in bodies {
+            let arm = adapter(&base, vec![(id.clone(), body)], None);
+            let handles = if monitors {
+                vec![
+                    format!("async:{base}/operations/succeeded {op}"),
+                    format!("location:{base}/operations/succeeded {op}"),
+                ]
+            } else {
+                vec![op.clone()]
+            };
+            for handle in handles {
+                assert_eq!(arm.poll(&v1(handle)), Err(ArmError::Unknown));
+            }
+        }
+        let arm = adapter(&base, vec![], None);
+        for handle in [
+            op.clone(),
+            format!("async:{base}/operations/succeeded {op}"),
+            format!("location:{base}/operations/succeeded {op}"),
+        ] {
+            assert_eq!(arm.poll(&v1(handle)), Err(ArmError::Unknown));
+        }
+        assert_eq!(fake.finish().len(), 3);
+    }
+
+    #[test]
+    fn an_update_with_a_changed_profile_shape_is_unknown_before_any_request() {
+        let mut added = desired(IMAGE);
+        added["properties"]["configuration"]["ingress"] = json!({"external": false});
+        let mut removed = desired(IMAGE);
+        removed["properties"]
+            .as_object_mut()
+            .unwrap()
+            .remove("configuration");
+        let mut array = desired(IMAGE);
+        array["properties"]["template"]["containers"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"name": "sidecar", "image": "example.azurecr.io/sidecar:1"}));
+        profile_drift_is_unknown(vec![added, removed, array], false);
+    }
+
+    #[test]
+    fn an_update_with_value_only_profile_drift_is_explicitly_unknown() {
+        let mut replicas = desired(IMAGE);
+        replicas["properties"]["template"]["scale"]["minReplicas"] = json!(2);
+        profile_drift_is_unknown(vec![desired("example.azurecr.io/other:2"), replicas], false);
+    }
+
+    #[test]
+    fn update_monitors_cannot_bypass_the_profile_digest_guard() {
+        profile_drift_is_unknown(vec![desired("example.azurecr.io/other:2")], true);
+    }
+
+    #[test]
+    fn an_update_with_the_original_profile_keeps_exact_poll_semantics() {
+        an_update_succeeds_only_on_the_desired_configuration();
+    }
+
+    fn invalid_owners() -> Vec<Value> {
+        let mut missing_tags = found(IMAGE, None);
+        missing_tags.as_object_mut().unwrap().remove("tags");
+        let mut null_tags = found(IMAGE, None);
+        null_tags["tags"] = Value::Null;
+        let mut null_owner = found(IMAGE, None);
+        null_owner["tags"][OWNER_TAG] = Value::Null;
+        let mut number = found(IMAGE, None);
+        number["tags"][OWNER_TAG] = json!(7);
+        let mut duplicate = found(IMAGE, Some(OWNER));
+        duplicate["tags"]["VLITE-TENANT"] = json!(OWNER);
+        vec![
+            missing_tags,
+            null_tags,
+            null_owner,
+            number,
+            duplicate,
+            found(IMAGE, None),
+            found(IMAGE, Some("vlite-tenant:foreign")),
+        ]
+    }
+
+    #[test]
+    fn an_absent_handle_rechecks_the_recorded_owner_when_a_name_is_reused() {
+        let (listener, base) = bind();
+        let id = app("app-1");
+        let fake = serve(
+            listener,
+            vec![
+                token(),
+                on(line("GET", &id), ok(found(IMAGE, Some(OWNER)))),
+                dropped(line("DELETE", &id)),
+                on(
+                    line("GET", &id),
+                    ok(found(IMAGE, Some("vlite-tenant:foreign"))),
+                ),
+            ],
+        );
+        let arm = adapter(&base, mapped(&id), None);
+        let handle = arm.begin(&call(&id, Verb::Delete)).unwrap();
+        assert_eq!(envelope(&handle)["owner"], OWNER);
+        assert_eq!(arm.poll(&handle), Err(ArmError::Unknown));
+        assert_eq!(
+            fake.finish()
+                .iter()
+                .filter(|s| s.line.starts_with("DELETE "))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn an_absent_handle_rejects_missing_ambiguous_or_malformed_owners() {
+        let (listener, base) = bind();
+        let id = app("app-1");
+        let invalid = invalid_owners();
+        let mut steps = vec![token()];
+        steps.extend(
+            invalid
+                .iter()
+                .cloned()
+                .map(|body| on(line("GET", &id), ok(body))),
+        );
+        let mut recased = found(IMAGE, None);
+        recased["tags"]["VLite-Tenant"] = json!(OWNER);
+        steps.push(on(line("GET", &id), ok(recased)));
+        let fake = serve(listener, steps);
+        let arm = adapter(&base, mapped(&id), None);
+        let handle = v1(format!("absent:{id}"));
+        for _ in invalid {
+            assert_eq!(arm.poll(&handle), Err(ArmError::Unknown));
+        }
+        assert_eq!(arm.poll(&handle), Ok(Poll::Running));
+        fake.finish();
+    }
+
+    #[test]
+    fn a_successful_delete_monitor_still_requires_owned_absence_readback() {
+        for asynchronous in [true, false] {
+            let (listener, base) = bind();
+            let id = app("app-1");
+            let terminal = || {
+                if asynchronous {
+                    ok(json!({"status": "Succeeded"}))
+                } else {
+                    status(204)
+                }
+            };
+            let running = if asynchronous {
+                ok(json!({"status": "Running"}))
+            } else {
+                status(202)
+            };
+            let failed = if asynchronous {
+                ok(json!({"status": "Failed", "error": {"code": "Conflict"}}))
+            } else {
+                arm_error(409, "Conflict")
+            };
+            let fake = serve(
+                listener,
+                vec![
+                    token(),
+                    on("GET /operations/delete", terminal()),
+                    on(
+                        line("GET", &id),
+                        ok(found(IMAGE, Some("vlite-tenant:foreign"))),
+                    ),
+                    on("GET /operations/delete", terminal()),
+                    on(line("GET", &id), ok(found(IMAGE, Some(OWNER)))),
+                    on("GET /operations/delete", terminal()),
+                    on(line("GET", &id), status(404)),
+                    on("GET /operations/delete", running),
+                    on("GET /operations/delete", failed),
+                ],
+            );
+            let arm = adapter(&base, mapped(&id), None);
+            let prefix = if asynchronous { ASYNC } else { LOCATION };
+            let handle = v1(format!("{prefix}{base}/operations/delete absent:{id}"));
+            assert_eq!(arm.poll(&handle), Err(ArmError::Unknown));
+            assert_eq!(arm.poll(&handle), Ok(Poll::Running));
+            assert_eq!(arm.poll(&handle), Ok(Poll::Succeeded));
+            assert_eq!(arm.poll(&handle), Ok(Poll::Running));
+            assert_eq!(arm.poll(&handle), Ok(Poll::Failed("Conflict".into())));
+            fake.finish();
+        }
+    }
+
+    #[test]
+    fn a_stop_handle_never_proves_a_foreign_replacement_stopped() {
+        let (listener, base) = bind();
+        let id = app("app-1");
+        let invalid = invalid_owners();
+        let mut steps = vec![token()];
+        steps.extend(
+            invalid
+                .iter()
+                .cloned()
+                .map(|body| on(line("GET", &id), ok(body))),
+        );
+        for replicas in [1, 0] {
+            steps.push(on(line("GET", &id), ok(found(IMAGE, Some(OWNER)))));
+            steps.push(on(
+                line("GET", &format!("{id}/revisions")),
+                page(vec![entry("app-1--r1", false, replicas, IMAGE)], None),
+            ));
+        }
+        let fake = serve(listener, steps);
+        let arm = adapter(&base, mapped(&id), None);
+        let handle = v1(format!("stop:{id}"));
+        for _ in invalid {
+            assert_eq!(arm.poll(&handle), Err(ArmError::Unknown));
+        }
+        assert_eq!(arm.poll(&handle), Ok(Poll::Running));
+        assert_eq!(arm.poll(&handle), Ok(Poll::Succeeded));
+        fake.finish();
+    }
+
+    #[test]
+    fn legacy_destructive_handles_never_infer_the_expected_owner() {
+        let (listener, base) = bind();
+        let fake = serve(listener, vec![]);
+        let id = app("app-1");
+        let arm = adapter(&base, mapped(&id), None);
+        for op in [format!("absent:{id}"), format!("stop:{id}")] {
+            assert_eq!(arm.poll(&op), Err(ArmError::Unknown));
+        }
+        assert!(fake.finish().is_empty());
+    }
+
+    fn all_operations(base: &str, id: &str) -> Vec<String> {
+        let mut operations = vec![format!("stop:{id}"), format!("stop-failed:{id}@Conflict")];
+        for fallback in [
+            format!("resource:{id}"),
+            format!("update:{id}@{}", digest::config_digest(&desired(IMAGE))),
+            format!("absent:{id}"),
+        ] {
+            operations.push(format!("async:{base}/operations/x {fallback}"));
+            operations.push(format!("location:{base}/operations/x {fallback}"));
+            operations.push(fallback);
+        }
+        operations
+    }
+
+    #[test]
+    fn a_poll_deadline_expires_to_unknown_at_the_exact_boundary() {
+        let id = app("app-1");
+        for index in 0..11 {
+            let (listener, base) = bind();
+            let op = all_operations(&base, &id).swap_remove(index);
+            let mut arm = adapter(&base, mapped(&id), None);
+            let clock = TestClock::install(&mut arm, START);
+            let mut steps = vec![];
+            if !op.starts_with(STOP_FAILED) {
+                steps.push(token());
+            }
+            if op.starts_with(ASYNC) {
+                steps.push(clock.during(
+                    on("GET /operations/x", ok(json!({"status": "Running"}))),
+                    DEADLINE - 1,
+                ));
+            } else if op.starts_with(LOCATION) {
+                steps.push(clock.during(on("GET /operations/x", status(202)), DEADLINE - 1));
+            } else if op.starts_with(STOP) {
+                steps.push(on(line("GET", &id), ok(found(IMAGE, Some(OWNER)))));
+                steps.push(clock.during(
+                    on(
+                        line("GET", &format!("{id}/revisions")),
+                        page(vec![entry("app-1--r1", false, 0, IMAGE)], None),
+                    ),
+                    DEADLINE - 1,
+                ));
+            } else if !op.starts_with(STOP_FAILED) {
+                steps.push(clock.during(
+                    on(line("GET", &id), ok(found(IMAGE, Some(OWNER)))),
+                    DEADLINE - 1,
+                ));
+            }
+            let fake = serve(listener, steps);
+            let expected = if op.starts_with(STOP_FAILED) {
+                clock.set(DEADLINE - 1);
+                Poll::Failed("Conflict".into())
+            } else if op.starts_with(STOP) || op.starts_with(RESOURCE) || op.starts_with(UPDATE) {
+                Poll::Succeeded
+            } else {
+                Poll::Running
+            };
+            assert_eq!(arm.poll(&v1(&op)), Ok(expected), "{op}");
+            assert_eq!(arm.clock.now(), Some(DEADLINE - 1));
+            for now in [DEADLINE, DEADLINE + 1] {
+                clock.set(now);
+                assert_eq!(arm.poll(&v1(&op)), Err(ArmError::Unknown), "{op} at {now}");
+                let mut uncached = adapter(&base, mapped(&id), None);
+                TestClock::install(&mut uncached, now);
+                assert_eq!(uncached.poll(&v1(&op)), Err(ArmError::Unknown));
+            }
+            fake.finish();
+        }
+    }
+
+    #[test]
+    fn a_poll_deadline_survives_adapter_restart_and_monitor_fallback() {
+        let (listener, base) = bind();
+        let id = app("app-1");
+        let long = format!("{base}/operations/{}", "x".repeat(2100));
+        let mut restarted = adapter(&base, mapped(&id), None);
+        let clock = TestClock::install(&mut restarted, DEADLINE - 1000);
+        let fake = serve(
+            listener,
+            vec![
+                token(),
+                on(line("GET", &id), status(404)),
+                on(line("PUT", &id), reply(201, &[("location", &long)], "")),
+                token(),
+                clock.during(
+                    on(line("GET", &id), ok(found(IMAGE, Some(OWNER)))),
+                    DEADLINE - 1,
+                ),
+            ],
+        );
+        let arm = adapter(&base, mapped(&id), None);
+        let handle = arm.begin(&call(&id, create())).unwrap();
+        assert_eq!(handle, v1(format!("resource:{id}")));
+        let persisted = serde_json::to_string(&handle).unwrap();
+        let loaded: String = serde_json::from_str(&persisted).unwrap();
+        assert_eq!(restarted.poll(&loaded), Ok(Poll::Succeeded));
+        assert_eq!(restarted.clock.now(), Some(DEADLINE - 1));
+        clock.set(DEADLINE);
+        assert_eq!(restarted.poll(&loaded), Err(ArmError::Unknown));
+        assert_eq!(loaded, handle);
+        let mut expired_restart = adapter(&base, mapped(&id), None);
+        TestClock::install(&mut expired_restart, DEADLINE);
+        assert_eq!(expired_restart.poll(&loaded), Err(ArmError::Unknown));
+        fake.finish();
+    }
+
+    #[test]
+    fn a_response_crossing_the_poll_deadline_cannot_prove_completion() {
+        for crossing in [
+            "identity",
+            "monitor",
+            "monitor_failure",
+            "location",
+            "location_failure",
+            "resource",
+            "resource_failure",
+            "inventory",
+            "fallback",
+        ] {
+            let (listener, base) = bind();
+            let id = app("app-1");
+            let mut arm = adapter(&base, mapped(&id), None);
+            let clock = TestClock::install(&mut arm, START);
+            let mut steps = vec![];
+            let handle = match crossing {
+                "identity" => {
+                    steps.push(clock.during(token(), DEADLINE));
+                    v1(format!("resource:{id}"))
+                }
+                "monitor" | "monitor_failure" => {
+                    steps.push(token());
+                    let state = if crossing == "monitor" {
+                        "Succeeded"
+                    } else {
+                        "Failed"
+                    };
+                    steps.push(clock.during(
+                        on("GET /operations/x", ok(json!({"status": state}))),
+                        DEADLINE,
+                    ));
+                    v1(format!("async:{base}/operations/x resource:{id}"))
+                }
+                "location" | "location_failure" => {
+                    steps.push(token());
+                    let response = if crossing == "location" {
+                        status(204)
+                    } else {
+                        arm_error(409, "Conflict")
+                    };
+                    steps.push(clock.during(on("GET /operations/x", response), DEADLINE));
+                    v1(format!("location:{base}/operations/x resource:{id}"))
+                }
+                "fallback" => {
+                    steps.push(token());
+                    steps.push(clock.during(on("GET /operations/x", status(404)), DEADLINE));
+                    v1(format!("location:{base}/operations/x absent:{id}"))
+                }
+                "resource" | "resource_failure" => {
+                    steps.push(token());
+                    let mut resource = found(IMAGE, Some(OWNER));
+                    if crossing == "resource_failure" {
+                        resource["properties"]["provisioningState"] = json!("Failed");
+                    }
+                    steps.push(clock.during(on(line("GET", &id), ok(resource)), DEADLINE));
+                    v1(format!("resource:{id}"))
+                }
+                "inventory" => {
+                    steps.push(token());
+                    steps.push(on(line("GET", &id), ok(found(IMAGE, Some(OWNER)))));
+                    let next = format!("{base}{id}/revisions?api-version={API_VERSION}&page=2");
+                    steps.push(clock.during(
+                        on(
+                            line("GET", &format!("{id}/revisions")),
+                            page(vec![entry("app-1--r1", false, 0, IMAGE)], Some(&next)),
+                        ),
+                        DEADLINE,
+                    ));
+                    v1(format!("stop:{id}"))
+                }
+                _ => unreachable!(),
+            };
+            let fake = serve(listener, steps);
+            assert_eq!(arm.poll(&handle), Err(ArmError::Unknown), "{crossing}");
+            fake.finish();
+        }
+    }
+
+    #[test]
+    fn poll_clock_failure_or_invalid_time_is_unknown_not_a_fresh_budget() {
+        let (listener, base) = bind();
+        let fake = serve(listener, vec![]);
+        let id = app("app-1");
+        let mut arm = adapter(&base, mapped(&id), None);
+        let clock = TestClock::install(&mut arm, START);
+        let handle = v1(format!("stop-failed:{id}@Conflict"));
+        assert_eq!(arm.poll(&handle), Ok(Poll::Failed("Conflict".into())));
+        clock.set(START - 1);
+        assert_eq!(arm.poll(&handle), Err(ArmError::Unknown));
+        *clock.sample.lock().unwrap() = None;
+        assert_eq!(arm.poll(&handle), Err(ArmError::Unknown));
+        assert_eq!(arm.begin(&call(&id, create())), Err(ArmError::Unknown));
+        let mut overflow = adapter(&base, mapped(&id), None);
+        TestClock::install(&mut overflow, u64::MAX);
+        assert_eq!(overflow.begin(&call(&id, create())), Err(ArmError::Unknown));
+        let mut fresh = adapter(&base, mapped(&id), None);
+        TestClock::install(&mut fresh, START - 1);
+        assert_eq!(fresh.poll(&handle), Err(ArmError::Unknown));
+        for (start, deadline) in [
+            (START, START - 1),
+            (u64::MAX, u64::MAX),
+            (START, DEADLINE + 1),
+            (START, DEADLINE - 1),
+        ] {
+            let mut metadata = envelope(&handle);
+            metadata["started"] = json!(start);
+            metadata["deadline"] = json!(deadline);
+            assert_eq!(
+                fresh.poll(&format!("arm:1:{metadata}")),
+                Err(ArmError::Unknown)
+            );
+        }
+        // A live process cannot extend its budget by holding UTC fixed.
+        let mut monotonic = adapter(&base, mapped(&id), None);
+        let clock = TestClock::install(&mut monotonic, START);
+        assert_eq!(monotonic.poll(&handle), Ok(Poll::Failed("Conflict".into())));
+        clock.sample.lock().unwrap().as_mut().unwrap().1 += Duration::from_millis(POLL_BUDGET_MS);
+        assert_eq!(monotonic.poll(&handle), Err(ArmError::Unknown));
+        assert!(fake.finish().is_empty());
+    }
+
+    #[test]
+    fn an_untimed_legacy_handle_requires_operator_reconciliation() {
+        let (listener, base) = bind();
+        let fake = serve(listener, vec![]);
+        let id = app("app-1");
+        let arm = adapter(&base, mapped(&id), None);
+        for op in all_operations(&base, &id) {
+            assert!(arm.decode(&op).is_some());
+            assert_eq!(arm.poll(&op), Err(ArmError::Unknown));
+        }
+        legacy_handles_decode_without_rewriting_the_journal();
+        assert!(fake.finish().is_empty());
+    }
+
+    const TENANT: &str = "0123456789abcdef0123456789abcdef";
+    const CONTROL: &str = "control/state.json";
+    const ATTEMPT: &str = "worker-a";
+
+    struct Destructive {
+        memory: Arc<Memory>,
+        objects: Objects,
+        ops: Operations,
+        intent: Intent,
+        guards: Guards,
+        stop: bool,
+    }
+
+    /// Stage retirement's guard and route removal, stopping before cloud dispatch.
+    struct UnavailableResource;
+
+    impl Arm for UnavailableResource {
+        fn begin(&self, _: &Call) -> Result<String, ArmError> {
+            panic!("an unavailable resource must never be dispatched");
+        }
+
+        fn poll(&self, _: &str) -> Result<Poll, ArmError> {
+            panic!("an unavailable resource has no handle");
+        }
+
+        fn read(&self, _: &str) -> Result<Option<Observed>, ArmError> {
+            Err(ArmError::Unknown)
+        }
+    }
+
+    impl Destructive {
+        fn new(stop: bool, arm: &dyn Arm) -> Self {
+            let (credentials, _) =
+                credentials::tests::issued(&[("aaaaaaaaaaaa", Some(TENANT))], 0x77);
+            let tenants = tenants::Store::for_test(vec![tenants::Tenant::for_test(TENANT, None)]);
+            let memory = Arc::new(Memory::default());
+            let objects = Objects::new(memory.clone(), CONTROL);
+            objects
+                .create(
+                    Snapshot::import(&credentials, Some(&tenants)).unwrap(),
+                    START,
+                )
+                .unwrap();
+            let ops = Operations::new(memory.clone(), "operations");
+            let payload = Payload::Create {
+                name: "contoso".into(),
+                max_vectors: Some(1000),
+                writer_profile: sha256_hex(b"profile"),
+                initialization: sha256_hex(b"init"),
+                resources: vec![app("app-1")],
+                secret_versions: vec!["archive-sas@3".into()],
+            };
+            let mut intent = ops
+                .accept(
+                    "admin",
+                    "create",
+                    &payload,
+                    &[b"profile".to_vec(), b"init".to_vec()],
+                    START,
+                )
+                .unwrap()
+                .intent;
+            intent.tenant_id = TENANT.into();
+            reserve(&ops, &objects, &intent, START).unwrap();
+            ops.claim(&intent.operation_id, ATTEMPT, None).unwrap();
+            let created = Action {
+                resource: app("app-1"),
+                operation: "create-app".into(),
+                request_digest: sha256_hex(b"created"),
+                destructive: false,
+            };
+            let Decision::Dispatch(sequence) =
+                ops.record(&intent.operation_id, ATTEMPT, &created).unwrap()
+            else {
+                panic!("new create was not recorded");
+            };
+            ops.settle(&intent.operation_id, ATTEMPT, sequence, "created")
+                .unwrap();
+            let guards = Guards::new(memory.clone(), "target/");
+            if stop {
+                let route = Route {
+                    reader: None,
+                    ..Route::dedicated_for_test(TENANT, 1)
+                };
+                let receipt =
+                    activate(&ops, &objects, &intent, &route, &sha256_hex(b"plan"), START).unwrap();
+                ops.release(&objects, &intent, START).unwrap();
+                intent = ops
+                    .accept(
+                        "admin",
+                        "retire",
+                        &Payload::Retire {
+                            tenant_id: TENANT.into(),
+                            expected_receipt: admin::receipt_digest(&receipt),
+                            reason: "offboarded".into(),
+                            data_disposition: DataDisposition::Retain,
+                        },
+                        &[],
+                        START,
+                    )
+                    .unwrap()
+                    .intent;
+                Driver::new(&ops, arm, &intent, ATTEMPT, None, 1)
+                    .unwrap()
+                    .reserve_retirement(&objects, START)
+                    .unwrap();
+                assert_eq!(
+                    Driver::new(&ops, &UnavailableResource, &intent, ATTEMPT, None, 1)
+                        .unwrap()
+                        .retire(&objects, &guards, START)
+                        .err()
+                        .unwrap()
+                        .code,
+                    "cloud_outcome_unknown"
+                );
+            } else {
+                request_cancel(&ops, &objects, &intent, START).unwrap();
+            }
+            Self {
+                memory,
+                objects,
+                ops,
+                intent,
+                guards,
+                stop,
+            }
+        }
+
+        fn owner(&self) -> String {
+            format!("vlite-tenant:{TENANT}")
+        }
+
+        fn handle(&self, op: &str) -> String {
+            let mut metadata = envelope(&v1(op));
+            metadata["owner"] = json!(self.owner());
+            format!("arm:1:{metadata}")
+        }
+
+        fn seed(&self, handle: Option<&str>) -> u64 {
+            let operation = if self.stop { "stop-app" } else { "delete-app" };
+            let id = app("app-1");
+            let action = Action {
+                resource: id.clone(),
+                operation: operation.into(),
+                request_digest: sha256_hex(
+                    format!("{}\0{id}\0{operation}\0", self.owner()).as_bytes(),
+                ),
+                destructive: true,
+            };
+            let sequence = match self
+                .ops
+                .record(&self.intent.operation_id, ATTEMPT, &action)
+                .unwrap()
+            {
+                Decision::Dispatch(sequence) | Decision::Reconcile(sequence) => sequence,
+                Decision::Settled(_) => panic!("destructive action is already settled"),
+            };
+            if let Some(handle) = handle {
+                self.ops
+                    .observe(&self.intent.operation_id, ATTEMPT, sequence, handle)
+                    .unwrap();
+            }
+            sequence
+        }
+
+        fn run(
+            &self,
+            arm: &dyn Arm,
+            attempt: &str,
+            prior: Option<&ActuatorStopped>,
+        ) -> Result<(), ApiError> {
+            let driver = Driver::new(&self.ops, arm, &self.intent, attempt, prior, 1)?;
+            if self.stop {
+                driver
+                    .retire(&self.objects, &self.guards, START)
+                    .map(|_| ())
+            } else {
+                driver.cleanup(&self.objects, &self.guards)
+            }
+        }
+
+        fn assert_open(&self, sequence: u64, handle: Option<&str>, attempt: &str) {
+            let journal = self.ops.journal(&self.intent.operation_id).unwrap();
+            let step = journal
+                .steps
+                .iter()
+                .find(|step| step.sequence == sequence)
+                .unwrap();
+            assert_eq!(step.outcome, StepOutcome::Uncertain {});
+            assert_eq!(step.arm_operation.as_deref(), handle);
+            assert_eq!(journal.attempt.as_deref(), Some(attempt));
+            assert!(!journal.closed);
+            assert!(
+                self.ops
+                    .terminal(&self.intent.operation_id)
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                self.ops
+                    .release(&self.objects, &self.intent, START)
+                    .is_err()
+            );
+            assert!(matches!(
+                self.objects
+                    .read()
+                    .unwrap()
+                    .0
+                    .lifecycle(TENANT)
+                    .unwrap()
+                    .slot,
+                Slot::Reserved { .. }
+            ));
+            assert!(self.objects.read().unwrap().0.record_for(TENANT).is_none());
+        }
+    }
+
+    fn read_owned(id: &str, owner: &str, stop: bool, active: bool, replicas: u64) -> Vec<Step> {
+        let mut steps = vec![on(line("GET", id), ok(found(IMAGE, Some(owner))))];
+        if stop {
+            steps.push(on(
+                line("GET", &format!("{id}/revisions")),
+                page(vec![entry("app-1--r1", active, replicas, IMAGE)], None),
+            ));
+        }
+        steps
+    }
+
+    fn blocked_destructive(expired: bool) {
+        for stop in [false, true] {
+            let (listener, base) = bind();
+            let id = app("app-1");
+            let mut arm = adapter(&base, mapped(&id), None);
+            let fixture = Destructive::new(stop, &arm);
+            let op = format!("{}{}", if stop { STOP } else { ABSENT }, id);
+            let handle = fixture.handle(&op);
+            let sequence = fixture.seed(Some(&handle));
+            TestClock::install(&mut arm, if expired { DEADLINE } else { START });
+            let owner = if expired {
+                fixture.owner()
+            } else {
+                "vlite-tenant:foreign".into()
+            };
+            let mut steps = vec![token()];
+            for _ in 0..2 {
+                if !expired {
+                    steps.push(on(line("GET", &id), ok(found(IMAGE, Some(&owner)))));
+                }
+                steps.extend(read_owned(&id, &owner, true, false, 0));
+            }
+            let fake = serve(listener, steps);
+            for _ in 0..2 {
+                let error = fixture.run(&arm, ATTEMPT, None).unwrap_err();
+                assert_eq!(
+                    error.code,
+                    if expired {
+                        "cloud_outcome_unknown"
+                    } else {
+                        "resource_ownership_conflict"
+                    }
+                );
+                fixture.assert_open(sequence, Some(&handle), ATTEMPT);
+            }
+            let control = fixture.memory.raw(CONTROL).unwrap();
+            assert!(Driver::new(&fixture.ops, &arm, &fixture.intent, "unfenced", None, 1).is_err());
+            assert_eq!(fixture.memory.raw(CONTROL).unwrap(), control);
+            assert!(
+                fake.finish()
+                    .iter()
+                    .all(|request| request.line.starts_with("GET "))
+            );
+        }
+    }
+
+    #[test]
+    fn a_deadline_leaves_the_driver_step_uncertain_and_the_claim_held() {
+        blocked_destructive(true);
+    }
+
+    #[test]
+    fn an_expired_or_foreign_destructive_handle_cannot_release_the_operation() {
+        blocked_destructive(true);
+        blocked_destructive(false);
+    }
+
+    fn no_handle_requires_reconciliation(stop: bool) {
+        let (listener, base) = bind();
+        let id = app("app-1");
+        let arm = adapter(&base, mapped(&id), None);
+        let fixture = Destructive::new(stop, &arm);
+        let sequence = fixture.seed(None);
+        let mut steps = vec![token()];
+        for phase in 0..3 {
+            if stop {
+                if phase == 2 {
+                    let mut uncounted = entry("app-1--r1", false, 0, IMAGE);
+                    uncounted["properties"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("replicas");
+                    steps.push(on(
+                        line("GET", &id),
+                        ok(found(IMAGE, Some(&fixture.owner()))),
+                    ));
+                    steps.push(on(
+                        line("GET", &format!("{id}/revisions")),
+                        page(vec![uncounted], None),
+                    ));
+                } else {
+                    steps.extend(read_owned(&id, &fixture.owner(), true, false, 0));
+                }
+            } else {
+                steps.push(on(line("GET", &id), status(404)));
+            }
+        }
+        let fake = serve(listener, steps);
+        for _ in 0..2 {
+            assert_eq!(
+                fixture.run(&arm, ATTEMPT, None).unwrap_err().code,
+                "cloud_outcome_unknown"
+            );
+            fixture.assert_open(sequence, None, ATTEMPT);
+        }
+        let proof = ActuatorStopped::proven_for_test(ATTEMPT);
+        assert_eq!(
+            fixture
+                .run(&arm, "worker-b", Some(&proof))
+                .unwrap_err()
+                .code,
+            "cloud_outcome_unknown"
+        );
+        fixture.assert_open(sequence, None, "worker-b");
+        assert!(
+            fake.finish()
+                .iter()
+                .all(|request| request.line.starts_with("GET "))
+        );
+    }
+
+    #[test]
+    fn an_uncertain_delete_without_a_handle_requires_operator_reconciliation() {
+        no_handle_requires_reconciliation(false);
+    }
+
+    #[test]
+    fn an_uncertain_stop_without_a_handle_requires_operator_reconciliation() {
+        no_handle_requires_reconciliation(true);
+    }
+
+    #[test]
+    fn an_uncertain_delete_resumes_by_readback_without_a_second_delete() {
+        let (listener, base) = bind();
+        let id = app("app-1");
+        let arm = adapter(&base, mapped(&id), None);
+        let fixture = Destructive::new(false, &arm);
+        let sequence = fixture.seed(None);
+        let fake = serve(
+            listener,
+            vec![
+                token(),
+                on(line("GET", &id), ok(found(IMAGE, Some(&fixture.owner())))),
+                dropped(line("DELETE", &id)),
+                token(),
+                on(line("GET", &id), ok(found(IMAGE, Some(&fixture.owner())))),
+                on(line("GET", &id), ok(found(IMAGE, Some(&fixture.owner())))),
+                on(
+                    line("GET", &format!("{id}/revisions")),
+                    page(vec![entry("app-1--r1", false, 0, IMAGE)], None),
+                ),
+                on(line("GET", &id), status(404)),
+                on(line("GET", &id), status(404)),
+            ],
+        );
+        let handle = arm
+            .begin(&Call {
+                resource: id.clone(),
+                owner: fixture.owner(),
+                verb: Verb::Delete,
+            })
+            .unwrap();
+        fixture
+            .ops
+            .observe(&fixture.intent.operation_id, ATTEMPT, sequence, &handle)
+            .unwrap();
+        let restarted = adapter(&base, mapped(&id), None);
+        assert_eq!(
+            fixture.run(&restarted, ATTEMPT, None).unwrap_err().code,
+            "cloud_outcome_unknown"
+        );
+        fixture.assert_open(sequence, Some(&handle), ATTEMPT);
+        fixture.run(&restarted, ATTEMPT, None).unwrap();
+        let journal = fixture.ops.journal(&fixture.intent.operation_id).unwrap();
+        assert_eq!(
+            journal.steps.last().unwrap().outcome,
+            StepOutcome::Settled {
+                observed: "deleted".into()
+            }
+        );
+        assert_eq!(
+            journal.steps.last().unwrap().arm_operation.as_deref(),
+            Some(handle.as_str())
+        );
+        assert_eq!(
+            fake.finish()
+                .iter()
+                .filter(|s| s.line.starts_with("DELETE "))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn an_uncertain_stop_resumes_without_redeactivating_any_revision() {
+        let (listener, base) = bind();
+        let id = app("app-1");
+        let arm = adapter(&base, mapped(&id), None);
+        let fixture = Destructive::new(true, &arm);
+        let sequence = fixture.seed(None);
+        let mut steps = vec![token()];
+        steps.extend(read_owned(&id, &fixture.owner(), true, true, 1));
+        steps.push(dropped(line(
+            "POST",
+            &format!("{id}/revisions/app-1--r1/deactivate"),
+        )));
+        steps.push(token());
+        for _ in 0..2 {
+            // A later active revision is observed, never deactivated on resume.
+            steps.push(on(
+                line("GET", &id),
+                ok(found(IMAGE, Some(&fixture.owner()))),
+            ));
+            steps.push(on(
+                line("GET", &format!("{id}/revisions")),
+                page(
+                    vec![
+                        entry("app-1--r1", false, 1, IMAGE),
+                        entry("app-1--later", true, 1, IMAGE),
+                    ],
+                    None,
+                ),
+            ));
+        }
+        for _ in 0..2 {
+            steps.extend(read_owned(&id, &fixture.owner(), true, false, 0));
+        }
+        let fake = serve(listener, steps);
+        let handle = arm
+            .begin(&Call {
+                resource: id.clone(),
+                owner: fixture.owner(),
+                verb: Verb::Stop,
+            })
+            .unwrap();
+        fixture
+            .ops
+            .observe(&fixture.intent.operation_id, ATTEMPT, sequence, &handle)
+            .unwrap();
+        let restarted = adapter(&base, mapped(&id), None);
+        assert_eq!(
+            fixture.run(&restarted, ATTEMPT, None).unwrap_err().code,
+            "cloud_outcome_unknown"
+        );
+        fixture.assert_open(sequence, Some(&handle), ATTEMPT);
+        fixture.run(&restarted, ATTEMPT, None).unwrap();
+        let journal = fixture.ops.journal(&fixture.intent.operation_id).unwrap();
+        assert_eq!(
+            journal
+                .steps
+                .iter()
+                .find(|s| s.sequence == sequence)
+                .unwrap()
+                .outcome,
+            StepOutcome::Settled {
+                observed: "stopped".into()
+            }
+        );
+        assert_eq!(
+            fake.finish()
+                .iter()
+                .filter(|s| s.line.starts_with("POST "))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_partial_stop_failure_is_not_replayed_or_reclassified_as_success() {
+        let (listener, base) = bind();
+        let id = app("app-1");
+        let arm = adapter(&base, mapped(&id), None);
+        let fixture = Destructive::new(true, &arm);
+        let sequence = fixture.seed(None);
+        let mut steps = vec![
+            token(),
+            on(line("GET", &id), ok(found(IMAGE, Some(&fixture.owner())))),
+            on(
+                line("GET", &format!("{id}/revisions")),
+                page(
+                    vec![
+                        entry("app-1--r1", true, 1, IMAGE),
+                        entry("app-1--r2", true, 1, IMAGE),
+                    ],
+                    None,
+                ),
+            ),
+            on(
+                line("POST", &format!("{id}/revisions/app-1--r1/deactivate")),
+                status(200),
+            ),
+            on(
+                line("POST", &format!("{id}/revisions/app-1--r2/deactivate")),
+                arm_error(409, "Conflict"),
+            ),
+        ];
+        steps.extend(read_owned(&id, &fixture.owner(), true, false, 0));
+        let fake = serve(listener, steps);
+        let handle = arm
+            .begin(&Call {
+                resource: id,
+                owner: fixture.owner(),
+                verb: Verb::Stop,
+            })
+            .unwrap();
+        assert!(
+            envelope(&handle)["op"]
+                .as_str()
+                .unwrap()
+                .starts_with(STOP_FAILED)
+        );
+        fixture
+            .ops
+            .observe(&fixture.intent.operation_id, ATTEMPT, sequence, &handle)
+            .unwrap();
+        for _ in 0..2 {
+            assert_eq!(
+                fixture.run(&arm, ATTEMPT, None).unwrap_err().code,
+                "cloud_action_failed"
+            );
+        }
+        let journal = fixture.ops.journal(&fixture.intent.operation_id).unwrap();
+        assert_eq!(
+            journal
+                .steps
+                .iter()
+                .find(|s| s.sequence == sequence)
+                .unwrap()
+                .outcome,
+            StepOutcome::Settled {
+                observed: "failed:Conflict".into()
+            }
+        );
+        assert!(
+            fixture
+                .ops
+                .release(&fixture.objects, &fixture.intent, START)
+                .is_err()
+        );
+        assert_eq!(
+            fake.finish()
+                .iter()
+                .filter(|s| s.line.starts_with("POST "))
+                .count(),
+            2
+        );
+    }
+
     // ------------------------------------------------------------ begin
 
     #[test]
@@ -1149,7 +2744,7 @@ mod tests {
         );
         let arm = adapter(&base, mapped(&id), None);
         let handle = arm.begin(&call(&id, create())).unwrap();
-        assert_eq!(handle, format!("async:{operation} resource:{id}"));
+        assert_eq!(handle, v1(format!("async:{operation} resource:{id}")));
         assert!(text(&handle));
         assert_eq!(arm.poll(&handle), Ok(Poll::Running));
         assert_eq!(arm.poll(&handle), Ok(Poll::Succeeded));
@@ -1306,7 +2901,7 @@ mod tests {
             "HTTP/1.1 400 Fake\r\nconnection: close\r\ncontent-length: 64\r\n\r\n{\"error\":"
                 .to_owned();
         let long = "A".repeat(200);
-        let resource = Ok(format!("resource:{id}"));
+        let resource = Ok(v1(format!("resource:{id}")));
         let cases = [
             (
                 arm_error(400, "InvalidParameterValue"),
@@ -1367,7 +2962,7 @@ mod tests {
         let https = format!("https://{host}/operations/op-1");
         let long = format!("{base}/operations/{}", "a".repeat(2100));
         let located = format!("{base}/operations/op-2?api-version={API_VERSION}");
-        let fallback = format!("resource:{id}");
+        let fallback = v1(format!("resource:{id}"));
         // Persistable alone, but not with its fallback.
         let room = 2048 - "async:".len() - format!("{base}/operations/").len();
         let tight = format!("{base}/operations/{}", "b".repeat(room));
@@ -1423,17 +3018,18 @@ mod tests {
         // A handle too long to persist falls back to the next monitor.
         assert_eq!(
             arm.begin(&call(&id, create())),
-            Ok(format!("location:{located} {fallback}"))
+            Ok(v1(format!("location:{located} resource:{id}")))
         );
         assert_eq!(arm.begin(&call(&id, create())), Ok(fallback.clone()));
         // Persisted handles off the base stay unknown and are never called.
         for handle in [
-            format!("async:{foreign} {fallback}"),
-            format!("location:{foreign} {fallback}"),
-            format!("async:{userinfo} {fallback}"),
-            format!("location:{https} {fallback}"),
+            format!("async:{foreign} resource:{id}"),
+            format!("location:{foreign} resource:{id}"),
+            format!("async:{userinfo} resource:{id}"),
+            format!("location:{https} resource:{id}"),
         ] {
             assert_eq!(arm.poll(&handle), Err(ArmError::Unknown), "{handle}");
+            assert_eq!(arm.poll(&v1(&handle)), Err(ArmError::Unknown), "{handle}");
         }
         fake.finish();
         assert!(other_fake.finish().is_empty());
@@ -1473,7 +3069,10 @@ mod tests {
         let bodies = vec![(id.to_ascii_uppercase(), desired(IMAGE))];
         let arm = adapter(&base, bodies, Some(CLIENT_ID));
         let begin = || arm.begin(&call(&id, update()));
-        let handle = format!("update:{id}@{}", digest::config_digest(&desired(IMAGE)));
+        let handle = v1(format!(
+            "update:{id}@{}",
+            digest::config_digest(&desired(IMAGE))
+        ));
         assert_eq!(begin(), Err(refused("resource_missing")));
         assert_eq!(begin(), Err(refused("resource_ownership_conflict")));
         assert_eq!(begin(), Err(refused("resource_ownership_conflict")));
@@ -1514,6 +3113,7 @@ mod tests {
                 ),
                 on(format!("GET {path}"), status(202)),
                 on(format!("GET {path}"), status(204)),
+                on(line("GET", &id), status(404)),
                 on(line("GET", &id), ok(found(IMAGE, Some(OWNER)))),
                 on(line("DELETE", &id), status(204)),
                 on(line("GET", &id), ok(found(IMAGE, Some(OWNER)))),
@@ -1531,13 +3131,13 @@ mod tests {
             ],
         );
         let arm = adapter(&base, mapped(&id), None);
-        let absent = format!("absent:{id}");
+        let absent = v1(format!("absent:{id}"));
         let begin = || arm.begin(&call(&id, Verb::Delete));
         // Already gone: nothing is sent.
         assert_eq!(begin(), Ok(absent.clone()));
         assert_eq!(begin(), Err(refused("resource_ownership_conflict")));
         let handle = begin().unwrap();
-        assert_eq!(handle, format!("location:{located} {absent}"));
+        assert_eq!(handle, v1(format!("location:{located} absent:{id}")));
         assert_eq!(arm.poll(&handle), Ok(Poll::Running));
         assert_eq!(arm.poll(&handle), Ok(Poll::Succeeded));
         assert_eq!(begin(), Ok(absent.clone()));
@@ -1600,7 +3200,7 @@ mod tests {
         );
         let arm = adapter(&base, mapped(&id), None);
         let handle = arm.begin(&call(&id, Verb::Stop)).unwrap();
-        assert_eq!(handle, format!("stop:{id}"));
+        assert_eq!(handle, v1(format!("stop:{id}")));
         // r3 is deactivated but still drains a replica.
         assert_eq!(arm.poll(&handle), Ok(Poll::Running));
         assert_eq!(arm.poll(&handle), Ok(Poll::Succeeded));
@@ -1680,18 +3280,18 @@ mod tests {
         // Every deactivation refused: no effect, the first refusal reported.
         assert_eq!(begin(), Err(refused("RevisionCannotBeDeactivated")));
         // r1 (and r3) deactivated, r2 refused: the stop definitely failed.
-        let failed = format!("stop-failed:{id}@Conflict");
+        let failed = v1(format!("stop-failed:{id}@Conflict"));
         assert_eq!(begin(), Ok(failed.clone()));
         assert_eq!(arm.poll(&failed), Ok(Poll::Failed("Conflict".into())));
         // r1 may have been deactivated: not refused either.
         assert_eq!(begin(), Ok(failed));
         // Unknown outcomes alone are watched until none is active.
-        assert_eq!(begin(), Ok(format!("stop:{id}")));
-        assert_eq!(begin(), Ok(format!("stop:{id}")));
+        assert_eq!(begin(), Ok(v1(format!("stop:{id}"))));
+        assert_eq!(begin(), Ok(v1(format!("stop:{id}"))));
         assert_eq!(begin(), Err(refused("TooManyRequests")));
         assert_eq!(begin(), Err(refused("revision_inventory_incomplete")));
         assert_eq!(begin(), Err(refused("resource_ownership_conflict")));
-        assert_eq!(begin(), Ok(format!("stop:{id}")));
+        assert_eq!(begin(), Ok(v1(format!("stop:{id}"))));
         fake.finish();
     }
 
@@ -1734,7 +3334,7 @@ mod tests {
             ],
         );
         let arm = adapter(&base, mapped(&id), None);
-        let stop = format!("stop:{id}");
+        let stop = v1(format!("stop:{id}"));
         // Deactivated, but whether it still drains replicas is unknown.
         assert_eq!(arm.poll(&stop), Err(ArmError::Unknown));
         assert_eq!(
@@ -2016,11 +3616,32 @@ mod tests {
             json!(7),
             Value::Null,
         ];
+        // ...and app-1--r1 listed as `listed_type` (when listed, a revision).
+        let typed = |listed_type: Option<Value>| {
+            let mut item = entry("app-1--r1", false, 0, IMAGE);
+            match listed_type {
+                Some(listed_type) => item["type"] = listed_type,
+                None => {
+                    item.as_object_mut().unwrap().remove("type");
+                }
+            }
+            item
+        };
+        let types = [
+            json!("Microsoft.App/containerApps"),
+            json!("Microsoft.App/containerApps/revisions/replicas"),
+            json!("Microsoft.App/jobs/revisions"),
+            json!("Microsoft.Web/containerApps/revisions"),
+            json!(""),
+            json!(7),
+            Value::Null,
+        ];
         let mut steps = vec![token()];
         for item in names
             .into_iter()
             .map(&named)
             .chain(ids.iter().cloned().map(&listed_as))
+            .chain(types.iter().cloned().map(Some).map(&typed))
         {
             steps.extend([ours(), listed(vec![item])]);
         }
@@ -2036,6 +3657,10 @@ mod tests {
         steps.extend([ours(), listed(vec![named("app-1--r1")])]);
         steps.extend([ours(), listed(vec![listed_as(json!(recased))])]);
         steps.extend([ours(), listed(vec![entry("APP-1--R1", false, 0, IMAGE)])]);
+        // So do types; the type is optional too.
+        let retyped = json!("microsoft.app/ContainerApps/REVISIONS");
+        steps.extend([ours(), listed(vec![typed(Some(retyped))])]);
+        steps.extend([ours(), listed(vec![typed(None)])]);
         steps.push(on(line("GET", &probe), ok(found(IMAGE, None))));
         steps.push(on(
             line("GET", &format!("{probe}/revisions")),
@@ -2051,6 +3676,7 @@ mod tests {
             .iter()
             .map(|name| name.to_string())
             .chain(ids.iter().map(Value::to_string))
+            .chain(types.iter().map(Value::to_string))
         {
             assert_eq!(revisions(), Revisions::Incomplete, "{case}");
         }
@@ -2060,9 +3686,15 @@ mod tests {
             Err(refused("revision_inventory_incomplete"))
         );
         // Another app's stopped revision never proves ours stopped.
-        assert_eq!(arm.poll(&format!("stop:{id}")), Err(ArmError::Unknown));
+        assert_eq!(arm.poll(&v1(format!("stop:{id}"))), Err(ArmError::Unknown));
         let digest = digest::config_digest(&desired(IMAGE));
-        for name in ["app-1--r1", "app-1--r1", "APP-1--R1"] {
+        for name in [
+            "app-1--r1",
+            "app-1--r1",
+            "APP-1--R1",
+            "app-1--r1",
+            "app-1--r1",
+        ] {
             assert_eq!(
                 revisions(),
                 Revisions::Complete(vec![Revision {
@@ -2277,9 +3909,9 @@ mod tests {
             ],
         );
         let arm = adapter(&base, mapped(&id), None);
-        let resource = format!("resource:{id}");
-        let asynchronous = format!("async:{base}{path} {resource}");
-        let location = format!("location:{base}{path} {resource}");
+        let resource = v1(format!("resource:{id}"));
+        let asynchronous = v1(format!("async:{base}{path} resource:{id}"));
+        let location = v1(format!("location:{base}{path} resource:{id}"));
         let failed = |code: &str| Ok(Poll::Failed(code.into()));
         // Azure-AsyncOperation: only ARM's terminal states end the wait.
         assert_eq!(
@@ -2320,13 +3952,16 @@ mod tests {
             assert_eq!(arm.poll(&resource), Err(ArmError::Unknown));
         }
         assert_eq!(
-            arm.poll(&format!("resource:{storage}")),
+            arm.poll(&v1(format!("resource:{storage}"))),
             Ok(Poll::Succeeded)
         );
-        assert_eq!(arm.poll(&format!("absent:{id}")), Err(ArmError::Unknown));
+        assert_eq!(
+            arm.poll(&v1(format!("absent:{id}"))),
+            Err(ArmError::Unknown)
+        );
         // A stop is proven only by a complete inventory.
-        assert_eq!(arm.poll(&format!("stop:{id}")), Err(ArmError::Unknown));
-        assert_eq!(arm.poll(&format!("stop:{id}")), Err(ArmError::Unknown));
+        assert_eq!(arm.poll(&v1(format!("stop:{id}"))), Err(ArmError::Unknown));
+        assert_eq!(arm.poll(&v1(format!("stop:{id}"))), Err(ArmError::Unknown));
         fake.finish();
     }
 
@@ -2373,6 +4008,7 @@ mod tests {
             id.clone(),
         ] {
             assert_eq!(arm.poll(&handle), Err(ArmError::Unknown), "{handle}");
+            assert_eq!(arm.poll(&v1(&handle)), Err(ArmError::Unknown), "{handle}");
         }
         assert!(fake.finish().is_empty());
     }
@@ -2398,17 +4034,17 @@ mod tests {
         let arm = adapter(&base, mapped(&id), None);
         let monitor = format!("{base}{path}");
         assert_eq!(
-            arm.poll(&format!("async:{monitor} resource:{id}")),
+            arm.poll(&v1(format!("async:{monitor} resource:{id}"))),
             Ok(Poll::Succeeded)
         );
         assert_eq!(
-            arm.poll(&format!("location:{monitor} absent:{id}")),
+            arm.poll(&v1(format!("location:{monitor} absent:{id}"))),
             Ok(Poll::Succeeded)
         );
         // An update's fallback still wants the desired configuration.
         let sent = digest::config_digest(&desired(IMAGE));
         assert_eq!(
-            arm.poll(&format!("async:{monitor} update:{id}@{sent}")),
+            arm.poll(&v1(format!("async:{monitor} update:{id}@{sent}"))),
             Ok(Poll::Running)
         );
         fake.finish();
@@ -2434,12 +4070,13 @@ mod tests {
                 on(line("GET", &id), stale(IMAGE, "Canceled")),
                 on(line("GET", &id), ok(found(IMAGE, Some(OWNER)))),
                 on(line("GET", &id), status(404)),
-                // The digest sent, not the profile's current body, decides.
-                on(line("GET", &id), ok(found(IMAGE, Some(OWNER)))),
             ],
         );
         let arm = adapter(&base, mapped(&id), None);
-        let update = format!("update:{id}@{}", digest::config_digest(&desired(IMAGE)));
+        let update = v1(format!(
+            "update:{id}@{}",
+            digest::config_digest(&desired(IMAGE))
+        ));
         // Any terminal state of the previous configuration is still settling.
         for _ in 0..3 {
             assert_eq!(arm.poll(&update), Ok(Poll::Running));
@@ -2448,15 +4085,18 @@ mod tests {
         assert_eq!(arm.poll(&update), Ok(Poll::Failed("Canceled".into())));
         assert_eq!(arm.poll(&update), Ok(Poll::Succeeded));
         assert_eq!(arm.poll(&update), Err(ArmError::Unknown));
-        let older = format!("update:{id}@{}", digest::config_digest(&desired("other")));
-        assert_eq!(arm.poll(&older), Ok(Poll::Running));
+        let older = v1(format!(
+            "update:{id}@{}",
+            digest::config_digest(&desired("other"))
+        ));
+        assert_eq!(arm.poll(&older), Err(ArmError::Unknown));
         // Without a profile body to project onto nothing is called.
         let other = format!(
             "update:{}@{}",
             app("app-2"),
             digest::config_digest(&desired(IMAGE))
         );
-        assert_eq!(arm.poll(&other), Err(ArmError::Unknown));
+        assert_eq!(arm.poll(&v1(other)), Err(ArmError::Unknown));
         fake.finish();
     }
 
@@ -2520,10 +4160,13 @@ mod tests {
             ],
         );
         let arm = adapter(&base, mapped(&id), None);
-        let resource = format!("resource:{id}");
+        let resource = v1(format!("resource:{id}"));
         assert_eq!(arm.begin(&call(&id, create())), Ok(resource.clone()));
         assert_eq!(arm.poll(&resource), Ok(Poll::Succeeded));
-        let handle = format!("update:{id}@{}", digest::config_digest(&desired(IMAGE)));
+        let handle = v1(format!(
+            "update:{id}@{}",
+            digest::config_digest(&desired(IMAGE))
+        ));
         assert_eq!(arm.begin(&call(&id, update())), Ok(handle.clone()));
         assert_eq!(arm.poll(&handle), Ok(Poll::Succeeded));
         fake.finish();

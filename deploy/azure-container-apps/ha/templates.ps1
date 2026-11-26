@@ -75,13 +75,14 @@ function Assert-VLiteHaControlConfig {
         $Config.PublicKeyBundleFile -cne '/run/vlite/public-keys.json') {
         throw 'Config.ControlTargetFile and Config.PublicKeyBundleFile must match /run/vlite/control-target.json and /run/vlite/public-keys.json projections.'
     }
-    # Match control_state::valid_object_name, including the reserved set protocol.
+    # Match control_state::valid_object_name, including reserved coordination names.
     $object = $Config.ControlObject
     if ($object -isnot [string] -or $object.Length -gt 256 -or
         $object -cnotmatch '^[a-z0-9._/-]+$' -or $object.StartsWith('/') -or
         @($object.Split('/') | Where-Object { $_ -in @('', '.', '..') }).Count -gt 0 -or
-        $object -in @('owner.json', 'catalog.json', 'authority.json') -or $object.StartsWith('sets/')) {
-        throw 'Config.ControlObject must be a relative [a-z0-9._/-] object outside the reserved set protocol.'
+        $object -in @('owner.json', 'catalog.json', 'authority.json', 'auto-failover.json', 'lifecycle-guard.json') -or
+        $object.StartsWith('sets/') -or $object.StartsWith('reader-pins/') -or $object.StartsWith('tenant-operations/')) {
+        throw 'Config.ControlObject must be a relative [a-z0-9._/-] object outside reserved coordination names.'
     }
     Assert-VLiteHaInteger $Config 'SCtlMs' 1 3600000
     Assert-VLiteHaInteger $Config 'PollIntervalMs' 1 3600000
@@ -609,9 +610,10 @@ function New-VLiteHaReaderTemplate {
 # principal object ID.
 function Assert-VLiteHaBlobPrefix {
     param([string]$Prefix, [string]$Label)
-    # Same rule as cloud_backup.rs valid_prefix; also excludes quotes, so a
+    # Same rule as cloud_backup.rs Target::validate; also excludes quotes, so a
     # prefix cannot alter the generated condition.
     if ($Prefix -cnotmatch '^[a-z0-9._/-]{1,200}\z' -or -not $Prefix.EndsWith('/') -or
+        $Prefix.Contains('//') -or
         @($Prefix.TrimEnd('/').Split('/') | Where-Object { $_ -in @('', '.', '..') }).Count -or
         $Prefix -eq '/') {
         throw "$Label prefix must be 1..200 chars of [a-z0-9._/-], end with '/', with no empty, '.' or '..' segments."

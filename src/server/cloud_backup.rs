@@ -3501,6 +3501,38 @@ mod tests {
     }
 
     #[test]
+    fn target_prefix_cases_match_the_shared_fixture() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/ha/storage-prefix-cases.json"
+        ))
+        .expect("valid storage-prefix fixture");
+        let cases = fixture["cases"].as_array().expect("storage-prefix cases");
+        assert!(!cases.is_empty());
+
+        let mut target = Target {
+            account: "vlitebackup".into(),
+            container: "vlite-data".into(),
+            coordination_container: Some("vlite-coord".into()),
+            prefix: "a/".into(),
+            endpoint: None,
+            auth: AuthMode::ManagedIdentity,
+            client_id: None,
+        };
+        for (index, case) in cases.iter().enumerate() {
+            let base = case["prefix"].as_str().expect("case prefix");
+            let repeat = case["repeat"].as_u64().unwrap_or(1) as usize;
+            let suffix = case["suffix"].as_str().unwrap_or_default();
+            target.prefix = format!("{}{}", base.repeat(repeat), suffix);
+            assert_eq!(
+                target.validate().is_ok(),
+                case["valid"].as_bool().expect("expected validity"),
+                "case {index}: {:?}",
+                target.prefix
+            );
+        }
+    }
+
+    #[test]
     fn managed_identity_tokens_go_only_to_the_account_blob_host() {
         let base = Target {
             account: "vlitebackup".into(),

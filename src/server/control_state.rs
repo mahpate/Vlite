@@ -1625,7 +1625,7 @@ impl Poller {
 
 /// An object name below the target's coordination prefix: 1..=256 of
 /// `[a-z0-9._/-]`, relative, no empty, `.` or `..` segment, and never one
-/// of the set protocol's own objects.
+/// of the coordination protocols' own objects or namespaces.
 pub(super) fn valid_object_name(name: &str) -> bool {
     (1..=256).contains(&name.len())
         && name.bytes().all(|b| {
@@ -1634,8 +1634,17 @@ pub(super) fn valid_object_name(name: &str) -> bool {
         && name
             .split('/')
             .all(|segment| !matches!(segment, "" | "." | ".."))
-        && !matches!(name, "owner.json" | "catalog.json")
+        && !matches!(
+            name,
+            "owner.json"
+                | "catalog.json"
+                | "authority.json"
+                | "auto-failover.json"
+                | "lifecycle-guard.json"
+        )
         && !name.starts_with("sets/")
+        && !name.starts_with("reader-pins/")
+        && !name.starts_with("tenant-operations/")
 }
 
 /// Where a process reads (and the CLI writes) the control state: a cloud
@@ -1829,6 +1838,28 @@ mod tests {
     const T1: &str = "0123456789abcdef0123456789abcdef";
     const T2: &str = "fedcba9876543210fedcba9876543210";
     const NAME: &str = "control/state.json";
+
+    #[test]
+    fn control_object_name_cases_match_the_shared_fixture() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/ha/control-object-name-cases.json"
+        ))
+        .expect("valid control-object name fixture");
+        let cases = fixture["cases"]
+            .as_array()
+            .expect("control-object name cases");
+        assert!(!cases.is_empty());
+        for case in cases {
+            let base = case["name"].as_str().expect("case name");
+            let repeat = case["repeat"].as_u64().unwrap_or(1) as usize;
+            let name = base.repeat(repeat);
+            assert_eq!(
+                valid_object_name(&name),
+                case["valid"].as_bool().expect("expected validity"),
+                "{name:?}"
+            );
+        }
+    }
 
     struct World {
         memory: Arc<Memory>,

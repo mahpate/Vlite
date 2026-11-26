@@ -1,0 +1,33 @@
+{
+  "cases": [
+    { "name": "control.json", "valid": true },
+    { "name": "a", "valid": true },
+    { "name": "a/b.c_9-z", "valid": true },
+    { "name": "a", "repeat": 256, "valid": true },
+    { "name": "a", "repeat": 257, "valid": false },
+    { "name": "", "valid": false },
+    { "name": "/control.json", "valid": false },
+    { "name": "control//object", "valid": false },
+    { "name": "control/./object", "valid": false },
+    { "name": "control/../object", "valid": false },
+    { "name": "control.JSON", "valid": false },
+    { "name": "control?object", "valid": false },
+    { "name": "caf\u00e9", "valid": false },
+    { "name": "owner.json", "valid": false },
+    { "name": "catalog.json", "valid": false },
+    { "name": "authority.json", "valid": false },
+    { "name": "auto-failover.json", "valid": false },
+    { "name": "lifecycle-guard.json", "valid": false },
+    { "name": "reader-pins/a/b.json", "valid": false },
+    { "name": "tenant-operations/operations/a/journal.json", "valid": false },
+    { "name": "tenant-operations/contents/a", "valid": false },
+    { "name": "reader-pins", "valid": true },
+    { "name": "reader-pins-extra/a", "valid": true },
+    { "name": "tenant-operations", "valid": true },
+    { "name": "tenant-operations-extra/a", "valid": true },
+    { "name": "nested/authority.json", "valid": true },
+    { "name": "sets", "valid": true },
+    { "name": "setsx/record.json", "valid": true },
+    { "name": "sets/record.json", "valid": false }
+  ]
+}
