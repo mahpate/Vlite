@@ -185,7 +185,7 @@ fn refuse(next: Database, reason: &str) -> std::io::Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::server) mod tests {
     use std::{path::Path, sync::Arc};
 
     use axum::{
@@ -614,6 +614,329 @@ mod tests {
         assert_eq!(control(), before);
         assert_eq!(env.pins(), 0);
         assert_eq!(reader_pins(), ["reader-apply:other"]);
+    }
+
+    #[test]
+    fn ha_reader_enrollment_is_refused_while_its_grants_have_not_taken_effect() {
+        // design-tenant-provisioning ITEM-013 (policy lag), offline model
+        // only: a grant that has not taken effect yet is a refused store
+        // request (`StoreError::Failed`, as the Azure classifier maps a 403).
+        // While any needed access is refused, enrollment fails closed: no
+        // pin is written, no follower slot exists and no `ReaderApply` is
+        // returned (the binary exits before serving). No propagation bound
+        // is assumed: each refused attempt is the same. Only a fresh
+        // enrollment (a restart) after access takes effect recovers. This
+        // does not show Azure RBAC/ABAC, mounts or propagation timing.
+        use crate::server::cloud_recovery::tests::{checkpoint_ha, setup_ha};
+        let (env, authority, claim) = setup_ha();
+        checkpoint_ha(&env, &authority, &claim, 5..=6);
+        let config = || {
+            let mut config = config(&env);
+            config.isolated_pins = true;
+            config
+        };
+        let control = || -> Vec<(String, Vec<u8>)> {
+            env.meta
+                .names()
+                .into_iter()
+                .filter(|name| !name.starts_with("vlite/prod/reader-pins/"))
+                .map(|name| {
+                    let bytes = env.meta.raw(&name).unwrap();
+                    (name, bytes)
+                })
+                .collect()
+        };
+        let pins = || -> Vec<(String, String)> {
+            let mut pins: Vec<_> = env
+                .sets
+                .reader_pins()
+                .unwrap()
+                .into_iter()
+                .map(|(_, pin)| (pin.id, pin.reason))
+                .collect();
+            pins.sort();
+            pins
+        };
+        let slots =
+            || ["reader-a", "reader-b"].map(|name| config().follower_dir.join(name).exists());
+        // A pin left by this replica's previous process.
+        let stale = env
+            .sets
+            .pin_reader(&env.set_id, "reader-apply:replica", 1)
+            .unwrap();
+        let control_before = control();
+        let pins_before = pins();
+        let refused = |sets: cloud::Sets, code: &str, pins_after: &[(String, String)]| {
+            let error = ReaderApply::enroll_with(sets, config(), "replica", 1_000)
+                .err()
+                .expect("enrollment must be refused while access is denied");
+            assert_eq!(error.code, code, "{}", error.message);
+            assert_eq!(control(), control_before);
+            assert_eq!(pins(), pins_after);
+            assert_eq!(slots(), [false, false]);
+        };
+        let denied = |writable: Option<&str>| {
+            cloud::Sets::new(
+                Arc::new(cloud::fake::Scoped {
+                    inner: env.meta.clone(),
+                    writable: writable.map(Into::into),
+                }),
+                Arc::new(cloud::fake::Scoped {
+                    inner: env.data.clone(),
+                    writable: None,
+                }),
+                false,
+                "vlite/prod/".into(),
+            )
+        };
+        // Read access effective, pin-write access not yet: every attempt is
+        // refused alike, however often it is retried.
+        for _ in 0..3 {
+            refused(denied(None), "cloud_store_failed", &pins_before);
+        }
+        // Pin create effective but delete not yet: the stale pin cannot be
+        // replaced, so no second pin of this replica is taken.
+        env.meta
+            .fault(Op::Delete, "reader-pins/", Fault::Refuse, 0, 1);
+        refused(
+            denied(Some("vlite/prod/reader-pins/")),
+            "cloud_store_failed",
+            &pins_before,
+        );
+        // Coordination reads not yet effective (the authority read fails
+        // before anything is listed or pinned).
+        env.meta
+            .fault(Op::Get, "authority.json", Fault::Refuse, 0, 1);
+        refused(
+            cloud::fake::reader_view(&env.meta, &env.data, "vlite/prod/"),
+            "writer_authority_unavailable",
+            &pins_before,
+        );
+        // Data reads not yet effective: the stale pin is released, the new
+        // pin is taken, then withdrawn with its slots when the fetch fails.
+        env.data.fault(Op::Get, "", Fault::Refuse, 0, 1);
+        refused(
+            cloud::fake::reader_view(&env.meta, &env.data, "vlite/prod/"),
+            "cloud_store_failed",
+            &[],
+        );
+        // Once the scoped grants take effect, a fresh enrollment replaces the
+        // stale pin and follows; nothing outside `reader-pins/` is written.
+        let apply = ReaderApply::enroll_with(
+            cloud::fake::reader_view(&env.meta, &env.data, "vlite/prod/"),
+            config(),
+            "replica",
+            2_000,
+        )
+        .unwrap_or_else(|e| panic!("{}: {}", e.code, e.message));
+        assert_eq!(apply.progress().applied(), (6, 2_000));
+        let held = pins();
+        assert_eq!(held.len(), 1);
+        assert_ne!(held[0].0, stale.id);
+        assert_eq!(held[0].1, "reader-apply:replica");
+        let service = reader(&slot(&env, "reader-a")).with_reader_apply(&apply);
+        assert_eq!(apply.step(&service, 3_000), Step::Confirmed);
+        apply.stop();
+        assert_eq!(control(), control_before);
+        assert!(pins().is_empty());
+    }
+
+    /// An isolated-pin HA reader of `env`, enrolled at simulated time 1_000.
+    fn enroll_isolated(env: &Env) -> ReaderApply {
+        let mut config = config(env);
+        config.isolated_pins = true;
+        ReaderApply::enroll_with(
+            cloud::fake::reader_view(&env.meta, &env.data, "vlite/prod/"),
+            config,
+            "replica",
+            1_000,
+        )
+        .unwrap_or_else(|e| panic!("{}: {}", e.code, e.message))
+    }
+
+    /// design-tenant-provisioning ITEM-013: drives an isolated-pin HA
+    /// reader of `env` (checkpointed to sequence 6) into the state of
+    /// `ha_reader_denied_data_reads_after_enrollment_fails_closed_and_cleans_its_pin`
+    /// with pin delete refused: its data read is refused after enrollment,
+    /// the failure-time, shutdown and drop releases are all refused, and the
+    /// replica never re-enrolls. Returns the retained `reader-apply:replica`
+    /// pin id; no fault is left armed. Used by the control-owned
+    /// `recover_pins` regression in `tenant_provisioning::tests`.
+    pub(in crate::server) fn leave_denied_reader_pin(
+        env: &Env,
+        authority: &crate::server::authority::AuthorityStore,
+        claim: &crate::server::authority::Claim,
+    ) -> String {
+        use crate::server::cloud_recovery::tests::checkpoint_ha;
+        let apply = enroll_isolated(env);
+        let service = reader(&slot(env, "reader-a")).with_reader_apply(&apply);
+        checkpoint_ha(env, authority, claim, 7..=8);
+        env.data.fault(Op::Get, "", Fault::Refuse, 0, 1);
+        env.meta
+            .fault(Op::Delete, "reader-pins/", Fault::Refuse, 0, 3);
+        assert_eq!(apply.step(&service, 2_000), Step::Failed);
+        apply.stop();
+        drop(service);
+        let left: Vec<_> = env
+            .sets
+            .reader_pins()
+            .unwrap()
+            .into_iter()
+            .filter(|(_, pin)| pin.reason == "reader-apply:replica")
+            .map(|(_, pin)| pin.id)
+            .collect();
+        assert_eq!(left.len(), 1, "the denied release must retain one pin");
+        left.into_iter().next().unwrap()
+    }
+
+    fn reader_pin_reasons(env: &Env) -> Vec<String> {
+        env.sets
+            .reader_pins()
+            .unwrap()
+            .into_iter()
+            .map(|(_, pin)| pin.reason)
+            .collect()
+    }
+
+    async fn error_code(service: &Service, uri: &str) -> (StatusCode, serde_json::Value) {
+        let response = router(service.clone())
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&body).unwrap())
+    }
+
+    #[tokio::test]
+    async fn ha_reader_denied_coordination_reads_after_enrollment_retries_until_stale() {
+        // design-tenant-provisioning ITEM-013 (policy lag after enrollment),
+        // offline model only: the reader's authority read is refused
+        // (`StoreError::Failed`, as the Azure classifier maps a 403) after it
+        // enrolled. The authority store maps every read failure to
+        // `writer_authority_unavailable`, so the follower retries: it does
+        // not latch a failure, keeps serving its verified generation and
+        // keeps its pin, but it confirms nothing, so the staleness bound
+        // alone fails reads and readiness closed. When the read is allowed
+        // again the next step catches up without a restart. Simulated `now`
+        // values drive the bound; this says nothing about Azure enforcement
+        // or propagation timing.
+        use crate::server::cloud_recovery::tests::{checkpoint_ha, setup_ha};
+        let (env, authority, claim) = setup_ha();
+        checkpoint_ha(&env, &authority, &claim, 5..=6);
+        let apply = enroll_isolated(&env);
+        assert_eq!(apply.progress().applied(), (6, 1_000));
+        let service = reader(&slot(&env, "reader-a")).with_reader_apply(&apply);
+        checkpoint_ha(&env, &authority, &claim, 7..=8);
+        env.meta
+            .fault(Op::Get, "authority.json", Fault::Refuse, 0, 3);
+        for now in [2_000, 20_000, 31_001] {
+            assert_eq!(apply.step(&service, now), Step::Retry, "{now}");
+            assert_eq!(apply.progress().applied(), (6, 1_000));
+            assert!(apply.progress().failure().is_none());
+            assert_eq!(reader_pin_reasons(&env), ["reader-apply:replica"]);
+        }
+        // Fresh up to the bound (age == bound), stale one millisecond later.
+        assert!(!service.reader_stale(31_000));
+        assert!(service.reader_stale(31_001));
+        // Over HTTP (wall clock, far past the simulated confirmation) reads
+        // and readiness refuse as stale, not as failed; status reports it.
+        for uri in ["/ready", "/v1/vectors/6"] {
+            let (code, body) = error_code(&service, uri).await;
+            assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE, "{uri}");
+            assert_eq!(body["error"]["code"], "reader_stale", "{uri}");
+        }
+        let (code, body) = error_code(&service, "/v1/admin/serve-status").await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(body["reader"]["stale"], true);
+        assert_eq!(body["reader"]["failed"], false);
+        // Access takes effect again: the next step applies and confirms.
+        let now = crate::server::serve_mode::unix_ms();
+        assert_eq!(apply.step(&service, now), Step::Swapped);
+        assert_eq!(apply.progress().applied(), (8, now));
+        assert_eq!(apply.progress().epoch(), Some(claim.epoch));
+        assert!(!service.reader_stale(now + 30_000));
+        assert_eq!(status(&service, "/v1/vectors/8").await, StatusCode::OK);
+        assert_eq!(status(&service, "/ready").await, StatusCode::OK);
+        apply.stop();
+        assert!(reader_pin_reasons(&env).is_empty());
+    }
+
+    #[tokio::test]
+    async fn ha_reader_denied_data_reads_after_enrollment_fails_closed_and_cleans_its_pin() {
+        // design-tenant-provisioning ITEM-013 (policy lag after enrollment),
+        // offline model only: after enrollment the reader's archive data
+        // reads are refused (`StoreError::Failed`, a classified 403) while a
+        // newer checkpoint is pending. That is a permanent follower failure:
+        // readiness answers `reader_apply_failed` at once, no further store
+        // call is made even after access returns (only a restart
+        // re-enrolls), and the last verified generation is still read until
+        // the staleness bound, after which reads refuse as stale. The pin is
+        // released on failure; if the pin delete is refused as well, the pin
+        // stays as cleanup debt through `stop` and only the next enrollment
+        // of the same replica, once its delete is allowed, replaces it.
+        use crate::server::cloud_recovery::tests::{checkpoint_ha, setup_ha};
+        for pin_delete_denied in [false, true] {
+            let (env, authority, claim) = setup_ha();
+            checkpoint_ha(&env, &authority, &claim, 5..=6);
+            let apply = enroll_isolated(&env);
+            let service = reader(&slot(&env, "reader-a")).with_reader_apply(&apply);
+            checkpoint_ha(&env, &authority, &claim, 7..=8);
+            env.data.fault(Op::Get, "", Fault::Refuse, 0, 1);
+            if pin_delete_denied {
+                env.meta
+                    .fault(Op::Delete, "reader-pins/", Fault::Refuse, 0, 3);
+            }
+            assert_eq!(apply.step(&service, 2_000), Step::Failed);
+            assert_eq!(
+                apply.progress().failure().as_deref(),
+                Some("cloud_store_failed")
+            );
+            assert_eq!(apply.progress().applied(), (6, 1_000));
+            assert_eq!(
+                reader_pin_reasons(&env).len(),
+                usize::from(pin_delete_denied)
+            );
+            // Access returns, but the failure is latched: no store call.
+            let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let seen = called.clone();
+            env.meta.hook(Op::Get, "", move || {
+                seen.store(true, std::sync::atomic::Ordering::SeqCst);
+            });
+            assert_eq!(apply.step(&service, 3_000), Step::Stopped);
+            assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
+            // Readiness fails closed immediately; reads of the last verified
+            // generation stay within the bound, then refuse as stale.
+            let (code, body) = error_code(&service, "/ready").await;
+            assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(body["error"]["code"], "reader_apply_failed");
+            assert!(!service.reader_stale(31_000));
+            assert!(service.reader_stale(31_001));
+            let (code, body) = error_code(&service, "/v1/vectors/6").await;
+            assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(body["error"]["code"], "reader_stale");
+            // `stop` (shutdown, then drop) retries the release; a delete
+            // still refused through both attempts keeps the pin, which a
+            // fresh enrollment of this replica replaces once allowed.
+            apply.stop();
+            assert_eq!(
+                reader_pin_reasons(&env).len(),
+                usize::from(pin_delete_denied)
+            );
+            if pin_delete_denied {
+                let stale = env.sets.reader_pins().unwrap()[0].1.id.clone();
+                drop(service);
+                let again = enroll_isolated(&env);
+                let pins = env.sets.reader_pins().unwrap();
+                assert_eq!(pins.len(), 1);
+                assert_ne!(pins[0].1.id, stale);
+                assert_eq!(again.progress().applied(), (8, 1_000));
+                again.stop();
+                assert!(reader_pin_reasons(&env).is_empty());
+            }
+        }
     }
 
     #[test]

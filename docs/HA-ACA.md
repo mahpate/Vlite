@@ -679,7 +679,11 @@ future qualified path must keep.
   endpoint is published by compare-and-swap. A later operation must keep the
   same endpoint (`reader_endpoint_changed`). Reader apps are private copies
   owned by the plan. A writer app or a different reader gives
-  `reader_app_mismatch`. A deleted planned reader gives `reader_app_missing`.
+  `reader_app_mismatch`; writer and reader app IDs are compared ASCII
+  case-insensitively (as ARM compares them), so a reader ID differing from a
+  writer ID only in letter case is refused too, including in a persisted plan
+  or anchor, before any endpoint change or ARM call. A deleted planned reader
+  gives `reader_app_missing`.
   The writer's identity and intent are never changed. **Not enforced:** a
   reader profile must never mount the writer's storage. The check above only
   compares app names, and the profile schema that would expose mounts
@@ -706,8 +710,10 @@ future qualified path must keep.
   one of its planned reader apps. The pins themselves carry only the replica
   name: no tenant, app or lineage. Recovery therefore scans every set, and
   replica names can collide (the follower falls back to the host name or
-  `pid-<pid>`). Scoping pins to a tenant needs ITEM-008, and a production
-  observation and stop-proof source does not exist.
+  `pid-<pid>`). An opt-in isolated-pin layout and offline tenant-scoped grant
+  template exist (ITEM-008), but they do not add tenant identity to pin
+  records or prove effective production scope. A production observation and
+  stop-proof source does not exist.
 - **Cleanup debt:** cancelling a reader add deletes only the reader it
   created. A cancelled reader update is not rolled back: the app keeps the
   new configuration while the route is unchanged. A stopped
@@ -715,7 +721,7 @@ future qualified path must keep.
   release is resolved only by rerunning recovery. Retirement must name the
   latest receipt and also stops owned readers.
 - **Missing production proof (all refuse):** reader pin scope (ITEM-008),
-  a real ARM adapter and stop/update proof, a replica observation source,
+  qualified ARM preflight and stop/update evidence, a replica observation source,
   replica clock proof, reader qualification, profile/quota/budget (including
   the writer-storage mount check, OD-006), reader credentials and the
   control-worker/REST composition.
@@ -743,8 +749,8 @@ future qualified path must keep.
 
 The `tenant-deployment` admin surface records durable, idempotent lifecycle
 **intents** in the control-state store. It does not provision, start, stop,
-deploy or route any Azure resource. There is no production ARM adapter and
-no qualified ACA behavior. The [control worker](#control-worker-and-aca-job-offline-only)
+deploy or route any Azure resource. The ARM adapter is built only behind
+every worker gate, and there is no qualified ACA behavior. The [control worker](#control-worker-and-aca-job-offline-only)
 (`work`) refuses at its gates before any claim or cloud call, so it runs no
 accepted operation in production. For managed tenants today, use the manual
 procedures in this guide.
@@ -757,7 +763,8 @@ procedures in this guide.
 | `resume` | Records the action as an idempotent no-op; it never runs a cloud step. A `present` reader change answers 409 `pin_scope_unproven`. | No |
 | `cancel` | Seals and releases a reserved operation that has not activated (`retirement_required` once activated). Withdraws an unreserved reader change or retirement so it can never reserve; an unreserved `create` or `migrate` answers `transition_unavailable`. | No |
 | `readers`, `retire` | Recorded as intent only (`accepted`, `observed.reserved: false`). The actuators exist only in offline fixtures. | No |
-| `migrate`, `rollback`, `release`, `acknowledge-delivery`, `replace-credentials` | Excluded (see below). | No |
+| `migrate`, `rollback`, `release` | Excluded (see below). | No |
+| `issue-credentials`, `acknowledge-delivery`, `replace-credentials` | REST only for minting (the CLI refuses `issue-credentials` and `replace-credentials`). Deliver a reserved, seeded create's candidate credential once in the admin response, acknowledge it or replace a lost one ([API](API.md)). Production has no seed recorder yet, so issue answers `seed_unrecorded`; delivery never routes the tenant. | No |
 
 **Before you start.** REST is off by default. Without the flag, authenticated,
 well-formed requests answer 409 `tenant_deployments_not_configured`;
@@ -787,12 +794,104 @@ Operation records live under `<prefix>tenant-operations/` beside the
 control-state object. Routes, bodies and errors are listed in the
 [API reference](API.md#managed-tenant-deployments-intent-only-opt-in-off-by-default).
 
-**Dashboard (read only).** A super administrator signed in to the server
-directly can list the operations and their phases under **Administration →
-Users & access → Tenant deployments**, 20 at a time. The panel submits
-nothing. It stays locked with open development access (no admin token) and
-through the HA gateway, which refuses admin routes. Use the CLI or REST
-routes above to submit or cancel.
+**Dashboard.** A super administrator signed in to the server directly can
+list the operations and their phases under **Administration → Users &
+access → Tenant deployments**, 20 at a time. The same panel can also
+submit `create`, `readers` and `retire` intents, check an operation's status
+and `cancel` it. Like the routes above, it only records the request. Cloud
+execution stays switched off (OD-002), so nothing is deployed, routed,
+started or stopped in Azure, and reader fleets stay blocked until ITEM-008. Every
+submission asks for confirmation first, and each field explains where its
+value comes from:
+
+- Profiles are chosen as files or pasted. The browser computes their
+  SHA-256 digests and sends the exact text in `contents`. The request
+  inspector shows only counts and profile digests for the submission body,
+  not the documents, Azure resource names or secret-version references.
+  If authentication ends, the dashboard clears the inspector.
+- **Use this operation** in the list fills in the operation, the tenant and,
+  when one exists, the retirement receipt.
+- Cancel always reads the latest status first and sends the tokens it just
+  read. A stale token is explained, and **Check status** reads it again.
+- A cancel seals the operation before it releases the reservation. If the
+  release fails, status shows `cancelled` with `observed.reserved` still
+  true and the next step `cancel again to release the reservation`. An
+  exact resend of that cancel (same account, same key) finishes the
+  release. The server also accepts a new cancel from any administrator that
+  quotes the operation's current tokens, but only while this operation still
+  holds that reservation. Once it is released, or for an operation that
+  succeeded or retired, a new cancel is refused (`operation_terminal`). The
+  panel saves each cancel it sends in this browser tab's `sessionStorage`,
+  filed under the API address the dashboard sends its requests to, then the
+  account the server verified at sign-in: a user account by its ID, or the
+  bootstrap admin token (everyone using that token counts as one account). A
+  role alone never counts as an account. The record holds the operation ID,
+  the request key and the values it quoted, never a password or token. It is
+  plain text, though, so anyone using the tab can read it until it is
+  deleted.
+  - **Same account after a reload:** **Cancel** resends it exactly. A password
+    session that has not ended resumes by itself; a bootstrap token user
+    types the token again.
+  - **Another account in the same tab** cannot resend it. The panel says this
+    tab has no saved cancel for the account signed in now, and **Cancel**
+    sends a new cancel instead (see below). The first account's record stays
+    until that account signs out or its session ends.
+  - **Another dashboard on the same site** cannot resend or delete it.
+    `sessionStorage` is shared by every page of a site in a tab, and one site
+    can serve dashboards for different servers. For example, the Docker image
+    reaches its API at `/api`, and another dashboard could use a different
+    path. So records are filed by the exact API address the requests go to:
+    scheme, host, port and path. The address never includes credentials, a
+    query or a fragment. If the dashboard cannot work out that address (or
+    the address includes any of those), the cancel is not saved.
+  - **Deleted** when its account signs out, and when its session is seen to
+    end: a 401 (expired or revoked session, rejected token), a typed token
+    replacing this browser's password session, or a page load that finds no
+    password session (user accounts only). A typed token refused with a 401
+    (even one without a JSON body) also deletes the bootstrap admin token's
+    records for this API address, even if the dashboard had not yet learned
+    who signed in. Closing the tab deletes it too. On every sign-in and
+    sign-out, including one where the dashboard does not know who was signed
+    in, the panel deletes and never uses records it cannot attribute to an
+    account, such as ones saved by an older version of the page, or damaged
+    ones.
+  - **No verified account or no API address:** the cancel is not saved; it is
+    kept only while the operation stays selected on the page.
+  - If the saved cancel is gone (another tab or browser, a sign-out or an
+    ended session), the panel says so and **Cancel** sends the new cancel
+    described above instead: a new request key and the tokens from the
+    status it reads just before sending. If another account sent the
+    earlier cancel from this tab and its session has not ended, that account
+    can instead sign in again and resend it exactly.
+  - **Refused new cancel** (`operation_terminal`): either another
+    administrator or tab finished the release in between, or the server is
+    older than this recovery. The panel says to select **Check status**
+    first; nothing more is needed if the reservation is now released. If it
+    is still held, only an exact resend works on that server, so the account
+    that sent it can sign in again in this tab, or else report the operation
+    ID to the server operator. **Cancel** then stays off for that operation
+    until the page reloads or someone signs in or out.
+- Each **Create** adds a tenant record at once. The record counts toward the
+  tenant limit and stays even if the request is later cancelled.
+
+Network errors, 408, 429, 5xx, or any code not on the settled list keep the
+key: selecting the same button again resends the unchanged request with the
+same key, so it is recorded only once. A success answer that does not name
+the requested operation or tenant is also treated as unknown. Settled codes
+discard the key. Some of them (for example `tenant_id_conflict`) can follow a
+recorded request, because a resend repeats the same refusal; their
+explanation says the request may stay recorded and to check **Load
+operations**. `invalid_input` also keeps the key, because the request may be
+recorded before the server refuses to add its tenant record. Resending at
+once fails the same way, so the explanation says to fix the cause first and
+then select the same button without changing the form. For `tenant capacity
+reached`, the server already holds 1,024 tenant records, deleted tenants
+included: report it to the server operator. Editing the form starts a new
+request. The panel
+stays locked with open development access (no admin token), for reader and
+tenant-scoped sign-ins, and through the HA gateway, which refuses admin
+routes. `resume` is available only through the CLI or REST; migration and
+the other actions stay excluded (below).
 
 **Create.** Submit `{"idempotency_key", "request": {"kind": "create", ...},
 "contents": [...]}`. `contents` holds the exact text of every profile it
@@ -847,11 +946,11 @@ contract removes the route and stops apps. It never deletes data
 
 **Migration and release: excluded.** Existing-tenant migration (EPIC-006) is
 not implemented and is outside this runbook. Do not submit `migrate`: the
-route only records an unreserved intent and nothing runs it. `rollback`,
+route only records an unreserved intent and nothing runs it. `rollback` and
 `release` (which first needs `ack_irreversible: true`, otherwise 422
-`irreversible_ack_required`), `acknowledge-delivery` and
-`replace-credentials` answer 409 `transition_unavailable`. There is no data
-barrier, cutover, credential delivery or source release. Move tenants only
+`irreversible_ack_required`) answer 409 `transition_unavailable`, as does
+credential delivery for a migration. There is no data
+barrier, cutover, migration credential delivery or source release. Move tenants only
 with the reviewed manual procedures.
 
 **Retained data.** Cancellation and retirement keep databases, archives,
@@ -886,11 +985,14 @@ forward again or keeping the new version. Never strip `lifecycle`,
 `withdrawn`, reservations, receipts or operation records to make an older
 binary start: stripping `withdrawn` would let a cancelled operation reserve.
 
-**Effective permissions are not proven.** Fixtures prove neither Azure RBAC
-nor mount isolation. Reader pins rewrite the writer's set record, so no
-tenant-scoped grant exists (ITEM-008). The writer-storage mount exclusion is
-not enforced (OD-006). Treat every permission statement here as a design
-requirement, not a verified property.
+**Effective permissions are not proven.** Legacy reader pins rewrite the
+writer's set record, so that path cannot use a pin-only tenant grant. The
+opt-in isolated-pin layout and offline per-tenant grant template now exist
+(ITEM-008), but fake-store and template tests prove neither Azure RBAC/ABAC
+enforcement nor mount isolation. Keep isolated mode disabled until every
+writer and janitor on the prefix is upgraded and the cloud grant is qualified.
+Writer-storage mount exclusion is also not enforced (OD-006). Treat every
+permission statement here as a design requirement, not a verified property.
 
 **Local fault suites.** These run without Azure and are the only evidence for
 this surface:
@@ -899,7 +1001,7 @@ this surface:
 |---------|-------|---------------|
 | `cargo test --features server --lib tenant_provisioning` | Durable intents and idempotency, reservation/route CAS, guards, fake-ARM create/update/delete/stop, unknown-outcome reconciliation, no adoption, retention on cancel/retire, reader anchoring/eligibility, schema compatibility, admin REST/CLI refusals and redaction | Real ARM/ACA behavior, Azure RBAC or mounts, clock/freshness, stop proofs, timing or storage measurements |
 | `cargo test --features server --lib epic_005` | The reader/retirement subset, including stale plans, races, withdrawal-versus-reservation races, failed-to-healthy fleet observations and route drift | ACA replica replacement, reader-pin/RBAC policy-propagation lag (ITEM-008/019), reader routing or reader qualification (ITEM-021) |
-| `cargo test --features server --lib tenant_provisioning::worker` | The control worker: one claim and one attempt per invocation, every gate refusing in order before the claim and the adapter, a lost claim race and a foreign claim refusing `actuator_fence_unproven`, a refused dispatch reported `failed`, an unknown dispatch kept uncertain and never retried, cancelled operations, unknown IDs and store faults failing closed, no control-state write | The production ARM adapter, `ActuatorStopped` proofs, polling pace, a Job execution on ACA |
+| `cargo test --features server --lib tenant_provisioning::worker` | The control worker: one claim and one attempt per invocation, every gate refusing in order before the claim and the adapter, production never building the adapter without proofs, one test-proof attempt provisioning a writer through `ArmClient` on a loopback fake (`tenant_provisioning::arm`), a lost claim race and a foreign claim refusing `actuator_fence_unproven`, a refused dispatch reported `failed`, an unknown dispatch kept uncertain and never retried, cancelled operations, unknown IDs and store faults failing closed, no control-state write | Real Azure ARM, `ActuatorStopped` proofs, polling pace, a Job execution on ACA |
 | `pwsh -NoProfile -File deploy/azure-container-apps/ha/test.ps1` | The worker Job template (TEST-014): manual trigger, parallelism 1, one completion, `replicaRetryLimit` 0, a dedicated identity that no serving role holds, only the control-target secret, the `work` invocation, never referenced by `deploy.ps1`, and the qualification gate still refusing | That the Job runs on ACA, the identity's RBAC grants, or that the projected `client_id` belongs to that identity |
 | `cargo test --features server --test server_cli tenant_deployment` | Routes are opt-in and refused before a database is created | Any served lifecycle |
 | `python tests/openapi_contract.py`, `python tests/admin_route_coverage.py` | Routes are registered with their OpenAPI contracts and are admin-only | Behavior |
@@ -913,8 +1015,9 @@ and auto-failover stays off by default.
 
 `vlite-server tenant-deployment work` is the control worker
 (design-tenant-provisioning ITEM-022). **In production it always refuses
-before it claims an operation or calls Azure.** No production ARM adapter is
-wired and no qualification, quota or budget proof exists (OD-002, OD-006).
+before it claims an operation or calls Azure.** The ARM adapter is wired,
+but it is built only after every gate passes, and no qualification, quota
+or budget proof exists (OD-002, OD-006).
 This section explains what it does and what each result means.
 
 ```sh
@@ -927,10 +1030,24 @@ It takes the same `--target-file`, `--object`, `--admin-dir` and optional
 (`admin_dir_busy` while a server or another CLI holds it). One invocation does
 the following, once:
 
+0. **Release sweep (ITEM-024).** Before selecting anything, it finishes
+   every sealed cancellation whose reservation release failed: a slot
+   still reserved by an operation with the cancellation requested, no
+   receipt and a sealed `Cancelled` terminal record. It reuses that seal
+   and the same release an admin cancel runs, and it never seals, activates
+   or touches another operation's slot. Each confirmed release attempts an
+   audit event (`tenant_deployment_release_recovered`) and is listed in the
+   output's `releases_recovered`, with whether that event was recorded. If a
+   record is unreadable or a release stays
+   unconfirmed, the invocation fails, the error names the operation and
+   ends `; no operation was attempted`, and nothing is selected or
+   claimed. Errors after any confirmed releases list their operation IDs
+   and audit-recording status in the error message.
 1. **Select.** With `--operation`, that operation. Otherwise, the unclaimed,
    unsealed `create` with the lowest operation ID whose reservation is held
-   and not cancelled. If there is none, it prints `{"outcome": "idle"}` and
-   exits 0. An unknown ID answers `operation_not_found`. Without
+   and not cancelled. If there is none, it prints
+   `{"outcome": "idle", "releases_recovered": [...]}` and exits 0. An
+   unknown ID answers `operation_not_found`. Without
    `--operation`, the worker lists the operations prefix once per invocation
    and stops at the first unreadable store or record (it fails closed rather
    than skipping it). Neither claims anything.
@@ -943,10 +1060,13 @@ the following, once:
    profile content is missing or corrupt, and 422 `operation_request_invalid`
    if the profile is legacy or does not match the strict writer-profile
    schema; then `qualification_missing`,
-   `quota_unproven`, `quota_exceeded` and `budget_unapproved`, and last
-   `transition_unavailable` (no production ARM adapter, ITEM-020). Production
-   stops at the first gate that applies, at the latest at
-   `qualification_missing`. The same operation is selected again next time.
+   `quota_unproven`, `quota_exceeded` and `budget_unapproved`. Only past
+   every gate does the worker build the ARM adapter (ITEM-020's `ArmClient`,
+   authenticating as the platform managed identity whose client ID the
+   target file names; building it sends nothing). No production proof
+   exists yet (OD-006), so production stops at the first gate that applies,
+   at the latest at `qualification_missing`, and never builds the adapter
+   or calls Azure. The same operation is selected again next time.
    To run a different one, pass `--operation`, or cancel the refused one.
 3. **Claim.** A compare-and-swap on the operation journal records this
    attempt under a fresh `worker-<hex>` ID. If another attempt claimed the
@@ -960,7 +1080,8 @@ the following, once:
    and an explicit `--operation` refuses `actuator_fence_unproven`.
 4. **Attempt.** It runs one provision attempt. Each cloud action is journaled
    before it is sent and is settled only from an exact readback. The worker
-   never retries an action and never writes the control state. Only the
+   never retries an action, and apart from the step 0 release sweep it
+   never writes the control state. Only the
    existing activation compare-and-swap publishes a route, and that needs
    readiness and delivery proofs that nothing produces yet.
 

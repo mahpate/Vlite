@@ -609,6 +609,18 @@ impl Snapshot {
                 .cloned(),
         );
     }
+
+    /// Replaces or adds each of `ids` with its entry in `current`, so a
+    /// stale local credential file cannot drop or restore one published
+    /// only in control state. An ID absent from `current` is left alone.
+    pub(super) fn keep_ids<'a>(&mut self, current: &Self, ids: impl IntoIterator<Item = &'a str>) {
+        for id in ids {
+            if let Some(entry) = current.0.iter().find(|entry| entry.id == id) {
+                self.0.retain(|kept| kept.id != id);
+                self.0.push(entry.clone());
+            }
+        }
+    }
 }
 
 /// One scoped credential in a recovery bundle: its identity, grant and
@@ -784,6 +796,171 @@ pub(super) fn migration_rekey(
         source.push(entry);
     }
     Ok((Snapshot(source), Snapshot(target), tokens))
+}
+
+/// design-tenant-provisioning ITEM-010 (PRD §3.4 step 7): the first
+/// credential of a tenant a managed `create` is provisioning, as the
+/// control-state view publishes it. Holds only the secret's hash.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) struct Candidate(Entry);
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl Candidate {
+    pub(super) fn id(&self) -> &str {
+        &self.0.id
+    }
+
+    pub(super) fn tenant(&self) -> Option<&str> {
+        self.0.tenant_id.as_deref()
+    }
+}
+
+#[cfg(test)]
+impl Candidate {
+    /// This candidate's grant under credential `id` and `secret`, with its
+    /// token: models an ID collision, or a retry holding the same candidate.
+    pub(super) fn with_identity_for_test(mut self, id: &str, secret: &str) -> (Self, String) {
+        self.0.id = id.to_owned();
+        self.0.secret_sha256 = sha256_hex(secret.as_bytes());
+        let token = token(&self.0, secret);
+        (self, token)
+    }
+}
+
+/// Checks a candidate's grant by [`candidate`]'s rules without minting
+/// anything: lets a caller refuse a bad grant before it persists anything.
+pub(super) fn candidate_grant(
+    name: &str,
+    operations: &[String],
+    graphs: Option<&[String]>,
+    expires_unix_ms: u64,
+    now: u64,
+) -> Result<u16, ApiError> {
+    if name.is_empty() || name.len() > 64 || name.chars().any(char::is_control) {
+        return Err(unprocessable("name must be 1..64 printable characters"));
+    }
+    let ops = parse_ops(operations)?;
+    graph_scope(ops, graphs, true)?;
+    if expires_unix_ms <= now || expires_unix_ms > now + MAX_LIFETIME_MS {
+        return Err(unprocessable(
+            "expires_unix_ms must be in the future and at most 365 days ahead",
+        ));
+    }
+    Ok(ops)
+}
+
+/// Mints a candidate bound to `tenant` and the seeded `lineage`, covering
+/// every collection the tenant owns, by the same rules as `create` (name,
+/// operations, graph binding, lifetime); 422 otherwise. Returns its token
+/// once: the secret is never stored.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) fn candidate(
+    tenant: &str,
+    lineage: u64,
+    name: &str,
+    operations: &[String],
+    graphs: Option<&[String]>,
+    expires_unix_ms: u64,
+    now: u64,
+) -> Result<(Candidate, String), ApiError> {
+    let ops = candidate_grant(name, operations, graphs, expires_unix_ms, now)?;
+    let secret = random_secret()?;
+    let entry = Entry {
+        id: random_id()?,
+        name: name.to_owned(),
+        all: true,
+        collections: Vec::new(),
+        operations: op_names(ops).into_iter().map(str::to_owned).collect(),
+        lineage: format!("{lineage:016x}"),
+        secret_sha256: sha256_hex(secret.as_bytes()),
+        created_unix_ms: now,
+        expires_unix_ms,
+        revoked_unix_ms: None,
+        rotated_from: None,
+        tenant_id: Some(tenant.to_owned()),
+        requests_per_second: None,
+        max_vectors: None,
+        max_vectors_per_collection: None,
+        graphs: graphs.map(<[String]>::to_vec),
+    };
+    entry
+        .validate()
+        .ok_or_else(|| unprocessable("candidate credential is invalid"))?;
+    let token = token(&entry, &secret);
+    Ok((Candidate(entry), token))
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl Snapshot {
+    /// `self` with `candidate` added and each of `revoked` that is bound to
+    /// the candidate's tenant revoked (an earlier revocation time is kept);
+    /// every other credential stays as it is. 409 `credential_candidate_exists`
+    /// if its ID is taken, 409 `credential_limit` at capacity: nothing is
+    /// pruned to make room. 409 `candidate_revocation_unconfirmed` if one of
+    /// `revoked` would stay live (bound elsewhere).
+    pub(super) fn with_candidate(
+        &self,
+        candidate: &Candidate,
+        revoked: &[String],
+        now: u64,
+    ) -> Result<Self, ApiError> {
+        if self.0.iter().any(|entry| entry.id == candidate.0.id) {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "credential_candidate_exists",
+                "a credential with the candidate's ID is already published",
+            ));
+        }
+        if self.0.len() >= CAPACITY {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "credential_limit",
+                "too many active credentials; revoke some first",
+            ));
+        }
+        let mut next = self.clone();
+        for entry in &mut next.0 {
+            if entry.tenant_id == candidate.0.tenant_id && revoked.contains(&entry.id) {
+                entry.revoked_unix_ms.get_or_insert(now);
+            }
+        }
+        if next
+            .0
+            .iter()
+            .any(|entry| revoked.contains(&entry.id) && entry.state(now) == "active")
+        {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "candidate_revocation_unconfirmed",
+                "a replaced candidate is bound to another tenant and stays live",
+            ));
+        }
+        next.0.push(candidate.0.clone());
+        if !next.valid() {
+            return Err(unprocessable("candidate credential is invalid"));
+        }
+        Ok(next)
+    }
+
+    /// Revokes each of `ids` this snapshot holds, whether or not it has
+    /// expired (an earlier revocation time is kept), so a regressed clock
+    /// or a stale view cannot make it usable again. An ID the snapshot does
+    /// not hold is skipped; every other credential stays as it is.
+    pub(super) fn revoke_present(&mut self, ids: &[String], now: u64) {
+        for entry in &mut self.0 {
+            if ids.contains(&entry.id) {
+                entry.revoked_unix_ms.get_or_insert(now);
+            }
+        }
+    }
+
+    /// Whether this snapshot holds exactly `candidate` (secret hash, grant,
+    /// tenant and lineage) and it is active at `now`.
+    pub(super) fn publishes(&self, candidate: &Candidate, now: u64) -> bool {
+        self.0
+            .iter()
+            .any(|entry| *entry == candidate.0 && entry.state(now) == "active")
+    }
 }
 
 impl RecoveryCredential {

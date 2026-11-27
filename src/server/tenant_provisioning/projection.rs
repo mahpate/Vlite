@@ -12,8 +12,10 @@
 //! Publishing writes nothing to the control state, so the public gateway,
 //! which routes by the control-state directory, never sees a pending
 //! tenant. Publication is a compare-and-swap that refuses a source,
-//! read-start or revision regression; the publisher keeps no cache, so a
-//! restarted or resumed worker publishes only from a new source read.
+//! read-start or revision regression, and other source content at the same
+//! generation (a fork, as `control_state::Poller` refuses); the publisher
+//! keeps no cache, so a restarted or resumed worker publishes only from a
+//! new source read.
 //!
 //! A backend (`Reader`) accepts a witness only with a `ClockProof`, the
 //! approved pairwise clock uncertainty backed by qualified evidence; without
@@ -162,12 +164,16 @@ impl Projection {
     }
 
     /// Admits a verified envelope grant for the projected tenant. Under a
-    /// pending admission only the operation's validator is admitted, and
-    /// only with a read-only grant; the request is then still checked by
-    /// the usual permission rules.
+    /// pending admission only the operation's validator is admitted: its API
+    /// credential (not a signed-in session) bound to the pending lineage,
+    /// and only with a read-only grant; the request is then still checked
+    /// by the usual permission rules.
     pub(in crate::server) fn admit_grant(&self, grant: &Grant) -> Result<(), ApiError> {
         if let Some(Admission::Pending { pending }) = &self.admission {
-            if grant.id != pending.validator {
+            if grant.id != pending.validator
+                || !grant.api_credential
+                || grant.lineage != pending.lineage
+            {
                 return Err(Refusal::Tenant.error());
             }
             if !grant.allows_only(READ_ONLY) {
@@ -305,9 +311,14 @@ impl Publisher {
         let read_start = wall();
         let (snapshot, _) = self.source.read()?;
         let (record, admission) = derive(&snapshot, tenant, pending)?;
+        let source_digest =
+            sha256_hex(&serde_json::to_vec(&snapshot).expect("a snapshot always serializes"));
         let current = read(&*self.store, &self.name, tenant, self.s_ctl_ms)?;
+        // Other content at the same `A` is a fork, not a newer source.
         if let Some((current, _, _)) = &current
             && (current.source_generation > snapshot.generation()
+                || (current.source_generation == snapshot.generation()
+                    && current.source_digest != source_digest)
                 || current.read_start_unix_ms > read_start)
         {
             return Err(conflict(
@@ -321,9 +332,7 @@ impl Publisher {
             tenant: record,
             admission,
             source_generation: snapshot.generation(),
-            source_digest: sha256_hex(
-                &serde_json::to_vec(&snapshot).expect("a snapshot always serializes"),
-            ),
+            source_digest,
             witness_revision: current
                 .as_ref()
                 .map_or(Some(1), |(current, _, _)| {
@@ -521,6 +530,8 @@ impl Reader {
             let old = &accepted.projection;
             if projection.witness_revision < old.witness_revision
                 || projection.source_generation < old.source_generation
+                || (projection.source_generation == old.source_generation
+                    && projection.source_digest != old.source_digest)
                 || projection.read_start_unix_ms < old.read_start_unix_ms
                 || (projection.witness_revision == old.witness_revision
                     && digest != accepted.digest)
@@ -658,15 +669,19 @@ pub(in crate::server) mod tests {
         .unwrap()
     }
 
+    /// An API credential's grant for T at lineage 0x1234, as an envelope
+    /// principal that is not a `user:` session yields it.
     fn grant(id: &str, ops: &[Op]) -> Grant {
-        Grant::for_user(
+        let mut grant = Grant::for_user(
             id.into(),
             "v".into(),
             Some(T.into()),
             ops,
             0x1234,
             u64::MAX / 2,
-        )
+        );
+        grant.api_credential = true;
+        grant
     }
 
     fn revision(memory: &Memory) -> u64 {
@@ -775,7 +790,7 @@ pub(in crate::server) mod tests {
                 "projection_pending_unbound"
             );
         }
-        objects.update(2, |c| c.request_cancel(T, OP)).unwrap();
+        objects.update(2, |c| c.request_cancel(T, OP, 1)).unwrap();
         assert_eq!(
             code(publisher(&memory).publish(T, Some(&pending), || 2_000)),
             "projection_pending_unbound"
@@ -784,6 +799,35 @@ pub(in crate::server) mod tests {
         let revoked = publisher(&memory).publish(T, None, || 3_000).unwrap();
         assert!(!revoked.serves(Some(T), "backend-t", Some(0x1234)));
         assert_eq!(revision(&memory), 2);
+    }
+
+    /// The validator is admitted only as the API credential bound to the
+    /// pending lineage: the same ID bound to another database lineage, or a
+    /// signed-in session principal, is refused before any handler runs.
+    #[test]
+    fn a_pending_validator_is_admitted_only_as_the_lineage_bound_credential() {
+        let memory = world(false, 0x1234);
+        let projection = publisher(&memory)
+            .publish(T, Some(&pending("backend-t", 0x1234)), || 1_000)
+            .unwrap();
+        assert!(
+            projection
+                .admit_grant(&grant(VALIDATOR, &[Op::Read]))
+                .is_ok()
+        );
+        let mut other_lineage = grant(VALIDATOR, &[Op::Read]);
+        other_lineage.lineage = 0x5678;
+        let mut session = grant(VALIDATOR, &[Op::Read]);
+        session.api_credential = false;
+        for refused in [other_lineage, session] {
+            assert_eq!(code(projection.admit_grant(&refused)), "envelope_invalid");
+        }
+        // An active route keeps its existing rules.
+        let memory = world(true, 0x1234);
+        let active = publisher(&memory).publish(T, None, || 1_000).unwrap();
+        let mut session = grant("x", &[Op::Read]);
+        session.api_credential = false;
+        assert!(active.admit_grant(&session).is_ok());
     }
 
     #[test]
@@ -831,6 +875,39 @@ pub(in crate::server) mod tests {
         assert_eq!(revision(&memory), 2);
         publisher(&memory).publish(T, None, || 8_000).unwrap();
         assert_eq!(revision(&memory), 3);
+    }
+
+    /// A source rewritten at the same generation `A` with other content (a
+    /// fork, or a restore replayed to the same number) is a regression, as
+    /// for `control_state::Poller`: neither the publisher nor a backend
+    /// takes it as a new witness of `A`.
+    #[test]
+    fn a_forked_source_at_the_same_generation_is_refused() {
+        let memory = world(true, 0x1234);
+        let first = publisher(&memory).publish(T, None, || 1_000).unwrap();
+        let reader = reader(&memory);
+        assert_eq!(reader.poll_at(1_000, 0).unwrap(), 1);
+        let published = memory.raw(NAME).unwrap();
+        // Another generation-1 state: T is routed to another lineage.
+        let fork = world(true, 0x5678).raw(SOURCE).unwrap();
+        memory.set_raw(SOURCE, &fork);
+        assert_eq!(
+            code(publisher(&memory).publish(T, None, || 2_000)),
+            "projection_regressed"
+        );
+        assert_eq!(memory.raw(NAME).unwrap(), published);
+        // A non-compliant writer publishes the fork anyway: refused, and
+        // the accepted witness stays the first one.
+        let mut forked: Value = serde_json::from_slice(&published).unwrap();
+        forked["witness_revision"] = json!(2);
+        forked["source_digest"] = json!("b".repeat(64));
+        forked["read_start_unix_ms"] = json!(2_000);
+        forked["deadline_unix_ms"] = json!(2_000 + S_CTL);
+        memory.set_raw(NAME, &serde_json::to_vec(&forked).unwrap());
+        assert_eq!(code(reader.poll_at(2_000, 1_000)), "projection_regressed");
+        let current = reader.current_at(2_000, 1_000).unwrap();
+        assert_eq!(current.source_digest, first.source_digest);
+        assert_eq!(current.witness_revision, 1);
     }
 
     #[test]

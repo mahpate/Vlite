@@ -8,12 +8,13 @@
 //! - Every gate refuses before the claim, so before any port call: the
 //!   reservation must be held and uncancelled, the retained profile must
 //!   resolve ([`aca::Profile::resolve`]; every kind but create is
-//!   `profile_unsupported`), [`aca::preflight`] needs qualification, quota
+//!   `profile_unsupported`) and agree with the accepted resource inventory.
+//!   [`aca::preflight`] needs qualification, quota
 //!   and budget proofs that no production code can produce yet
-//!   (`qualification_missing` first), and the production adapter must exist
-//!   ([`production_arm`] refuses `transition_unavailable` until ITEM-020 is
-//!   wired). Claiming first would strand the operation: no later attempt
-//!   can take it over without an `ActuatorStopped` proof (OD-002).
+//!   (`qualification_missing` first). Only then is the production adapter
+//!   ([`production_arm`], ITEM-020's `ArmClient`) built. Claiming first
+//!   would strand the operation: no later attempt can take it over without
+//!   an `ActuatorStopped` proof (OD-002).
 //! - Exactly one claim: an operation another attempt claimed first, or won
 //!   in a race, refuses `actuator_fence_unproven` (naming the holder before
 //!   any other gate); the worker does not try another operation.
@@ -23,9 +24,12 @@
 //!   it is sent and settles it only from an exact readback, so an unknown
 //!   cloud outcome stays an uncertain step and is reported `unknown`, never
 //!   success.
-//! - No routes: the worker never writes the control state. Only the
-//!   activation compare-and-swap ([`activate_create`]) publishes a route,
-//!   and it needs readiness and delivery proofs nothing here produces.
+//! - No routes: the worker never publishes a route. Its only control-state
+//!   write is the release sweep ([`release_cancelled`], ITEM-024), which
+//!   finishes a sealed cancellation whose release failed and runs before
+//!   selection. Only the activation compare-and-swap ([`activate_create`])
+//!   publishes a route, and it needs readiness and delivery proofs nothing
+//!   here produces.
 use super::*;
 
 /// Poll budget for one cloud operation. `Driver` does not sleep between
@@ -45,17 +49,22 @@ pub(super) struct Proofs {
 pub(super) type Adapter<'a> =
     dyn Fn(&BTreeMap<String, Value>) -> Result<Box<dyn aca::Arm>, ApiError> + 'a;
 
-/// SEAM(ITEM-020): the production ARM adapter, built from the profile's
-/// desired bodies. ITEM-020's `ArmClient` is not wired here yet, so this
-/// refuses before anything is claimed or dispatched. Wire it here and
-/// nowhere else; every gate in [`work`] still runs first.
+/// The production ARM adapter: ITEM-020's [`arm::ArmClient`] for the
+/// profile's desired bodies, authenticating as the platform managed
+/// identity (`client_id` selects a user-assigned one). Building it sends
+/// nothing; tokens are fetched on the first call. Every gate in [`work`]
+/// runs before it is built, and production cannot pass preflight yet
+/// (OD-006), so production never builds it.
 pub(super) fn production_arm(
-    _bodies: &BTreeMap<String, Value>,
-) -> Result<Box<dyn aca::Arm>, ApiError> {
-    Err(conflict(
-        "transition_unavailable",
-        "no production ARM adapter is wired (ITEM-020); nothing was claimed or dispatched",
-    ))
+    client_id: Option<String>,
+) -> impl Fn(&BTreeMap<String, Value>) -> Result<Box<dyn aca::Arm>, ApiError> {
+    move |bodies| {
+        Ok(Box::new(arm::ArmClient::new(
+            bodies.clone(),
+            crate::server::cloud_backup::azure::IdentitySource::from_env(),
+            client_id.clone(),
+        )?))
+    }
 }
 
 /// A fresh attempt ID per invocation, so no two workers share one.
@@ -124,6 +133,86 @@ pub(super) fn work(
         outcome,
         error,
     }))
+}
+
+/// ITEM-024: the release sweep. A cancellation is sealed before its slot
+/// is released, so a release that failed after the seal leaves the slot
+/// reserved with the cancellation requested, and [`select`] never revisits
+/// the closed journal. For each such slot whose holder sealed a `Cancelled`
+/// terminal record, this runs the same idempotent [`Operations::release`]
+/// an admin cancel would: it reuses the stored seal and releases only a
+/// slot still `Reserved` by that operation with the cancellation requested
+/// and no receipt (`release_lifecycle`). It never seals, never touches an
+/// activated, unsealed or other operation's slot, and does not change the
+/// lifecycle generation. `released` is told of each release it confirms.
+/// An error stops the sweep: an unreadable record, or a release whose
+/// outcome stays unconfirmed while the operation still holds the slot.
+pub(super) fn release_cancelled(
+    objects: &Objects,
+    ops: &Operations,
+    now: u64,
+    mut released: impl FnMut(&Intent),
+) -> Result<(), ApiError> {
+    let (snapshot, _) = objects.read()?;
+    for entry in snapshot.lifecycles() {
+        let Slot::Reserved {
+            operation_id,
+            cancellation_requested: true,
+            receipt: None,
+            ..
+        } = &entry.slot
+        else {
+            continue;
+        };
+        // Unsealed: the cancellation is still running; not ours to end.
+        if !matches!(
+            ops.terminal(operation_id).map_err(|mut error| {
+                error.message = format!(
+                    "{}; cannot read terminal record for operation {operation_id}",
+                    error.message
+                );
+                error
+            })?,
+            Some(Terminal {
+                outcome: TerminalOutcome::Cancelled,
+                ..
+            })
+        ) {
+            continue;
+        }
+        let intent = ops
+            .load(operation_id)
+            .map_err(|mut error| {
+                error.message = format!("{}; cannot load operation {operation_id}", error.message);
+                error
+            })?
+            .intent;
+        if !admin::can_finish_cancel(Some(&TerminalOutcome::Cancelled), holds(&snapshot, &intent)) {
+            // The slot names this operation, so its record must agree.
+            let mut error = state_invalid();
+            error.message = format!("{}; operation {operation_id}", error.message);
+            return Err(error);
+        }
+        match ops.release(objects, &intent, now) {
+            Ok(_) => released(&intent),
+            Err(mut error) => {
+                // A slot the operation no longer holds was ended by someone
+                // else (it leaves `Reserved` only through a release): there
+                // is nothing left to release, and nothing to claim.
+                if let Ok((current, _)) = objects.read()
+                    && holds(&current, &intent).is_none()
+                {
+                    continue;
+                }
+                error.message = format!(
+                    "{}; the release of sealed cancellation {operation_id} is unconfirmed",
+                    error.message
+                );
+                return Err(error);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn provisionable(snapshot: &Snapshot, intent: &Intent) -> bool {
@@ -202,6 +291,20 @@ fn run(
         )));
     }
     let profile = aca::Profile::resolve(loaded).map_err(blocked)?;
+    if let Payload::Create { resources, .. } = &intent.payload {
+        let accepted: BTreeSet<_> = resources.iter().map(|id| id.to_ascii_lowercase()).collect();
+        let planned: BTreeSet<_> = profile
+            .bodies()
+            .keys()
+            .map(|id| id.to_ascii_lowercase())
+            .collect();
+        if accepted.len() != resources.len() || accepted != planned {
+            return Err(blocked(conflict(
+                "profile_resource_mismatch",
+                "the writer profile does not match the accepted resource inventory",
+            )));
+        }
+    }
     let bodies = profile.bodies().clone();
     let preflighted = aca::preflight(
         profile,
@@ -344,6 +447,7 @@ mod tests {
                                 active: true,
                                 config_digest: config_digest.clone(),
                             }]),
+                            mounts: false,
                         };
                         state.resources.insert(call.resource.clone(), observed);
                     }
@@ -406,6 +510,10 @@ mod tests {
 
         /// Accepts and reserves a create the way the CLI does.
         fn submit(&self, key: &str, name: &str) -> String {
+            self.submit_with_resources(key, name, &[writer(name)])
+        }
+
+        fn submit_with_resources(&self, key: &str, name: &str, resources: &[String]) -> String {
             let profile = profile(name);
             let request = json!({
                 "idempotency_key": key,
@@ -415,7 +523,7 @@ mod tests {
                     "max_vectors": 1000,
                     "writer_profile": sha256_hex(profile.as_bytes()),
                     "initialization": sha256_hex(INIT.as_bytes()),
-                    "resources": [writer(name)],
+                    "resources": resources,
                     "secret_versions": ["archive-sas@3"],
                 },
                 "contents": [profile, INIT],
@@ -696,11 +804,6 @@ mod tests {
             refused(&done, Outcome::Blocked, code);
             assert_eq!(done.intent.operation_id, id);
         }
-        // The production seam refuses last, still before the claim.
-        let done = work(&w.objects, &w.ops, &full, &production_arm, None, "worker-1")
-            .unwrap()
-            .unwrap();
-        refused(&done, Outcome::Blocked, "transition_unavailable");
         assert_eq!((built.get(), arm.calls()), (0, 0));
         assert!(w.journal_object(&id).is_none());
         // With every proof and an adapter, the same operation proceeds.
@@ -712,6 +815,72 @@ mod tests {
     }
 
     #[test]
+    fn a_writer_profile_cannot_change_the_accepted_resource_inventory() {
+        let w = world();
+        let different = w.submit_with_resources("a", "contoso", &[writer("other")]);
+        let extra =
+            w.submit_with_resources("b", "fabrikam", &[writer("fabrikam"), writer("extra")]);
+        let duplicate = w.submit_with_resources(
+            "c",
+            "adatum",
+            &[writer("adatum"), writer("adatum").to_ascii_uppercase()],
+        );
+        let before = w.memory.raw(CONTROL).unwrap();
+        let adapter = |_: &BTreeMap<String, Value>| -> Result<Box<dyn Arm>, ApiError> {
+            panic!("a mismatched profile must be refused before the ARM adapter")
+        };
+        for id in [&different, &extra, &duplicate] {
+            let result = work(&w.objects, &w.ops, &full(), &adapter, Some(id), "worker-1")
+                .unwrap()
+                .unwrap();
+            refused(&result, Outcome::Blocked, "profile_resource_mismatch");
+            assert!(w.journal_object(id).is_none());
+            assert_eq!(w.memory.raw(CONTROL).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn writer_inventory_uses_arm_resource_id_case_semantics() {
+        let w = world();
+        let id = w.submit_with_resources("a", "contoso", &[writer("contoso").to_ascii_uppercase()]);
+        let arm = FakeArm::default();
+        let result = w.attempt(&full(), &arm, Some(&id));
+        assert_eq!(result.outcome, Outcome::Provisioned);
+        assert_eq!(arm.calls(), 1);
+    }
+
+    /// The production adapter is ITEM-020's `ArmClient`. Building it sends
+    /// nothing, and without production proofs it is never built.
+    #[test]
+    fn the_production_adapter_is_built_only_behind_every_gate() {
+        let bodies = BTreeMap::from([(writer("contoso"), json!({"location": "westus2"}))]);
+        assert!(
+            production_arm(Some("01234567-89ab-cdef-0123-456789abcdef".into()))(&bodies).is_ok()
+        );
+        let w = world();
+        let id = w.submit("a", "contoso");
+        let built = Cell::new(0);
+        let production = production_arm(None);
+        let counted = |bodies: &BTreeMap<String, Value>| {
+            built.set(built.get() + 1);
+            production(bodies)
+        };
+        let done = work(
+            &w.objects,
+            &w.ops,
+            &Proofs::default(),
+            &counted,
+            None,
+            "worker-1",
+        )
+        .unwrap()
+        .unwrap();
+        refused(&done, Outcome::Blocked, "qualification_missing");
+        assert_eq!(built.get(), 0);
+        assert!(w.journal_object(&id).is_none());
+    }
+
+    #[test]
     fn production_refuses_through_the_cli_core_before_the_claim() {
         let w = world();
         let id = w.submit("a", "contoso");
@@ -719,6 +888,7 @@ mod tests {
         let command = |operation: Option<&str>| admin::Command::Work {
             operation: operation.map(str::to_owned),
             attempt: "worker-1".into(),
+            client_id: None,
         };
         let error =
             admin::run(&w.deployments(), &w.store, Some(&log), command(None), NOW).unwrap_err();
@@ -749,7 +919,7 @@ mod tests {
         let idle = world();
         let result =
             admin::run(&idle.deployments(), &idle.store, None, command(None), NOW).unwrap();
-        assert_eq!(result, json!({"outcome": "idle"}));
+        assert_eq!(result, json!({"outcome": "idle", "releases_recovered": []}));
     }
 
     #[test]
@@ -768,6 +938,7 @@ mod tests {
             &adapter,
             None,
             "worker-1",
+            NOW,
         )
         .unwrap();
         assert_eq!(result["outcome"], "provisioned");
@@ -786,8 +957,16 @@ mod tests {
         let w = world();
         w.submit("a", "fabrikam");
         arm.script(Begin::Unknown);
-        let error =
-            admin::work(&w.deployments(), None, &full(), &adapter, None, "worker-1").unwrap_err();
+        let error = admin::work(
+            &w.deployments(),
+            None,
+            &full(),
+            &adapter,
+            None,
+            "worker-1",
+            NOW,
+        )
+        .unwrap_err();
         assert_eq!(error.code, "cloud_outcome_unknown");
         assert!(
             error
@@ -853,6 +1032,389 @@ mod tests {
         }
         assert!(w.journal_object(&id).is_none());
         assert_eq!(arm.calls(), 0);
+    }
+
+    // ------------------------------------------ ITEM-024: release sweep
+
+    fn cli_work() -> admin::Command {
+        admin::Command::Work {
+            operation: None,
+            attempt: "worker-1".into(),
+            client_id: None,
+        }
+    }
+
+    /// Cancels `id` through the CLI with its current tokens.
+    fn cancel(w: &World, id: &str, key: &str) -> Result<Value, ApiError> {
+        let status = admin::Command::Status {
+            operation: id.to_owned(),
+        };
+        let status = admin::run(&w.deployments(), &w.store, None, status, NOW).unwrap();
+        let operation = &status["operation"];
+        let cancel = admin::Command::Act {
+            operation: id.to_owned(),
+            verb: "cancel".into(),
+            request: json!({
+                "idempotency_key": key,
+                "expected_operation_generation": operation["operation_generation"],
+                "expected_lifecycle_generation": operation["lifecycle_generation"],
+            })
+            .to_string()
+            .into_bytes(),
+        };
+        admin::run(&w.deployments(), &w.store, None, cancel, NOW)
+    }
+
+    /// Cancels `id`, sealing it, but the release after the seal is refused:
+    /// the reservation stays held with the cancellation requested.
+    fn lose_release(w: &World, id: &str) -> String {
+        w.memory.fault(Op::Put, CONTROL, Fault::Refuse, 1, 1);
+        assert!(cancel(w, id, "lost").is_err());
+        let intent = w.ops.load(id).unwrap().intent;
+        assert!(matches!(
+            w.ops.terminal(id).unwrap(),
+            Some(Terminal {
+                outcome: TerminalOutcome::Cancelled,
+                ..
+            })
+        ));
+        assert!(matches!(
+            slot(w, &intent.tenant_id).slot,
+            Slot::Reserved { cancellation_requested: true, receipt: None, ref operation_id, .. }
+                if *operation_id == id
+        ));
+        intent.tenant_id
+    }
+
+    fn slot(w: &World, tenant: &str) -> crate::server::control_state::Lifecycle {
+        w.objects
+            .read()
+            .unwrap()
+            .0
+            .lifecycle(tenant)
+            .unwrap()
+            .clone()
+    }
+
+    fn terminal_object(w: &World, id: &str) -> Vec<u8> {
+        w.memory
+            .raw(&format!("{PREFIX}/operations/{id}/terminal.json"))
+            .unwrap()
+    }
+
+    #[track_caller]
+    fn released_by(w: &World, tenant: &str, id: &str) {
+        let terminal = sha256_hex(&terminal_object(w, id));
+        assert!(
+            matches!(
+                &slot(w, tenant).slot,
+                Slot::Released { operation_id, terminal_digest }
+                    if operation_id == id && *terminal_digest == terminal
+            ),
+            "{:?}",
+            slot(w, tenant)
+        );
+    }
+
+    #[test]
+    fn the_worker_releases_a_sealed_cancellation_whose_release_failed() {
+        let w = world();
+        let id = w.submit("a", "contoso");
+        let tenant = lose_release(&w, &id);
+        let generation = slot(&w, &tenant).generation;
+        let terminal = terminal_object(&w, &id);
+        let log = audit::Log::open(w.directory.path()).unwrap();
+        // Each `run` opens fresh stores, as a restarted worker does.
+        let result = admin::run(&w.deployments(), &w.store, Some(&log), cli_work(), NOW).unwrap();
+        assert_eq!(
+            result,
+            json!({
+                "outcome": "idle",
+                "releases_recovered": [{"operation_id": id, "audit_recorded": true}],
+            })
+        );
+        released_by(&w, &tenant, &id);
+        // The seal, its operation and the lifecycle generation are kept.
+        assert_eq!(terminal_object(&w, &id), terminal);
+        assert_eq!(slot(&w, &tenant).generation, generation);
+        let events = log.tail(10).unwrap();
+        let event = events
+            .iter()
+            .find(|e| e["event"] == "tenant_deployment_release_recovered")
+            .unwrap();
+        assert_eq!(event["operation_id"], id.as_str());
+        assert_eq!(event["tenant_id"], tenant.as_str());
+        assert_eq!(event["attempt"], "worker-1");
+        // Repeated: nothing is left to release, and nothing is written.
+        let control = w.memory.raw(CONTROL).unwrap();
+        let again = admin::run(&w.deployments(), &w.store, None, cli_work(), NOW).unwrap();
+        assert_eq!(again, json!({"outcome": "idle", "releases_recovered": []}));
+        assert_eq!(w.memory.raw(CONTROL).unwrap(), control);
+        // Released: a fresh cancel is ended, and the status says so.
+        assert_eq!(
+            cancel(&w, &id, "late").unwrap_err().code,
+            "operation_terminal"
+        );
+        let status = admin::Command::Status {
+            operation: id.clone(),
+        };
+        let status = admin::run(&w.deployments(), &w.store, None, status, NOW).unwrap();
+        assert_eq!(status["operation"]["phase"], "cancelled");
+        assert_eq!(status["operation"]["observed"]["reserved"], false);
+        assert_eq!(status["operation"]["observed"]["release_pending"], false);
+    }
+
+    #[test]
+    fn an_unknown_release_write_is_resolved_by_readback_never_masked() {
+        // Applied, then an unknown result: the readback confirms it.
+        let w = world();
+        let id = w.submit("a", "contoso");
+        let tenant = lose_release(&w, &id);
+        w.memory.fault(Op::Put, CONTROL, Fault::After, 0, 1);
+        let result = admin::run(&w.deployments(), &w.store, None, cli_work(), NOW).unwrap();
+        assert_eq!(result["releases_recovered"][0]["operation_id"], id.as_str());
+        released_by(&w, &tenant, &id);
+
+        // Not applied, unknown result: an error naming the operation; the
+        // slot stays held, nothing is attempted, and a later run finishes.
+        let w = world();
+        let id = w.submit("a", "contoso");
+        let tenant = lose_release(&w, &id);
+        let other = w.submit("b", "fabrikam");
+        w.memory.fault(Op::Put, CONTROL, Fault::Before, 0, 1);
+        let error = admin::run(&w.deployments(), &w.store, None, cli_work(), NOW).unwrap_err();
+        assert_eq!(error.code, "operation_indeterminate");
+        assert!(
+            error.message.ends_with(&format!(
+                "; the release of sealed cancellation {id} is unconfirmed; no operation was attempted"
+            )),
+            "{}",
+            error.message
+        );
+        assert!(matches!(
+            slot(&w, &tenant).slot,
+            Slot::Reserved {
+                cancellation_requested: true,
+                ..
+            }
+        ));
+        assert!(w.journal_object(&other).is_none());
+        let result = admin::run(&w.deployments(), &w.store, None, cli_work(), NOW).unwrap_err();
+        // Released this time; then the production gates refuse `other`.
+        assert_eq!(result.code, "qualification_missing");
+        assert!(
+            result.message.contains(&format!(
+                "operation {other}, attempt worker-1, outcome blocked"
+            )),
+            "{}",
+            result.message
+        );
+        assert!(
+            result
+                .message
+                .contains(&format!("\"operation_id\":\"{id}\"")),
+            "{}",
+            result.message
+        );
+        assert!(
+            result.message.contains("\"audit_recorded\":false"),
+            "{}",
+            result.message
+        );
+        released_by(&w, &tenant, &id);
+    }
+
+    #[test]
+    fn a_partial_sweep_failure_reports_the_previously_recovered_operation() {
+        let w = world();
+        let first = w.submit("a", "contoso");
+        let first_tenant = lose_release(&w, &first);
+        let second = w.submit("b", "fabrikam");
+        let second_tenant = lose_release(&w, &second);
+        let (snapshot, _) = w.objects.read().unwrap();
+        let ids: Vec<_> = snapshot
+            .lifecycles()
+            .iter()
+            .filter_map(|entry| match &entry.slot {
+                Slot::Reserved { operation_id, .. } => Some(operation_id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids.len(), 2);
+        w.memory.fault(Op::Put, CONTROL, Fault::Refuse, 1, 1);
+        let error = admin::run(&w.deployments(), &w.store, None, cli_work(), NOW).unwrap_err();
+        assert!(
+            error
+                .message
+                .contains(&format!("\"operation_id\":\"{}\"", ids[0])),
+            "{}",
+            error.message
+        );
+        assert!(
+            error.message.contains("\"audit_recorded\":false"),
+            "{}",
+            error.message
+        );
+        assert!(error.message.contains(&ids[1]), "{}", error.message);
+        assert!(
+            error.message.ends_with("; no operation was attempted"),
+            "{}",
+            error.message
+        );
+        if ids[0] == first {
+            released_by(&w, &first_tenant, &first);
+        } else {
+            released_by(&w, &second_tenant, &second);
+        }
+    }
+
+    #[test]
+    fn a_release_another_writer_won_is_not_redone_or_masked() {
+        // Another releaser wins between the read and the write: the CAS
+        // loses, and the readback confirms the release it wanted.
+        let w = world();
+        let id = w.submit("a", "contoso");
+        let tenant = lose_release(&w, &id);
+        let intent = w.ops.load(&id).unwrap().intent;
+        let memory = w.memory.clone();
+        let raced = intent.clone();
+        w.memory.hook(Op::Put, CONTROL, move || {
+            let objects = Objects::new(memory.clone(), CONTROL);
+            Operations::new(memory, PREFIX)
+                .release(&objects, &raced, NOW)
+                .unwrap();
+        });
+        let result = admin::run(&w.deployments(), &w.store, None, cli_work(), NOW).unwrap();
+        assert_eq!(result["outcome"], "idle");
+        released_by(&w, &tenant, &id);
+
+        // ... and the tenant is reserved again by another operation before
+        // the sweep writes: that reservation is never released.
+        let w = world();
+        let id = w.submit("a", "contoso");
+        let tenant = lose_release(&w, &id);
+        let intent = w.ops.load(&id).unwrap().intent;
+        let other = "b".repeat(32);
+        let memory = w.memory.clone();
+        let (raced, next) = (intent.clone(), other.clone());
+        w.memory.hook(Op::Put, CONTROL, move || {
+            let objects = Objects::new(memory.clone(), CONTROL);
+            Operations::new(memory, PREFIX)
+                .release(&objects, &raced, NOW)
+                .unwrap();
+            objects
+                .update(NOW, |current| {
+                    current.reserve(&raced.tenant_id, &next, Kind::Create, &"c".repeat(64))
+                })
+                .unwrap();
+        });
+        let generation = slot(&w, &tenant).generation;
+        let result = admin::run(&w.deployments(), &w.store, None, cli_work(), NOW).unwrap();
+        assert_eq!(result, json!({"outcome": "idle", "releases_recovered": []}));
+        let entry = slot(&w, &tenant);
+        assert_eq!(entry.generation, generation + 1);
+        assert!(matches!(
+            entry.slot,
+            Slot::Reserved { ref operation_id, cancellation_requested: false, receipt: None, .. }
+                if *operation_id == other
+        ));
+    }
+
+    #[test]
+    fn the_sweep_releases_only_sealed_cancellations_then_the_worker_runs() {
+        let w = world();
+        let lost = w.submit("a", "contoso");
+        let lost_tenant = lose_release(&w, &lost);
+        // Cancellation requested but not sealed: not the sweep's to end.
+        let unsealed = w.submit("b", "fabrikam");
+        let unsealed_intent = w.ops.load(&unsealed).unwrap().intent;
+        request_cancel(&w.ops, &w.objects, &unsealed_intent, NOW).unwrap();
+        let unsealed_slot = slot(&w, &unsealed_intent.tenant_id);
+        // Uncancelled: provisioned by the same invocation, after the sweep.
+        let live = w.submit("c", "northwind");
+        let live_tenant = w.ops.load(&live).unwrap().intent.tenant_id;
+        let arm = FakeArm::default();
+        let adapter = |_: &BTreeMap<String, Value>| -> Result<Box<dyn Arm>, ApiError> {
+            Ok(Box::new(arm.clone()))
+        };
+        let result = admin::work(
+            &w.deployments(),
+            None,
+            &full(),
+            &adapter,
+            None,
+            "worker-1",
+            NOW,
+        )
+        .unwrap();
+        assert_eq!(result["outcome"], "provisioned");
+        assert_eq!(result["operation_id"], live.as_str());
+        assert_eq!(
+            result["releases_recovered"],
+            json!([{"operation_id": lost, "audit_recorded": false}])
+        );
+        released_by(&w, &lost_tenant, &lost);
+        assert_eq!(slot(&w, &unsealed_intent.tenant_id), unsealed_slot);
+        assert!(w.ops.terminal(&unsealed).unwrap().is_none());
+        assert!(matches!(
+            slot(&w, &live_tenant).slot,
+            Slot::Reserved {
+                cancellation_requested: false,
+                receipt: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn an_unreadable_sealed_record_fails_the_sweep_closed() {
+        let w = world();
+        let id = w.submit("a", "contoso");
+        let tenant = lose_release(&w, &id);
+        let other = w.submit("b", "fabrikam");
+        let arm = FakeArm::default();
+        let adapter = |_: &BTreeMap<String, Value>| -> Result<Box<dyn Arm>, ApiError> {
+            Ok(Box::new(arm.clone()))
+        };
+        let work = || {
+            admin::work(
+                &w.deployments(),
+                None,
+                &full(),
+                &adapter,
+                None,
+                "worker-1",
+                NOW,
+            )
+        };
+        w.memory
+            .fault(Op::Get, "terminal.json", Fault::Refuse, 0, 1);
+        let error = work().unwrap_err();
+        assert_eq!(error.code, "operation_store_unavailable");
+        assert!(error.message.contains(&id), "{}", error.message);
+        assert!(
+            error.message.ends_with("; no operation was attempted"),
+            "{}",
+            error.message
+        );
+        let name = format!("{PREFIX}/operations/{id}/terminal.json");
+        let sealed = w.memory.raw(&name).unwrap();
+        w.memory.set_raw(&name, b"{");
+        assert!(work().is_err());
+        assert!(matches!(
+            slot(&w, &tenant).slot,
+            Slot::Reserved {
+                cancellation_requested: true,
+                ..
+            }
+        ));
+        assert!(w.journal_object(&other).is_none());
+        assert_eq!(arm.calls(), 0);
+        // Restored: the next run releases it and then provisions `other`.
+        w.memory.set_raw(&name, &sealed);
+        let result = work().unwrap();
+        assert_eq!(result["operation_id"], other.as_str());
+        released_by(&w, &tenant, &id);
     }
 
     #[test]

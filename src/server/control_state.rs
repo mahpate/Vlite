@@ -63,6 +63,33 @@ pub(super) struct Snapshot {
     /// consumer refuses a snapshot that carries it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     withdrawn: Vec<Withdrawal>,
+    /// design-tenant-provisioning ITEM-010: the candidate credential each
+    /// create last published, so an older generation is refused in the same
+    /// CAS. Absent (byte-identical) until the first; an older consumer
+    /// refuses a snapshot that carries it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    candidates: Vec<Publication>,
+}
+
+/// ITEM-010: the candidate credential a create published at its delivery
+/// `generation`, and the candidates that generation replaced (its revoked
+/// list, so `generation - 1` of them). One per tenant, never pruned.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Publication {
+    tenant: String,
+    operation_id: String,
+    generation: u64,
+    credential_id: String,
+    superseded: Vec<String>,
+}
+
+/// A credential ID as a delivery record may name it.
+fn delivery_id(id: &str) -> bool {
+    (1..=128).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
 }
 
 /// A provisioning operation's kind (design-tenant-provisioning §3.3).
@@ -157,6 +184,25 @@ pub(super) fn route_digest(route: &Route) -> String {
 
 fn lifecycle_error(code: &'static str, message: &'static str) -> ApiError {
     ApiError::new(StatusCode::CONFLICT, code, message)
+}
+
+fn reader_unavailable() -> ApiError {
+    lifecycle_error(
+        "lifecycle_transition_unavailable",
+        "the route or slot does not allow this reader change",
+    )
+}
+
+/// EPIC-005 ITEM-013: `route` is the reserved route `planned` with its
+/// reader endpoint withdrawn: no reader, and `planned` itself (it had none)
+/// or exactly `planned` once `endpoint` is restored.
+pub(super) fn reader_withdrawn(route: &Route, planned: &str, endpoint: &str) -> bool {
+    if route.reader.is_some() {
+        return false;
+    }
+    let mut restored = route.clone();
+    restored.reader = Some(endpoint.to_owned());
+    route_digest(route) == planned || route_digest(&restored) == planned
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -387,6 +433,7 @@ impl Snapshot {
             migrations: Vec::new(),
             lifecycle: Vec::new(),
             withdrawn: Vec::new(),
+            candidates: Vec::new(),
         })
     }
 
@@ -412,6 +459,8 @@ impl Snapshot {
     /// is an older copy. Resuming a tenant needs `with_suspended`.
     /// Migration records and activated credential views also stay: a local
     /// file may add restrictions but cannot restore retired secret hashes.
+    /// So does every credential a create published (`candidates`), even
+    /// after its slot is released: the local file never holds them.
     pub(super) fn reimport(
         &self,
         credentials: &credentials::Store,
@@ -421,6 +470,7 @@ impl Snapshot {
         next.migrations = self.migrations.clone();
         next.lifecycle = self.lifecycle.clone();
         next.withdrawn = self.withdrawn.clone();
+        next.candidates = self.candidates.clone();
         let imported_restrictions = next.credentials.clone();
         for migration in &self.migrations {
             if matches!(
@@ -431,6 +481,13 @@ impl Snapshot {
                     .keep_migration_tenant(&self.credentials, &migration.tenant);
             }
         }
+        next.credentials.keep_ids(
+            &self.credentials,
+            self.candidates.iter().flat_map(|publication| {
+                std::iter::once(publication.credential_id.as_str())
+                    .chain(publication.superseded.iter().map(String::as_str))
+            }),
+        );
         next.credentials.keep_restrictions(&imported_restrictions);
         next.credentials.keep_restrictions(&self.credentials);
         tenants::keep_restrictions(&mut next.tenants, &self.tenants);
@@ -463,6 +520,156 @@ impl Snapshot {
         let mut next = self.clone();
         tenants::insert_in(&mut next.tenants, tenant)?;
         Ok(next)
+    }
+
+    /// design-tenant-provisioning ITEM-010 (PRD §3.4 step 7): `self` with
+    /// the candidate credential of delivery `generation` of the tenant
+    /// `operation_id` is creating published, each replaced candidate in
+    /// `revoked` (that generation's whole revoked list) that is bound to the
+    /// tenant revoked, and the publication recorded; nothing else changes.
+    /// Only an uncancelled, unreceipted `create` reservation of an unrouted,
+    /// admitted tenant publishes, and only a candidate bound to that tenant.
+    /// Conditional on the recorded publication, in the same CAS: 409
+    /// `candidate_superseded` unless `generation` is newer, 409
+    /// `candidate_revocation_unconfirmed` unless `revoked` covers every
+    /// candidate it published, 409 `candidate_generation_invalid` unless
+    /// `revoked` has `generation - 1` distinct IDs, none the candidate's.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn with_candidate(
+        &self,
+        tenant: &str,
+        operation_id: &str,
+        generation: u64,
+        candidate: &credentials::Candidate,
+        revoked: &[String],
+        now: u64,
+    ) -> Result<Self, ApiError> {
+        let index = self.slot_index(tenant, operation_id)?;
+        if !matches!(
+            &self.lifecycle[index].slot,
+            Slot::Reserved {
+                kind: OperationKind::Create,
+                expected_route: None,
+                cancellation_requested: false,
+                receipt: None,
+                ..
+            }
+        ) || self.record_for(tenant).is_some()
+            || candidate.tenant() != Some(tenant)
+        {
+            return Err(lifecycle_error(
+                "lifecycle_transition_unavailable",
+                "only an uncancelled create reservation of an unrouted tenant publishes its candidate credential",
+            ));
+        }
+        tenants::admit(&self.tenants, tenant).map_err(|error| {
+            if error.code == "tenant_suspended" {
+                lifecycle_error(
+                    "tenant_suspended",
+                    "tenant is suspended; resume it before issuing credentials",
+                )
+            } else {
+                error
+            }
+        })?;
+        let published = self.candidates.iter().position(|p| p.tenant == tenant);
+        if let Some(index) = published {
+            let record = &self.candidates[index];
+            if record.operation_id != operation_id {
+                return Err(lifecycle_error(
+                    "lifecycle_transition_unavailable",
+                    "another operation published the tenant's candidate credential",
+                ));
+            }
+            if generation <= record.generation {
+                return Err(lifecycle_error(
+                    "candidate_superseded",
+                    "a candidate credential of the same or a later delivery generation is published",
+                ));
+            }
+            if !record
+                .superseded
+                .iter()
+                .chain([&record.credential_id])
+                .all(|id| revoked.contains(id))
+            {
+                return Err(lifecycle_error(
+                    "candidate_revocation_unconfirmed",
+                    "the replaced candidates omit a published candidate credential",
+                ));
+            }
+        }
+        let mut ids = std::collections::HashSet::new();
+        if generation != revoked.len() as u64 + 1
+            || !revoked
+                .iter()
+                .map(String::as_str)
+                .chain([candidate.id()])
+                .all(|id| delivery_id(id) && ids.insert(id))
+        {
+            return Err(lifecycle_error(
+                "candidate_generation_invalid",
+                "a candidate's generation follows exactly its distinct replaced candidates",
+            ));
+        }
+        let mut next = self.clone();
+        next.credentials = self.credentials.with_candidate(candidate, revoked, now)?;
+        let record = Publication {
+            tenant: tenant.to_owned(),
+            operation_id: operation_id.to_owned(),
+            generation,
+            credential_id: candidate.id().to_owned(),
+            superseded: revoked.to_vec(),
+        };
+        match published {
+            Some(index) => next.candidates[index] = record,
+            None => next.candidates.push(record),
+        }
+        Ok(next)
+    }
+
+    /// ITEM-010: whether this snapshot publishes exactly `candidate` (its
+    /// whole entry: secret hash, grant, tenant and lineage, still active)
+    /// as the tenant's recorded candidate of delivery `generation`, with
+    /// exactly `revoked` superseded and none of them live. A view written
+    /// before publication records existed never does.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn publishes_candidate(
+        &self,
+        tenant: &str,
+        operation_id: &str,
+        generation: u64,
+        candidate: &credentials::Candidate,
+        revoked: &[String],
+        now: u64,
+    ) -> bool {
+        self.records_publication(tenant, operation_id, generation, candidate.id(), revoked)
+            && candidate.tenant() == Some(tenant)
+            && self.credentials.publishes(candidate, now)
+            && revoked
+                .iter()
+                .all(|id| self.live_credential(id, now).is_none())
+    }
+
+    /// ITEM-010: whether this snapshot records `credential_id` as the
+    /// candidate `operation_id` published for `tenant` at delivery
+    /// `generation`, superseding exactly `superseded`. The record only; a
+    /// caller checks liveness and binding separately.
+    pub(super) fn records_publication(
+        &self,
+        tenant: &str,
+        operation_id: &str,
+        generation: u64,
+        credential_id: &str,
+        superseded: &[String],
+    ) -> bool {
+        self.candidates.iter().any(|p| {
+            p.tenant == tenant
+                && p.operation_id == operation_id
+                && p.generation == generation
+                && p.credential_id == credential_id
+                && p.superseded == superseded
+        })
     }
 
     /// The directory record for `tenant`, if it is routed.
@@ -529,6 +736,7 @@ impl Snapshot {
             || !snapshot.valid_migrations()
             || !snapshot.valid_lifecycle()
             || !snapshot.valid_withdrawn()
+            || !snapshot.valid_candidates()
         {
             return Err(Self::invalid());
         }
@@ -832,6 +1040,26 @@ impl Snapshot {
         })
     }
 
+    /// ITEM-010: one publication per tenant that has a lifecycle slot, its
+    /// generation following exactly its distinct superseded candidates. The
+    /// credential itself may since have been revoked or dropped.
+    fn valid_candidates(&self) -> bool {
+        let mut tenants = std::collections::HashSet::new();
+        self.candidates.len() <= MAX_LIFECYCLE
+            && self.candidates.iter().all(|p| {
+                let mut ids = std::collections::HashSet::new();
+                hex_id(&p.tenant, 32)
+                    && hex_id(&p.operation_id, 32)
+                    && tenants.insert(p.tenant.as_str())
+                    && self.lifecycle(&p.tenant).is_some()
+                    && p.generation == p.superseded.len() as u64 + 1
+                    && p.superseded
+                        .iter()
+                        .chain([&p.credential_id])
+                        .all(|id| delivery_id(id) && ids.insert(id.as_str()))
+            })
+    }
+
     /// EPIC-005: whether `operation_id` was withdrawn before it reserved.
     pub(super) fn withdrawn(&self, tenant: &str, operation_id: &str) -> bool {
         self.withdrawn
@@ -842,6 +1070,11 @@ impl Snapshot {
     /// The tenant's lifecycle slot, if it was ever reserved.
     pub(super) fn lifecycle(&self, tenant: &str) -> Option<&Lifecycle> {
         self.lifecycle.iter().find(|entry| entry.tenant == tenant)
+    }
+
+    /// Every tenant's lifecycle slot (ITEM-024: the release sweep).
+    pub(super) fn lifecycles(&self) -> &[Lifecycle] {
+        &self.lifecycle
     }
 
     fn slot_index(&self, tenant: &str, operation_id: &str) -> Result<usize, ApiError> {
@@ -959,14 +1192,41 @@ impl Snapshot {
     }
 
     /// Records a cancellation request. After activation a cancel cannot
-    /// unpublish the route: 409 `retirement_required`.
+    /// unpublish the route: 409 `retirement_required`. ITEM-010: the same
+    /// CAS revokes every candidate credential the operation published
+    /// ([`Self::revoke_candidates`]); [`Self::with_candidate`] refuses to
+    /// publish once cancellation is requested, so none can follow it.
     pub(super) fn request_cancel(
         &self,
         tenant: &str,
         operation_id: &str,
+        now: u64,
+    ) -> Result<Self, ApiError> {
+        self.request_cancel_readers(tenant, operation_id, now, None, false)
+    }
+
+    /// [`Self::request_cancel`] for a `set_readers` reservation, given its
+    /// planned reader `endpoint` (an in-place change; None for a removal)
+    /// and whether it journaled an in-place update (`dispatched`).
+    /// ITEM-013: a change whose current route is its reserved route with
+    /// `endpoint` withdrawn ([`reader_withdrawn`]) is cancelled without
+    /// republishing anything: the route stays withdrawn, and the cleanup
+    /// and seal still wait for its update to be terminal. One that
+    /// journaled an update while its endpoint is still published (state
+    /// from before the withdrawal existed) is refused `readers_in_progress`
+    /// until a resume withdraws it, so a cancelled seal never leaves the
+    /// endpoint over an unverified fleet.
+    pub(super) fn request_cancel_readers(
+        &self,
+        tenant: &str,
+        operation_id: &str,
+        now: u64,
+        endpoint: Option<&str>,
+        dispatched: bool,
     ) -> Result<Self, ApiError> {
         let index = self.slot_index(tenant, operation_id)?;
-        let route = self.record_for(tenant).map(route_digest);
+        let current = self.record_for(tenant);
+        let route = current.map(route_digest);
         let mut next = self.clone();
         if let Slot::Reserved {
             kind,
@@ -992,16 +1252,42 @@ impl Snapshot {
             }
             // design-tenant-provisioning EPIC-005: once a reader change
             // republished the route (a removal unpublished the endpoint
-            // before stopping the reader), it can only finish.
-            if *kind == OperationKind::SetReaders && route != *expected_route {
-                return Err(lifecycle_error(
-                    "readers_in_progress",
-                    "the reader change already republished the route; resume it to finish",
-                ));
+            // before stopping the reader), it can only finish. ITEM-013:
+            // an in-place change whose endpoint is withdrawn is cancelled.
+            if *kind == OperationKind::SetReaders {
+                let withdrawn = match (endpoint, current, expected_route.as_deref()) {
+                    (Some(endpoint), Some(current), Some(expected)) => {
+                        reader_withdrawn(current, expected, endpoint)
+                    }
+                    _ => false,
+                };
+                if (route != *expected_route || dispatched) && !withdrawn {
+                    return Err(lifecycle_error(
+                        "readers_in_progress",
+                        "the reader change already republished the route, or updated the reader app with its endpoint published; resume it to finish",
+                    ));
+                }
             }
             *cancellation_requested = true;
         }
+        next.revoke_candidates(tenant, operation_id, now);
         Ok(next)
+    }
+
+    /// ITEM-010: permanently revokes each unrevoked candidate credential
+    /// (published and superseded) `operation_id` published for `tenant`,
+    /// expired or not, so a cancelled create leaves no credential behind
+    /// even if the clock later regresses. An earlier revocation is kept;
+    /// a candidate the view no longer holds is skipped. The publication
+    /// record stays: it is the operation's evidence, not a grant.
+    fn revoke_candidates(&mut self, tenant: &str, operation_id: &str, now: u64) {
+        let ids: Vec<String> = self
+            .candidates
+            .iter()
+            .filter(|p| p.tenant == tenant && p.operation_id == operation_id)
+            .flat_map(|p| p.superseded.iter().chain([&p.credential_id]).cloned())
+            .collect();
+        self.credentials.revoke_present(&ids, now);
     }
 
     /// EPIC-005: withdraws an operation that does not hold the tenant's
@@ -1153,28 +1439,19 @@ impl Snapshot {
         Ok(next)
     }
 
-    /// design-tenant-provisioning EPIC-005 ITEM-012/013: a `set_readers`
-    /// reservation republishes its dedicated, writer-only route with the
-    /// reader endpoint `reader` (None: no reader). Only the reader changes:
-    /// writer, lineage, epoch, binding and audience stay, and the route
-    /// stays writer-only (reader routing is never published here). The
-    /// current route must be the reserved one (`planned`) or already the
-    /// result (`target`), the digest the operation verified. With
-    /// `proof_digest` the receipt is published in the same generation.
-    /// Refused after a cancellation request.
-    pub(super) fn readers_route(
+    /// EPIC-005: the uncancelled `set_readers` reservation `operation_id`
+    /// holds, without a receipt, over its reserved route `planned` (held
+    /// as the expected route), and the tenant's current dedicated,
+    /// writer-only, activated route.
+    fn reader_slot(
         &self,
         tenant: &str,
         operation_id: &str,
         planned: &str,
-        target: &str,
-        reader: Option<&str>,
-        proof_digest: Option<&str>,
-    ) -> Result<Self, ApiError> {
+    ) -> Result<(usize, &Route), ApiError> {
         let index = self.slot_index(tenant, operation_id)?;
         let Slot::Reserved {
             kind,
-            request_digest,
             expected_route,
             cancellation_requested,
             receipt,
@@ -1189,32 +1466,87 @@ impl Snapshot {
                 "cancellation was requested before the reader change was published",
             ));
         }
-        let unavailable = || {
-            lifecycle_error(
-                "lifecycle_transition_unavailable",
-                "the route or slot does not allow this reader change",
-            )
-        };
-        let Some(current) = self.record_for(tenant) else {
-            return Err(unavailable());
+        match self.record_for(tenant) {
+            Some(current)
+                if *kind == OperationKind::SetReaders
+                    && receipt.is_none()
+                    && expected_route.as_deref() == Some(planned)
+                    && current.kind == Kind::Dedicated
+                    && current.authority_mode.is_none()
+                    && current.epoch.is_some_and(|epoch| epoch > 0)
+                    && current.read_routing == ReadRouting::WriterOnly =>
+            {
+                Ok((index, current))
+            }
+            _ => Err(reader_unavailable()),
+        }
+    }
+
+    /// design-tenant-provisioning EPIC-005 ITEM-013: before a reserved
+    /// reader change updates the tenant's reader app in place, withdraws the
+    /// reader endpoint from the reserved route (`planned`): only the reader
+    /// leaves, the route stays writer-only, and from here a cancel is
+    /// refused (the route moved), so the endpoint returns only through
+    /// `readers_route` with a fresh proof. Refused after a cancellation
+    /// request (nothing withdrawn: the reserved route stays). Already
+    /// withdrawn (`reader_withdrawn`): unchanged.
+    pub(super) fn withdraw_reader(
+        &self,
+        tenant: &str,
+        operation_id: &str,
+        planned: &str,
+        endpoint: &str,
+    ) -> Result<Self, ApiError> {
+        let (_, current) = self.reader_slot(tenant, operation_id, planned)?;
+        if reader_withdrawn(current, planned, endpoint) {
+            return Ok(self.clone());
+        }
+        if route_digest(current) != planned {
+            return Err(reader_unavailable());
+        }
+        let mut route = current.clone();
+        route.reader = None;
+        let mut next = self.clone();
+        for slot in next.directory.iter_mut().filter(|r| r.tenant == tenant) {
+            *slot = route.clone();
+        }
+        Ok(next)
+    }
+
+    /// design-tenant-provisioning EPIC-005 ITEM-012/013: a `set_readers`
+    /// reservation republishes its dedicated, writer-only route with the
+    /// reader endpoint `reader` (None: no reader). Only the reader changes:
+    /// writer, lineage, epoch, binding and audience stay, and the route
+    /// stays writer-only (reader routing is never published here). The
+    /// current route must be the reserved one (`planned`), that route with
+    /// its endpoint `reader` withdrawn (`withdraw_reader`), or already the
+    /// result (`target`), the digest the operation verified. With
+    /// `proof_digest` the receipt is published in the same generation.
+    /// Refused after a cancellation request.
+    pub(super) fn readers_route(
+        &self,
+        tenant: &str,
+        operation_id: &str,
+        planned: &str,
+        target: &str,
+        reader: Option<&str>,
+        proof_digest: Option<&str>,
+    ) -> Result<Self, ApiError> {
+        let (index, current) = self.reader_slot(tenant, operation_id, planned)?;
+        let Slot::Reserved { request_digest, .. } = &self.lifecycle[index].slot else {
+            unreachable!("slot_index returns reserved slots");
         };
         let digest = route_digest(current);
-        if *kind != OperationKind::SetReaders
-            || receipt.is_some()
-            || expected_route.as_deref() != Some(planned)
-            || (digest != planned && digest != target)
-            || current.kind != Kind::Dedicated
-            || current.authority_mode.is_some()
-            || !current.epoch.is_some_and(|epoch| epoch > 0)
-            || current.read_routing != ReadRouting::WriterOnly
+        let withdrawn = reader.is_some_and(|reader| reader_withdrawn(current, planned, reader));
+        if (digest != planned && digest != target && !withdrawn)
             || proof_digest.is_some_and(|proof| !hex_id(proof, 64))
         {
-            return Err(unavailable());
+            return Err(reader_unavailable());
         }
         let mut route = current.clone();
         route.reader = reader.map(str::to_owned);
         if route_digest(&route) != target {
-            return Err(unavailable());
+            return Err(reader_unavailable());
         }
         let mut next = self.clone();
         if let Some(proof_digest) = proof_digest {
@@ -1240,9 +1572,13 @@ impl Snapshot {
     /// Releases the slot. Only a sealed terminal record (`Sealed`, which
     /// only `tenant_provisioning` seals) can do this, and its outcome must
     /// match the slot.
+    /// ITEM-010: releasing a cancelled operation revokes any candidate it
+    /// published that is still live (a state written before cancellation
+    /// revoked them), so the released slot leaves none behind.
     pub(super) fn release_lifecycle(
         &self,
         sealed: &tenant_provisioning::Sealed,
+        now: u64,
     ) -> Result<Self, ApiError> {
         let index = self.slot_index(sealed.tenant_id(), sealed.operation_id())?;
         let Slot::Reserved {
@@ -1275,6 +1611,12 @@ impl Snapshot {
             ));
         }
         let mut next = self.clone();
+        if matches!(
+            sealed.outcome(),
+            tenant_provisioning::TerminalOutcome::Cancelled
+        ) {
+            next.revoke_candidates(sealed.tenant_id(), sealed.operation_id(), now);
+        }
         next.lifecycle[index].slot = Slot::Released {
             operation_id: sealed.operation_id().to_owned(),
             terminal_digest: sealed.digest().to_owned(),
@@ -1625,7 +1967,7 @@ impl Poller {
 
 /// An object name below the target's coordination prefix: 1..=256 of
 /// `[a-z0-9._/-]`, relative, no empty, `.` or `..` segment, and never one
-/// of the set protocol's own objects.
+/// of the coordination protocols' own objects or namespaces.
 pub(super) fn valid_object_name(name: &str) -> bool {
     (1..=256).contains(&name.len())
         && name.bytes().all(|b| {
@@ -1634,8 +1976,17 @@ pub(super) fn valid_object_name(name: &str) -> bool {
         && name
             .split('/')
             .all(|segment| !matches!(segment, "" | "." | ".."))
-        && !matches!(name, "owner.json" | "catalog.json")
+        && !matches!(
+            name,
+            "owner.json"
+                | "catalog.json"
+                | "authority.json"
+                | "auto-failover.json"
+                | "lifecycle-guard.json"
+        )
         && !name.starts_with("sets/")
+        && !name.starts_with("reader-pins/")
+        && !name.starts_with("tenant-operations/")
 }
 
 /// Where a process reads (and the CLI writes) the control state: a cloud
@@ -1829,6 +2180,28 @@ mod tests {
     const T1: &str = "0123456789abcdef0123456789abcdef";
     const T2: &str = "fedcba9876543210fedcba9876543210";
     const NAME: &str = "control/state.json";
+
+    #[test]
+    fn control_object_name_cases_match_the_shared_fixture() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/ha/control-object-name-cases.json"
+        ))
+        .expect("valid control-object name fixture");
+        let cases = fixture["cases"]
+            .as_array()
+            .expect("control-object name cases");
+        assert!(!cases.is_empty());
+        for case in cases {
+            let base = case["name"].as_str().expect("case name");
+            let repeat = case["repeat"].as_u64().unwrap_or(1) as usize;
+            let name = base.repeat(repeat);
+            assert_eq!(
+                valid_object_name(&name),
+                case["valid"].as_bool().expect("expected validity"),
+                "{name:?}"
+            );
+        }
+    }
 
     struct World {
         memory: Arc<Memory>,
@@ -2881,5 +3254,124 @@ mod tests {
             bytes,
             serde_json::to_vec(&Snapshot::parse(&bytes).unwrap()).unwrap()
         );
+    }
+
+    /// design-tenant-provisioning ITEM-013: a reserved reader change
+    /// withdraws its endpoint only from its own reserved route, a cancel
+    /// that landed first wins, a cancel after it is refused, and only the
+    /// reserved route with exactly its endpoint is ever restored. A moved
+    /// route is forged here: control edits cannot move a reserved route.
+    #[test]
+    fn a_reader_withdrawal_needs_the_reserved_route_and_restores_only_it() {
+        let w = world();
+        let op = "1".repeat(32);
+        let proof = "4".repeat(64);
+        let published = Route::dedicated_for_test(T1, 1);
+        let endpoint = published.reader.clone().unwrap();
+        let planned = route_digest(&published);
+        let held = routed(&w)
+            .reserve(T1, &op, OperationKind::SetReaders, &"2".repeat(64))
+            .unwrap();
+        let unavailable = |result: Result<Snapshot, ApiError>| {
+            assert_eq!(
+                result.err().expect("refused").code,
+                "lifecycle_transition_unavailable"
+            );
+        };
+        let moved = |snapshot: &Snapshot| {
+            let mut moved = snapshot.clone();
+            for route in moved.directory.iter_mut().filter(|r| r.tenant == T1) {
+                route.audience = "drifted".into();
+            }
+            moved
+        };
+        // Stale route, wrong plan or another operation: nothing withdrawn.
+        unavailable(moved(&held).withdraw_reader(T1, &op, &planned, &endpoint));
+        unavailable(held.withdraw_reader(T1, &op, &"5".repeat(64), &endpoint));
+        assert_eq!(
+            held.withdraw_reader(T1, &"9".repeat(32), &planned, &endpoint)
+                .err()
+                .unwrap()
+                .code,
+            "lifecycle_not_reserved"
+        );
+        // A cancel requested first wins.
+        let cancelled = held.request_cancel(T1, &op, 0).unwrap();
+        assert_eq!(
+            cancelled
+                .withdraw_reader(T1, &op, &planned, &endpoint)
+                .err()
+                .unwrap()
+                .code,
+            "operation_cancelled"
+        );
+        // Withdrawn: only the reader left; idempotent; no cancel after it.
+        let withdrawn = held.withdraw_reader(T1, &op, &planned, &endpoint).unwrap();
+        let expected = Route {
+            reader: None,
+            ..published.clone()
+        };
+        assert!(withdrawn.record_for(T1).unwrap() == &expected);
+        assert!(withdrawn.record_for(T2).unwrap() == &Route::dedicated_for_test(T2, 1));
+        assert!(reader_withdrawn(&expected, &planned, &endpoint));
+        let again = withdrawn
+            .withdraw_reader(T1, &op, &planned, &endpoint)
+            .unwrap();
+        assert!(again.record_for(T1).unwrap() == &expected);
+        assert_eq!(
+            withdrawn.request_cancel(T1, &op, 0).err().unwrap().code,
+            "readers_in_progress"
+        );
+        // ITEM-013: an in-place change that names its withdrawn endpoint is
+        // cancelled, dispatched or not, and nothing is republished; another
+        // endpoint, or a moved route, is refused. With the endpoint still
+        // published, a journaled update (legacy state) is refused.
+        let recovered = withdrawn
+            .request_cancel_readers(T1, &op, 0, Some(&endpoint), true)
+            .unwrap();
+        assert!(recovered.record_for(T1).unwrap() == &expected);
+        assert_eq!(
+            recovered
+                .readers_route(T1, &op, &planned, &planned, Some(&endpoint), Some(&proof))
+                .err()
+                .unwrap()
+                .code,
+            "operation_cancelled"
+        );
+        for refused in [
+            withdrawn.request_cancel_readers(T1, &op, 0, Some("https://other.internal"), true),
+            moved(&withdrawn).request_cancel_readers(T1, &op, 0, Some(&endpoint), true),
+            held.request_cancel_readers(T1, &op, 0, Some(&endpoint), true),
+        ] {
+            assert_eq!(refused.err().unwrap().code, "readers_in_progress");
+        }
+        held.request_cancel_readers(T1, &op, 0, Some(&endpoint), false)
+            .unwrap();
+        // A moved withdrawn route, or another endpoint, is never published.
+        unavailable(moved(&withdrawn).readers_route(
+            T1,
+            &op,
+            &planned,
+            &planned,
+            Some(&endpoint),
+            Some(&proof),
+        ));
+        unavailable(withdrawn.readers_route(
+            T1,
+            &op,
+            &planned,
+            &planned,
+            Some("https://other.internal"),
+            Some(&proof),
+        ));
+        // The reserved route, restored with the receipt.
+        let restored = withdrawn
+            .readers_route(T1, &op, &planned, &planned, Some(&endpoint), Some(&proof))
+            .unwrap();
+        assert!(restored.record_for(T1).unwrap() == &published);
+        assert!(matches!(
+            &restored.lifecycle(T1).unwrap().slot,
+            Slot::Reserved { receipt: Some(receipt), .. } if receipt.route_digest == planned
+        ));
     }
 }

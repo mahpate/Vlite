@@ -41,6 +41,8 @@ mod compaction;
 mod control_state;
 mod credentials;
 mod failover;
+mod failover_harness;
+mod failover_proof;
 mod features;
 #[cfg(test)]
 mod fencing_fault_tests;
@@ -84,6 +86,7 @@ mod tenant_migration;
 mod tenant_provisioning;
 mod tenants;
 pub mod tls;
+mod unique_json;
 mod users;
 mod webhooks;
 mod writer_authority;

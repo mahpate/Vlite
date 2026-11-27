@@ -144,11 +144,45 @@ fn io_error(error: std::io::Error) -> ApiError {
     )
 }
 
-fn replica() -> String {
-    std::env::var("CONTAINER_APP_REPLICA_NAME")
-        .or_else(|_| std::env::var("HOSTNAME"))
-        .unwrap_or_else(|_| format!("pid-{}", std::process::id()))
-        .chars()
+fn replica(isolated: bool) -> Result<String, ApiError> {
+    replica_identity(
+        std::env::var("CONTAINER_APP_REPLICA_NAME").ok(),
+        std::env::var("HOSTNAME").ok(),
+        std::process::id(),
+        isolated,
+    )
+}
+
+/// The pin-owner name of this replica: the platform replica name, else
+/// the host name, else `pid-<pid>`. Isolated pins release and recover by
+/// this name, so there it must be a set, non-empty platform name usable
+/// verbatim: a `pid-<pid>` fallback, or a name rewritten or truncated by
+/// sanitizing, could equal another live replica's and release its pins.
+fn replica_identity(
+    container: Option<String>,
+    host: Option<String>,
+    pid: u32,
+    isolated: bool,
+) -> Result<String, ApiError> {
+    let raw = container.or(host);
+    let name = sanitize(raw.as_deref().unwrap_or(&format!("pid-{pid}")));
+    if isolated
+        && raw
+            .as_deref()
+            .is_none_or(|raw| raw.is_empty() || raw != name)
+    {
+        return Err(error(
+            "reader_apply_invalid",
+            "isolated reader pins need a unique platform replica name \
+             (CONTAINER_APP_REPLICA_NAME or HOSTNAME) of at most 120 \
+             characters from [A-Za-z0-9._-]",
+        ));
+    }
+    Ok(name)
+}
+
+fn sanitize(raw: &str) -> String {
+    raw.chars()
         .take(120)
         .map(|c| {
             if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
@@ -197,10 +231,12 @@ fn clean_slots(dirs: &[PathBuf; 2]) {
 
 impl ReaderApply {
     pub fn enroll(config: ReaderApplyConfig) -> Result<Self, String> {
+        let fail = |error: ApiError| format!("{}: {}", error.code, error.message);
+        // Before any store access: an ambiguous pin owner touches nothing.
+        let replica = replica(config.isolated_pins).map_err(fail)?;
         let sets = cloud_recovery::connect(&config.target_file, config.shared_key_file.as_deref())
             .map_err(|error| format!("{}: {}", error.code, error.message))?;
-        Self::enroll_with(sets, config, &replica(), unix_ms())
-            .map_err(|error| format!("{}: {}", error.code, error.message))
+        Self::enroll_with(sets, config, &replica, unix_ms()).map_err(fail)
     }
 
     pub(super) fn enroll_with(
@@ -666,6 +702,59 @@ impl Follower {
                 );
                 Step::Failed
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::replica_identity;
+
+    fn name(container: Option<&str>, host: Option<&str>, isolated: bool) -> Result<String, String> {
+        replica_identity(container.map(Into::into), host.map(Into::into), 1, isolated)
+            .map_err(|error| error.code.to_owned())
+    }
+
+    /// design-tenant-provisioning ITEM-008: with isolated pins, enrollment
+    /// releases every reader pin object carrying this replica's reason and
+    /// control recovery selects a stopped replica's pins by it, so two
+    /// replicas sharing a name would release each other's live pins. The
+    /// legacy record-pin mode keeps its existing derivation unchanged.
+    #[test]
+    fn isolated_reader_pins_need_an_unambiguous_replica_name() {
+        let long = "r".repeat(121);
+        // Legacy mode: unchanged, including the colliding fallbacks.
+        assert_eq!(name(None, None, false).unwrap(), "pid-1");
+        assert_eq!(name(Some(""), Some("host"), false).unwrap(), "");
+        assert_eq!(name(Some("a b"), None, false).unwrap(), "a_b");
+        assert_eq!(name(Some(&long), None, false).unwrap(), "r".repeat(120));
+        // Isolated mode: the platform name, else the host name, verbatim.
+        let aca = "tenant-reader--g7-7d9f8c6b5-xk2lp";
+        assert_eq!(name(Some(aca), Some("host"), true).unwrap(), aca);
+        assert_eq!(
+            name(None, Some("host-1.local"), true).unwrap(),
+            "host-1.local"
+        );
+        assert_eq!(
+            name(Some(&"r".repeat(120)), None, true).unwrap(),
+            "r".repeat(120)
+        );
+        // Every replica of a container fleet can be `pid-1`; an empty name,
+        // a rewritten character or a truncation can equal another replica's.
+        for (container, host) in [
+            (None, None),
+            (Some(""), Some("host")),
+            (None, Some("")),
+            (Some("a b"), None),
+            (Some("a_b/"), None),
+            (Some("caf\u{e9}"), None),
+            (Some(long.as_str()), None),
+        ] {
+            assert_eq!(
+                name(container, host, true),
+                Err("reader_apply_invalid".to_owned()),
+                "{container:?} {host:?}"
+            );
         }
     }
 }

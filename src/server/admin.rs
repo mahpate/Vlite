@@ -701,6 +701,8 @@ async fn capabilities(
         ("memory_bindings_reload", reloadable(&s)),
         ("compaction", s.admin.compaction.get().is_some()),
         ("cloud_backup", s.admin.cloud.get().is_some()),
+        // Managed tenant-deployment routes are served (`--tenant-deployments-file`).
+        ("tenant_deployments", s.tenant_deployments.is_some()),
     ] {
         features.insert(name.to_owned(), json!(enabled));
     }

@@ -16,7 +16,7 @@
 //! The legacy `POST /v1/admin/tenants` is unchanged (OD-001).
 use super::*;
 use crate::server::admin::Role;
-use crate::server::{audit, cloud_recovery, tenants, users};
+use crate::server::{audit, cloud_recovery, credentials, tenants, users};
 use std::ffi::OsString;
 use std::path::PathBuf;
 
@@ -159,12 +159,47 @@ pub(super) struct ActionRequest {
     expected_receipt: Option<String>,
     #[serde(default)]
     ack_irreversible: bool,
+    /// DD-002: the explicit grant of the candidate credential that
+    /// `issue-credentials` or `replace-credentials` mints; never defaulted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    grant: Option<GrantInput>,
+    /// DD-002: the delivery generation and credential ID being acknowledged
+    /// or replaced, exactly as a status read or the delivery reported them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    delivery_generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    credential_id: Option<String>,
+}
+
+/// The grant of a create's candidate credential, checked by the rules of
+/// the credential API before anything is persisted. Always bound to the
+/// operation's tenant and seeded lineage; the request cannot name either.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GrantInput {
+    name: String,
+    operations: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    graphs: Option<Vec<String>>,
+    expires_unix_ms: u64,
+}
+
+impl GrantInput {
+    fn grant(&self) -> CandidateGrant {
+        CandidateGrant {
+            name: self.name.clone(),
+            operations: self.operations.clone(),
+            graphs: self.graphs.clone(),
+            expires_unix_ms: self.expires_unix_ms,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Verb {
     Resume,
     Cancel,
+    IssueCredentials,
     AcknowledgeDelivery,
     ReplaceCredentials,
     Rollback,
@@ -172,9 +207,10 @@ enum Verb {
 }
 
 impl Verb {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::Resume,
         Self::Cancel,
+        Self::IssueCredentials,
         Self::AcknowledgeDelivery,
         Self::ReplaceCredentials,
         Self::Rollback,
@@ -185,6 +221,7 @@ impl Verb {
         match self {
             Self::Resume => "resume",
             Self::Cancel => "cancel",
+            Self::IssueCredentials => "issue-credentials",
             Self::AcknowledgeDelivery => "acknowledge-delivery",
             Self::ReplaceCredentials => "replace-credentials",
             Self::Rollback => "rollback",
@@ -195,6 +232,50 @@ impl Verb {
     fn parse(name: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|verb| verb.name() == name)
     }
+
+    /// DD-002: a verb whose response carries a newly minted token.
+    fn mints(self) -> bool {
+        matches!(self, Self::IssueCredentials | Self::ReplaceCredentials)
+    }
+}
+
+/// DD-002: refuses delivery fields a verb does not take, or lacks, before
+/// anything is read or persisted.
+fn delivery_fields(verb: Verb, request: &ActionRequest, now: u64) -> Result<(), ApiError> {
+    let quoted = request.delivery_generation.is_some() || request.credential_id.is_some();
+    let complete = request.delivery_generation.is_some_and(|g| g > 0)
+        && request.credential_id.as_deref().is_some_and(text);
+    let (grant, quote) = match verb {
+        Verb::IssueCredentials => (true, false),
+        Verb::AcknowledgeDelivery => (false, true),
+        Verb::ReplaceCredentials => (true, true),
+        _ => (false, false),
+    };
+    if request.grant.is_some() != grant || (quote && !complete) || (!quote && quoted) {
+        return Err(invalid(
+            "issue-credentials takes a grant; acknowledge-delivery takes delivery_generation and credential_id; replace-credentials takes all three; no other action takes any",
+        ));
+    }
+    if let Some(input) = &request.grant {
+        credentials::candidate_grant(
+            &input.name,
+            &input.operations,
+            input.graphs.as_deref(),
+            input.expires_unix_ms,
+            now,
+        )?;
+    }
+    Ok(())
+}
+
+/// The delivery an action reports: IDs and generations, never a secret.
+fn delivery_view(delivery: &Delivery) -> Value {
+    json!({
+        "generation": delivery.generation,
+        "credential_id": delivery.credential_id,
+        "acknowledged": delivery.acknowledged,
+        "revoked": delivery.revoked,
+    })
 }
 
 /// One persisted action, under `actions/<sha256(principal, key)>.json`.
@@ -365,6 +446,20 @@ fn desired(payload: &Payload) -> Value {
     value
 }
 
+pub(super) fn can_finish_cancel(outcome: Option<&TerminalOutcome>, slot: Option<&Slot>) -> bool {
+    matches!(
+        (outcome, slot),
+        (
+            Some(TerminalOutcome::Cancelled),
+            Some(Slot::Reserved {
+                cancellation_requested: true,
+                receipt: None,
+                ..
+            })
+        )
+    )
+}
+
 /// The redacted status view: never the idempotency key or its digest,
 /// retained content, tokens or secret version names.
 fn render(
@@ -372,6 +467,7 @@ fn render(
     snapshot: &Snapshot,
     journal: &Journal,
     terminal: Option<&Terminal>,
+    delivery: Option<&Delivery>,
 ) -> Value {
     let slot = holds(snapshot, intent);
     let (reserved, cancelling, activated) = match slot {
@@ -383,8 +479,13 @@ fn render(
         _ => (false, false, false),
     };
     let withdrawn = snapshot.withdrawn(&intent.tenant_id, &intent.operation_id);
-    let (phase, next_step) = match terminal.map(|t| &t.outcome) {
+    let outcome = terminal.map(|t| &t.outcome);
+    let release_pending = can_finish_cancel(outcome, slot);
+    let (phase, next_step) = match outcome {
         Some(TerminalOutcome::Succeeded { .. }) => ("succeeded", "none: the operation ended"),
+        Some(TerminalOutcome::Cancelled) if release_pending => {
+            ("cancelled", "cancel again to release the reservation")
+        }
         Some(TerminalOutcome::Cancelled) => ("cancelled", "none: the operation ended"),
         Some(TerminalOutcome::Retired) => (
             "retired",
@@ -447,9 +548,16 @@ fn render(
             "reserved": reserved,
             "routed": snapshot.record_for(&intent.tenant_id).is_some(),
             "cancellation_requested": cancelling || withdrawn,
+            "release_pending": release_pending,
             "journal_steps": journal.steps.len(),
             "uncertain_steps": uncertain,
             "terminal": terminal.is_some(),
+            // DD-002: IDs only; a lost token is recovered by replacement.
+            "credential_delivery": delivery.map(|delivery| json!({
+                "generation": delivery.generation,
+                "credential_id": delivery.credential_id,
+                "acknowledged": delivery.acknowledged,
+            })),
         },
     })
 }
@@ -465,8 +573,15 @@ fn load(deployments: &Deployments, operation_id: &str) -> Result<Intent, ApiErro
 fn view(deployments: &Deployments, intent: &Intent) -> Result<Value, ApiError> {
     let journal = deployments.ops.journal(&intent.operation_id)?;
     let terminal = deployments.ops.terminal(&intent.operation_id)?;
+    let delivery = deployments.ops.delivery(&intent.operation_id)?;
     let (snapshot, _) = deployments.objects.read()?;
-    Ok(render(intent, &snapshot, &journal, terminal.as_ref()))
+    Ok(render(
+        intent,
+        &snapshot,
+        &journal,
+        terminal.as_ref(),
+        delivery.as_ref(),
+    ))
 }
 
 fn status(deployments: &Deployments, operation_id: &str) -> Result<Value, ApiError> {
@@ -485,12 +600,21 @@ fn list(deployments: &Deployments, after: Option<&str>, limit: usize) -> Result<
         let intent = load(deployments, id)?;
         let journal = deployments.ops.journal(id)?;
         let terminal = deployments.ops.terminal(id)?;
-        records.push((intent, journal, terminal));
+        let delivery = deployments.ops.delivery(id)?;
+        records.push((intent, journal, terminal, delivery));
     }
     let (snapshot, _) = deployments.objects.read()?;
     let operations: Vec<Value> = records
         .iter()
-        .map(|(intent, journal, terminal)| render(intent, &snapshot, journal, terminal.as_ref()))
+        .map(|(intent, journal, terminal, delivery)| {
+            render(
+                intent,
+                &snapshot,
+                journal,
+                terminal.as_ref(),
+                delivery.as_ref(),
+            )
+        })
         .collect();
     let next_after = if more { ids.last() } else { None };
     Ok(json!({"operations": operations, "next_after": next_after}))
@@ -521,17 +645,22 @@ fn stored_action(
 }
 
 /// Refuses a verb whose handler is not available now; nothing is persisted.
-/// `slot` is this operation's reservation, if it holds one.
+/// `terminal` is the sealed outcome, if any; `slot` is this operation's
+/// reservation, if it holds one.
 fn available(
     verb: Verb,
     request: &ActionRequest,
     payload: &Payload,
-    ended: bool,
+    terminal: Option<&TerminalOutcome>,
     slot: Option<&Slot>,
 ) -> Result<(), ApiError> {
+    let ended = terminal.is_some();
     match verb {
         Verb::Resume if !ended && pins_sets(payload) => Err(pin_scope_unproven()),
         Verb::Resume => Ok(()),
+        // A sealed cancellation whose release was lost still holds the slot:
+        // a fresh cancel quoting the current tokens completes that release.
+        Verb::Cancel if ended && can_finish_cancel(terminal, slot) => Ok(()),
         Verb::Cancel if ended => Err(super::ended()),
         Verb::Cancel => match slot {
             Some(Slot::Reserved { receipt: None, .. }) => Ok(()),
@@ -550,12 +679,34 @@ fn available(
                 "cancel needs this operation to hold the tenant reservation; only its plan-anchored actuator reserves it",
             )),
         },
-        Verb::AcknowledgeDelivery => Err(unavailable_transition(
-            "delivery acknowledgement needs credential delivery (EPIC-004 create, EPIC-006 migration)",
+        Verb::IssueCredentials | Verb::AcknowledgeDelivery | Verb::ReplaceCredentials
+            if !matches!(payload, Payload::Create { .. }) =>
+        {
+            Err(unavailable_transition(
+                "credential delivery for a migration needs migration orchestration (EPIC-006)",
+            ))
+        }
+        Verb::ReplaceCredentials if !request.ack_irreversible => Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "irreversible_ack_required",
+            "replacement irreversibly revokes the unacknowledged credential and needs ack_irreversible: true",
         )),
-        Verb::ReplaceCredentials => Err(unavailable_transition(
-            "credential replacement needs credential delivery (EPIC-004 create, EPIC-006 migration)",
-        )),
+        Verb::IssueCredentials | Verb::AcknowledgeDelivery | Verb::ReplaceCredentials if ended => {
+            Err(super::ended())
+        }
+        Verb::IssueCredentials | Verb::AcknowledgeDelivery | Verb::ReplaceCredentials => {
+            match slot {
+                Some(Slot::Reserved {
+                    cancellation_requested: false,
+                    receipt: None,
+                    ..
+                }) => Ok(()),
+                _ => Err(conflict(
+                    "operation_not_provisionable",
+                    "credential delivery needs this create to hold an uncancelled, unactivated reservation",
+                )),
+            }
+        }
         Verb::Rollback => Err(unavailable_transition(
             "rollback needs migration orchestration (EPIC-006)",
         )),
@@ -570,15 +721,78 @@ fn available(
     }
 }
 
-/// One generation-bound action (ITEM-004).
+/// DD-002: refuses a delivery action the current delivery state settles,
+/// before anything is persisted and again before it is applied. An issue
+/// needs a recorded seed and no candidate; a replacement or an
+/// acknowledgement must quote the current generation and credential ID
+/// (a replacement only while it is unacknowledged), and an acknowledgement
+/// only a candidate the published view holds live for this tenant and its
+/// seeded lineage, so an unpublished one is replaced, never acknowledged.
+fn delivery_ready(
+    deployments: &Deployments,
+    intent: &Intent,
+    verb: Verb,
+    request: &ActionRequest,
+    now: u64,
+) -> Result<(), ApiError> {
+    if !matches!(
+        verb,
+        Verb::IssueCredentials | Verb::AcknowledgeDelivery | Verb::ReplaceCredentials
+    ) {
+        return Ok(());
+    }
+    let id = &intent.operation_id;
+    let seed = recorded_seed(&deployments.ops.journal(id)?).ok_or_else(seed_unrecorded)?;
+    let current = deployments.ops.delivery(id)?;
+    if verb == Verb::IssueCredentials {
+        return match current {
+            Some(_) => Err(candidate_recorded()),
+            None => Ok(()),
+        };
+    }
+    let Some(delivery) = current.filter(|delivery| {
+        Some(delivery.generation) == request.delivery_generation
+            && Some(delivery.credential_id.as_str()) == request.credential_id.as_deref()
+    }) else {
+        return Err(delivery_stale());
+    };
+    if verb == Verb::ReplaceCredentials {
+        return if delivery.acknowledged {
+            Err(delivery_stale())
+        } else {
+            Ok(())
+        };
+    }
+    let (snapshot, _) = deployments.objects.read()?;
+    let published = snapshot.records_publication(
+        &intent.tenant_id,
+        id,
+        delivery.generation,
+        &delivery.credential_id,
+        &delivery.revoked,
+    ) && snapshot.live_credential(&delivery.credential_id, now)
+        == Some((Some(intent.tenant_id.clone()), seed.lineage));
+    if !published {
+        return Err(conflict(
+            "credential_view_unpublished",
+            "the candidate is not published live for this tenant; replace it instead",
+        ));
+    }
+    Ok(())
+}
+
+/// One generation-bound action (ITEM-004). `private` is set only by the
+/// authenticated REST response (DD-002): only there may an action mint a
+/// token, which is returned beside the stored result, never inside it.
 fn act(
     deployments: &Deployments,
     actor: &str,
     operation_id: &str,
     verb: &str,
     request: ActionRequest,
+    private: bool,
     now: u64,
-) -> Result<Value, ApiError> {
+) -> Result<(Value, Option<String>), ApiError> {
     let verb = Verb::parse(verb).ok_or_else(|| {
         ApiError::new(
             StatusCode::NOT_FOUND,
@@ -596,6 +810,12 @@ fn act(
         .is_some_and(|receipt| !is_hex(receipt, 64))
     {
         return Err(invalid("expected_receipt must be a SHA-256 hex digest"));
+    }
+    delivery_fields(verb, &request, now)?;
+    if verb.mints() && !private {
+        return Err(unavailable_transition(
+            "a candidate credential is delivered only in the authenticated admin HTTPS response",
+        ));
     }
     let intent = load(deployments, operation_id)?;
     let canonical = serde_json::to_vec(&request).map_err(|_| state_invalid())?;
@@ -617,7 +837,7 @@ fn act(
                 ..
             },
             _,
-        )) => return Ok(result),
+        )) => return Ok((result, None)),
         // Accepted but never finished: apply again (every apply is
         // idempotent); the state already moved, so tokens are not checked.
         Some((_, etag)) => etag,
@@ -641,9 +861,10 @@ fn act(
                 verb,
                 &request,
                 &intent.payload,
-                terminal.is_some(),
+                terminal.as_ref().map(|t| &t.outcome),
                 holds(&snapshot, &intent),
             )?;
+            delivery_ready(deployments, &intent, verb, &request, now)?;
             let record = ActionRecord {
                 schema: SCHEMA.to_owned(),
                 operation_id: operation_id.to_owned(),
@@ -662,11 +883,13 @@ fn act(
                         ..
                     },
                     _,
-                ) => return Ok(result),
+                ) => return Ok((result, None)),
                 (_, etag) => etag,
             }
         }
     };
+    let mut minted = None;
+    let mut delivery = None;
     match verb {
         Verb::Resume => {}
         Verb::Cancel => {
@@ -683,10 +906,52 @@ fn act(
                 .ops
                 .release(&deployments.objects, &intent, now)?;
         }
+        // A re-applied mint is refused by the delivery record, so a lost
+        // response is never answered with another token: the administrator
+        // replaces it instead.
+        Verb::IssueCredentials | Verb::ReplaceCredentials | Verb::AcknowledgeDelivery => {
+            delivery_ready(deployments, &intent, verb, &request, now)?;
+            let (ops, objects) = (&deployments.ops, &deployments.objects);
+            let grant = request.grant.as_ref().map(GrantInput::grant);
+            match (verb, grant, request.delivery_generation, &request.credential_id) {
+                (Verb::IssueCredentials, Some(grant), _, _) => {
+                    minted = Some(publish_candidate(ops, objects, &intent, &grant, now)?);
+                }
+                (Verb::ReplaceCredentials, Some(grant), Some(generation), _) => {
+                    minted = Some(replace_published_candidate(
+                        ops, objects, &intent, generation, &grant, now,
+                    )?);
+                }
+                (Verb::AcknowledgeDelivery, None, Some(generation), Some(credential_id)) => {
+                    delivery =
+                        Some(ops.acknowledge_delivery(operation_id, generation, credential_id)?);
+                }
+                // `delivery_fields` refused every other shape.
+                _ => return Err(state_invalid()),
+            }
+        }
         // Refused by `available` before any record was written.
         _ => return Err(state_invalid()),
     }
-    let result = json!({"action": verb.name(), "operation": view(deployments, &intent)?});
+    let mut result = json!({"action": verb.name(), "operation": view(deployments, &intent)?});
+    // The delivery an action reports is the one it produced, never a later
+    // re-read: a minted token is released only beside the exact candidate it
+    // was recorded as. The operation view above is read first; `deliver`
+    // then re-reads the delivery record and, last, the control state, so the
+    // view, the delivery and the token describe one uncancelled publication
+    // of this candidate. A concurrent replacement or cancellation before
+    // that last read drops the token (the action stays unfinished; a replay
+    // is refused, never re-minted); one after it revokes the returned token.
+    let mut token = None;
+    if let Some(minted) = minted {
+        let (secret, current) =
+            minted.deliver(&deployments.ops, &deployments.objects, &intent, now)?;
+        token = Some(secret);
+        delivery = Some(current);
+    }
+    if let Some(delivery) = &delivery {
+        result["delivery"] = delivery_view(delivery);
+    }
     let finished = ActionRecord {
         schema: SCHEMA.to_owned(),
         operation_id: operation_id.to_owned(),
@@ -700,7 +965,7 @@ fn act(
     if let Ok(bytes) = serde_json::to_vec(&finished) {
         let _ = deployments.ops.store.put(&name, &bytes, Cond::Match(&etag));
     }
-    Ok(result)
+    Ok((result, token))
 }
 
 fn audit_event(log: Option<&audit::Log>, event: Value) -> bool {
@@ -955,22 +1220,54 @@ pub(super) async fn operation_action(
     Path((operation, action)): Path<(String, String)>,
     role: Option<Extension<Role>>,
     principal: Option<Extension<users::Principal>>,
+    headers: axum::http::HeaderMap,
     input: Result<Json<ActionRequest>, JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
     let actor = rest_actor(&service, role, principal)?;
+    // DD-002: a minted secret travels only over HTTPS, as the account
+    // layer proves it: native TLS, or `VLITE_TRUSTED_PROXY=1` with the
+    // proxy's own `X-Forwarded-Proto: https`. Refused before anything is
+    // minted or persisted; no accounts, no proof.
+    let secure = service
+        .admin
+        .users
+        .as_ref()
+        .is_some_and(|accounts| accounts.secure_request(&headers));
+    if !secure && Verb::parse(&action).is_some_and(Verb::mints) {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "insecure_transport",
+            "candidate credentials are delivered only over HTTPS: native TLS, or VLITE_TRUSTED_PROXY=1 with X-Forwarded-Proto: https",
+        ));
+    }
     let input = body(input)?;
     let deployments = configured(&service)?;
-    let result = {
+    let (mut result, token) = {
         let (actor, operation, action) = (actor.clone(), operation.clone(), action.clone());
-        blocking(move || act(&deployments, &actor, &operation, &action, input, now())).await?
+        blocking(move || {
+            act(
+                &deployments,
+                &actor,
+                &operation,
+                &action,
+                input,
+                secure,
+                now(),
+            )
+        })
+        .await?
     };
     record(&service, action_event(&actor, &operation, &action));
+    // DD-002: the only copy of a minted secret, in this no-store response.
+    if let Some(token) = token {
+        result["token"] = Value::String(token);
+    }
     Ok(Json(result))
 }
 
 // -------------------------------------------------------------------- CLI
 
-const USAGE: &str = "vlite-server tenant-deployment <create|readers|migrate|retire> --request-file <file> [--tenant <id>] | status --operation <id> | work [--operation <id>] | <resume|cancel|acknowledge-delivery|replace-credentials|rollback|release> --operation <id> --request-file <file>; every verb also takes --target-file <file> --object <name> --admin-dir <dir> [--shared-key-file <file>]";
+const USAGE: &str = "vlite-server tenant-deployment <create|readers|migrate|retire> --request-file <file> [--tenant <id>] | status --operation <id> | work [--operation <id>] | <resume|cancel|acknowledge-delivery|replace-credentials|rollback|release> --operation <id> --request-file <file> (issue-credentials and replace-credentials only over the admin HTTPS API); every verb also takes --target-file <file> --object <name> --admin-dir <dir> [--shared-key-file <file>]";
 
 /// Bound for a request file: the operation records' own bound.
 fn read_request(path: &std::path::Path) -> Result<Vec<u8>, String> {
@@ -1004,15 +1301,21 @@ pub(super) enum Command {
     Work {
         operation: Option<String>,
         attempt: String,
+        /// The managed identity for ARM tokens: the target's client ID.
+        client_id: Option<String>,
     },
 }
 
 const CLI_ACTOR: &str = "cli:tenant-deployment";
 
 /// ITEM-022: one control-worker invocation ([`super::worker::work`]) with
-/// its outcome audited. Idle when nothing can be claimed; an attempt that
-/// did not provision is an error whose message names the operation, the
-/// attempt and the outcome (`blocked`, `failed` or `unknown`).
+/// its outcome audited. ITEM-024: it first releases every sealed
+/// cancellation whose release failed ([`super::worker::release_cancelled`]),
+/// auditing each and listing it in `releases_recovered`; if that sweep
+/// fails, no operation is attempted. Idle when nothing can be claimed; an
+/// attempt that did not provision is an error whose message names the
+/// operation, the attempt and the outcome (`blocked`, `failed` or
+/// `unknown`).
 pub(super) fn work(
     deployments: &Deployments,
     log: Option<&audit::Log>,
@@ -1020,7 +1323,45 @@ pub(super) fn work(
     adapter: &super::worker::Adapter<'_>,
     operation: Option<&str>,
     attempt: &str,
+    now: u64,
 ) -> Result<Value, ApiError> {
+    // A malformed ID is refused before any store request, sweep included.
+    if operation.is_some_and(|id| !is_hex(id, 32)) {
+        return Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "operation_not_found",
+            "no such operation",
+        ));
+    }
+    let mut recovered = Vec::new();
+    let swept =
+        super::worker::release_cancelled(&deployments.objects, &deployments.ops, now, |intent| {
+            let recorded = log.is_some()
+                && audit_event(
+                    log,
+                    json!({
+                        "event": "tenant_deployment_release_recovered",
+                        "actor": CLI_ACTOR,
+                        "operation_id": intent.operation_id,
+                        "tenant_id": intent.tenant_id,
+                        "attempt": attempt,
+                    }),
+                );
+            recovered
+                .push(json!({"operation_id": intent.operation_id, "audit_recorded": recorded}));
+        });
+    let first = |recovered: &[Value]| match recovered.is_empty() {
+        true => String::new(),
+        false => format!("; releases recovered first: {}", json!(recovered)),
+    };
+    if let Err(mut error) = swept {
+        error.message = format!(
+            "{}{}; no operation was attempted",
+            error.message,
+            first(&recovered)
+        );
+        return Err(error);
+    }
     let Some(done) = super::worker::work(
         &deployments.objects,
         &deployments.ops,
@@ -1028,9 +1369,13 @@ pub(super) fn work(
         adapter,
         operation,
         attempt,
-    )?
+    )
+    .map_err(|mut error| {
+        error.message = format!("{}{}", error.message, first(&recovered));
+        error
+    })?
     else {
-        return Ok(json!({"outcome": "idle"}));
+        return Ok(json!({"outcome": "idle", "releases_recovered": recovered}));
     };
     let (id, outcome) = (&done.intent.operation_id, done.outcome.as_str());
     let mut event = json!({
@@ -1052,6 +1397,7 @@ pub(super) fn work(
             "audit_recorded": recorded,
             // A failed readback must not mask the recorded outcome.
             "operation": view(deployments, &done.intent).ok(),
+            "releases_recovered": recovered,
         })),
         Some(mut error) => {
             let unrecorded = if recorded {
@@ -1060,8 +1406,9 @@ pub(super) fn work(
                 "; the audit event was not recorded"
             };
             error.message = format!(
-                "{}; operation {id}, attempt {attempt}, outcome {outcome}{unrecorded}",
-                error.message
+                "{}; operation {id}, attempt {attempt}, outcome {outcome}{unrecorded}{}",
+                error.message,
+                first(&recovered)
             );
             Err(error)
         }
@@ -1113,25 +1460,32 @@ pub(super) fn run(
             verb,
             request,
         } => {
-            let result = act(
+            let (result, _) = act(
                 deployments,
                 CLI_ACTOR,
                 &operation,
                 &verb,
                 parse(&request)?,
+                false,
                 now,
             )?;
             audit_event(log, action_event(CLI_ACTOR, &operation, &verb));
             Ok(result)
         }
-        Command::Work { operation, attempt } => work(
+        Command::Work {
+            operation,
+            attempt,
+            client_id,
+        } => work(
             deployments,
             log,
-            // No production proof exists yet (OD-006), so preflight refuses.
+            // No production proof exists yet (OD-006), so preflight refuses
+            // before the adapter is built or anything is claimed.
             &super::worker::Proofs::default(),
-            &super::worker::production_arm,
+            &super::worker::production_arm(client_id),
             operation.as_deref(),
             &attempt,
+            now,
         ),
     }
 }
@@ -1203,6 +1557,8 @@ pub fn tenant_deployment_command(args: &[OsString]) -> Result<Value, String> {
                 .transpose()?,
             attempt: super::worker::attempt_id()
                 .map_err(|error| format!("{}: {}", error.code, error.message))?,
+            client_id: crate::server::cloud_recovery::target_client_id(&source.target_file)
+                .map_err(|error| error.to_string())?,
         },
         None => Command::Act {
             operation: utf8("--operation", required("--operation")?)?,
@@ -1290,6 +1646,8 @@ mod tests {
         memory: Arc<Memory>,
         service: Service,
         app: Router,
+        /// Headers every request carries (e.g. `X-Forwarded-Proto`).
+        headers: Vec<(&'static str, &'static str)>,
     }
 
     impl Fixture {
@@ -1323,6 +1681,9 @@ mod tests {
                 .header("content-type", "application/json");
             if let Some(token) = token {
                 request = request.header("authorization", format!("Bearer {token}"));
+            }
+            for (name, value) in &self.headers {
+                request = request.header(*name, *value);
             }
             let body = input.map_or_else(Body::empty, |input| Body::from(input.to_string()));
             let response = self
@@ -1375,8 +1736,21 @@ mod tests {
         }
     }
 
-    /// An authenticated server whose control state routes `ROUTED` shared.
+    /// An authenticated server whose control state routes `ROUTED` shared,
+    /// serving native HTTPS.
     fn fixture_with(configured: bool, token: Option<&str>) -> Fixture {
+        fixture_over(configured, token, true, false)
+    }
+
+    /// [`fixture_with`] whose REST listener terminates TLS (`https`) or
+    /// trusts a reverse proxy's `X-Forwarded-Proto` (`trusted_proxy`), as
+    /// `ServerOptions` configures the dashboard accounts.
+    fn fixture_over(
+        configured: bool,
+        token: Option<&str>,
+        https: bool,
+        trusted_proxy: bool,
+    ) -> Fixture {
         let directory = tempfile::tempdir().unwrap();
         let store = tenants::Store::load(directory.path()).unwrap();
         store
@@ -1400,6 +1774,19 @@ mod tests {
         admin.tenants = Some(Arc::new(store));
         admin.audit_log = Some(Arc::new(audit::Log::open(directory.path()).unwrap()));
         admin.directory = Some(directory.path().to_owned());
+        admin.users = Some(Arc::new(
+            users::Accounts::load(
+                directory.path(),
+                &users::Settings {
+                    idle: users::DEFAULT_IDLE,
+                    lifetime: users::DEFAULT_LIFETIME,
+                    https,
+                    loopback_only: true,
+                    trusted_proxy,
+                },
+            )
+            .unwrap(),
+        ));
         if configured {
             service = service.with_tenant_deployments(Arc::new(Deployments::new(
                 memory.clone(),
@@ -1413,6 +1800,7 @@ mod tests {
             memory,
             service,
             app,
+            headers: Vec::new(),
         }
     }
 
@@ -1641,6 +2029,195 @@ mod tests {
         assert_eq!(body["operation"]["phase"], "activated");
     }
 
+    /// A cancel sealed whose release was never published leaves the slot
+    /// reserved. Any admin's fresh cancel quoting the current tokens
+    /// completes that release; once released it stays ended.
+    #[tokio::test]
+    async fn a_fresh_cancel_completes_a_sealed_cancellation_whose_release_failed() {
+        let f = fixture();
+        let operation = f.create("onboard-contoso").await;
+        let id = operation["operation_id"].as_str().unwrap().to_owned();
+        let tenant = operation["tenant_id"].as_str().unwrap().to_owned();
+        assert_eq!(operation["observed"]["release_pending"], false);
+        // The first control-state write requests the cancellation; the
+        // second, the release after the seal, is refused.
+        f.memory.fault(Op::Put, CONTROL, Fault::Refuse, 1, 1);
+        let (status, body) = f
+            .action(&operation, "cancel", "cancel-lost", json!({}))
+            .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert!(matches!(
+            f.snapshot().lifecycle(&tenant).map(|entry| &entry.slot),
+            Some(Slot::Reserved {
+                cancellation_requested: true,
+                receipt: None,
+                ..
+            })
+        ));
+        let path = format!("/v1/admin/tenant-deployment-operations/{id}");
+        let (_, current) = f.call("GET", &path, None).await;
+        let current = current["operation"].clone();
+        assert_eq!(current["phase"], "cancelled");
+        assert_eq!(current["observed"]["terminal"], true);
+        assert_eq!(current["observed"]["reserved"], true);
+        assert_eq!(current["observed"]["release_pending"], true);
+        assert_eq!(
+            current["next_step"],
+            "cancel again to release the reservation"
+        );
+        let (status, body) = f
+            .action(&operation, "cancel", "recover-stale", json!({}))
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"]["code"], "operation_generation_stale");
+
+        let (status, recovered) = f.action(&current, "cancel", "recover-1", json!({})).await;
+        assert_eq!(status, StatusCode::OK, "{recovered}");
+        assert_eq!(recovered["operation"]["phase"], "cancelled");
+        assert_eq!(recovered["operation"]["observed"]["reserved"], false);
+        assert_eq!(recovered["operation"]["observed"]["release_pending"], false);
+        assert_eq!(
+            recovered["operation"]["next_step"],
+            "none: the operation ended"
+        );
+        assert!(matches!(
+            f.snapshot().lifecycle(&tenant).map(|entry| &entry.slot),
+            Some(Slot::Released { operation_id, .. }) if *operation_id == id
+        ));
+        let audit = std::fs::read_to_string(f.directory.path().join("audit.jsonl")).unwrap();
+        assert!(
+            audit
+                .lines()
+                .any(|line| line.contains("tenant_deployment_action")
+                    && line.contains(&id)
+                    && line.contains("\"action\":\"cancel\"")),
+            "{audit}"
+        );
+        // The lost attempt's exact resend reaches the same end.
+        let (status, replay) = f
+            .action(&operation, "cancel", "cancel-lost", json!({}))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{replay}");
+        assert_eq!(replay["operation"]["observed"]["reserved"], false);
+        // Released: a further fresh cancel is ended, even with current tokens.
+        let (status, body) = f
+            .action(&recovered["operation"], "cancel", "recover-2", json!({}))
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"]["code"], "operation_terminal");
+    }
+
+    /// An ended operation takes a cancel only to release its own slot
+    /// after a sealed cancellation: never a released, replaced or
+    /// withdrawn slot (none is held), a retirement or an activation.
+    #[test]
+    fn an_ended_cancel_only_releases_its_own_sealed_cancellation() {
+        let request: ActionRequest = serde_json::from_value(json!({
+            "idempotency_key": "k",
+            "expected_operation_generation": 0,
+            "expected_lifecycle_generation": 0,
+        }))
+        .unwrap();
+        let payload = Payload::Retire {
+            tenant_id: ROUTED.into(),
+            expected_receipt: "a".repeat(64),
+            reason: "test".into(),
+            data_disposition: DataDisposition::Retain,
+        };
+        let reserved = |cancellation_requested| Slot::Reserved {
+            operation_id: "a".repeat(32),
+            kind: Kind::Retire,
+            request_digest: "b".repeat(64),
+            expected_route: None,
+            cancellation_requested,
+            receipt: None,
+        };
+        let cancelled = Some(&TerminalOutcome::Cancelled);
+        available(
+            Verb::Cancel,
+            &request,
+            &payload,
+            cancelled,
+            Some(&reserved(true)),
+        )
+        .unwrap();
+        for (terminal, slot) in [
+            (cancelled, None),
+            (cancelled, Some(reserved(false))),
+            (Some(&TerminalOutcome::Retired), Some(reserved(false))),
+            (Some(&TerminalOutcome::Retired), Some(reserved(true))),
+        ] {
+            let error =
+                available(Verb::Cancel, &request, &payload, terminal, slot.as_ref()).unwrap_err();
+            assert_eq!(error.code, "operation_terminal");
+        }
+    }
+
+    /// ITEM-024: the release-recovery contract the dashboard test and the
+    /// browser fake also read; this pins it to the server's own rule.
+    #[test]
+    fn release_recovery_contract_cases_match_the_server_rule() {
+        let cases: Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/ha/tenant-deployment-release-cases.json"
+        ))
+        .unwrap();
+        let request: ActionRequest = serde_json::from_value(json!({
+            "idempotency_key": "k",
+            "expected_operation_generation": 0,
+            "expected_lifecycle_generation": 0,
+        }))
+        .unwrap();
+        let payload = Payload::Retire {
+            tenant_id: ROUTED.into(),
+            expected_receipt: "a".repeat(64),
+            reason: "test".into(),
+            data_disposition: DataDisposition::Retain,
+        };
+        let cases = cases["cases"].as_array().unwrap();
+        assert!(cases.len() >= 8);
+        for case in cases {
+            let name = &case["name"];
+            let terminal = match case["terminal"].as_str() {
+                None => None,
+                Some("cancelled") => Some(TerminalOutcome::Cancelled),
+                Some("retired") => Some(TerminalOutcome::Retired),
+                Some(other) => panic!("{name}: unknown terminal {other}"),
+            };
+            let slot = case["slot"].as_object().map(|slot| Slot::Reserved {
+                operation_id: "a".repeat(32),
+                kind: Kind::Retire,
+                request_digest: "b".repeat(64),
+                expected_route: None,
+                cancellation_requested: slot["cancellation_requested"].as_bool().unwrap(),
+                receipt: slot["receipt"].as_bool().unwrap().then(|| {
+                    crate::server::control_state::Receipt {
+                        operation_id: "a".repeat(32),
+                        request_digest: "b".repeat(64),
+                        generation: 2,
+                        route_digest: "c".repeat(64),
+                        lineage: 1,
+                        epoch: 1,
+                        proof_digest: "d".repeat(64),
+                    }
+                }),
+            });
+            assert_eq!(
+                can_finish_cancel(terminal.as_ref(), slot.as_ref()),
+                case["release_pending"].as_bool().unwrap(),
+                "{name}"
+            );
+            let cancel = available(
+                Verb::Cancel,
+                &request,
+                &payload,
+                terminal.as_ref(),
+                slot.as_ref(),
+            )
+            .map_or_else(|error| error.code.to_string(), |()| "ok".to_owned());
+            assert_eq!(cancel, case["cancel"].as_str().unwrap(), "{name}");
+        }
+    }
+
     /// EPIC-005: an unreserved reader change or retirement is cancelled by
     /// withdrawing it (`request_cancel`); a create or a migration still
     /// needs to hold its reservation.
@@ -1665,7 +2242,7 @@ mod tests {
             },
         ];
         for payload in &withdrawable {
-            available(Verb::Cancel, &request, payload, false, None).unwrap();
+            available(Verb::Cancel, &request, payload, None, None).unwrap();
         }
         let held_first = [
             Payload::Create {
@@ -1688,7 +2265,7 @@ mod tests {
             },
         ];
         for payload in &held_first {
-            let error = available(Verb::Cancel, &request, payload, false, None).unwrap_err();
+            let error = available(Verb::Cancel, &request, payload, None, None).unwrap_err();
             assert_eq!(error.code, "transition_unavailable");
         }
     }
@@ -1697,11 +2274,21 @@ mod tests {
     async fn unavailable_transitions_and_release_are_refused_before_persisting() {
         let f = fixture();
         let operation = f.create("onboard-contoso").await;
-        for verb in ["acknowledge-delivery", "replace-credentials", "rollback"] {
+        let (status, body) = f.action(&operation, "rollback", "rollback", json!({})).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"]["code"], "transition_unavailable");
+        // DD-002: delivery actions need their exact fields, then a seed.
+        for verb in ["acknowledge-delivery", "replace-credentials"] {
             let (status, body) = f.action(&operation, verb, verb, json!({})).await;
-            assert_eq!(status, StatusCode::CONFLICT, "{verb}");
-            assert_eq!(body["error"]["code"], "transition_unavailable");
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{verb}");
+            assert_eq!(body["error"]["code"], "operation_request_invalid");
         }
+        let quoted = json!({"delivery_generation": 1, "credential_id": "abc"});
+        let (status, body) = f
+            .action(&operation, "acknowledge-delivery", "rollback", quoted)
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"]["code"], "seed_unrecorded");
         let (status, body) = f
             .action(&operation, "release", "release-1", json!({}))
             .await;
@@ -1722,6 +2309,1080 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{body}");
         // Generic resume never released the reservation.
         assert_eq!(body["operation"]["phase"], "reserved");
+    }
+
+    // ------------------------------------------- ITEM-010 / DD-002 delivery
+
+    const LINEAGE: u64 = 0x77;
+    const DAY: u64 = 24 * 3600 * 1000;
+
+    fn delivery_grant() -> Value {
+        json!({
+            "name": "contoso-initial",
+            "operations": ["read", "search", "write"],
+            "expires_unix_ms": now() + 30 * DAY,
+        })
+    }
+
+    fn secret_of(token: &str) -> &str {
+        let rest = token.strip_prefix(credentials::TOKEN_PREFIX).unwrap();
+        rest.split_once('_').unwrap().1
+    }
+
+    fn id_of(token: &str) -> &str {
+        let rest = token.strip_prefix(credentials::TOKEN_PREFIX).unwrap();
+        rest.split_once('_').unwrap().0
+    }
+
+    impl Fixture {
+        async fn status(&self, operation_id: &str) -> Value {
+            let path = format!("/v1/admin/tenant-deployment-operations/{operation_id}");
+            let (status, body) = self.call("GET", &path, None).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            body["operation"].clone()
+        }
+
+        /// A reserved create whose seed a worker recorded, as re-read.
+        async fn seeded(&self, key: &str) -> Value {
+            let operation = self.create(key).await;
+            let id = operation["operation_id"].as_str().unwrap();
+            let ops = self.deployments().ops;
+            ops.claim(id, "worker-a", None).unwrap();
+            let seed = Seed {
+                lineage: LINEAGE,
+                digest: sha256_hex(b"seed"),
+            };
+            ops.record_seed(id, "worker-a", &seed).unwrap();
+            self.status(id).await
+        }
+
+        /// Fails if `needle` occurs in any stored object or any file under
+        /// the admin directory (the audit log included).
+        fn assert_nowhere(&self, needle: &str) {
+            for name in self.memory.names() {
+                let bytes = self.memory.raw(&name).unwrap();
+                assert!(
+                    !String::from_utf8_lossy(&bytes).contains(needle),
+                    "plaintext in object {name}"
+                );
+            }
+            let mut pending = vec![self.directory.path().to_owned()];
+            while let Some(dir) = pending.pop() {
+                for entry in std::fs::read_dir(dir).unwrap() {
+                    let path = entry.unwrap().path();
+                    if path.is_dir() {
+                        pending.push(path);
+                    } else if let Ok(bytes) = std::fs::read(&path) {
+                        assert!(
+                            !String::from_utf8_lossy(&bytes).contains(needle),
+                            "plaintext in file {}",
+                            path.display()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// DD-002: one authenticated HTTPS response carries the plaintext; the
+    /// stored action result, the delivery record, the view and the audit log
+    /// hold none of it, and a retry never mints another.
+    #[tokio::test]
+    async fn issue_credentials_delivers_the_token_once_in_the_admin_response() {
+        let f = fixture();
+        let operation = f.seeded("onboard-contoso").await;
+        let (id, tenant) = (
+            operation["operation_id"].as_str().unwrap().to_owned(),
+            operation["tenant_id"].as_str().unwrap().to_owned(),
+        );
+        assert_eq!(operation["observed"]["credential_delivery"], Value::Null);
+        let grant = json!({"grant": delivery_grant()});
+        let (status, body) = f
+            .action(&operation, "issue-credentials", "issue-1", grant.clone())
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let token = body["token"].as_str().unwrap().to_owned();
+        let credential = id_of(&token).to_owned();
+        assert_eq!(
+            body["delivery"],
+            json!({"generation": 1, "credential_id": credential, "acknowledged": false, "revoked": []})
+        );
+        assert_eq!(body["operation"]["phase"], "reserved");
+        assert_eq!(body["operation"]["observed"]["routed"], false);
+        assert_eq!(
+            body["operation"]["observed"]["credential_delivery"],
+            json!({"generation": 1, "credential_id": credential, "acknowledged": false})
+        );
+        // Hash-only, bound to the tenant and seeded lineage, route absent.
+        let snapshot = f.snapshot();
+        assert!(snapshot.record_for(&tenant).is_none());
+        assert!(snapshot.records_publication(&tenant, &id, 1, &credential, &[]));
+        assert_eq!(
+            snapshot.live_credential(&credential, now()),
+            Some((Some(tenant.clone()), LINEAGE))
+        );
+        f.assert_nowhere(secret_of(&token));
+        // A replay returns the stored result: no plaintext, no new mint.
+        let (status, replay) = f
+            .action(&operation, "issue-credentials", "issue-1", grant.clone())
+            .await;
+        assert_eq!(status, StatusCode::OK, "{replay}");
+        assert!(replay.get("token").is_none(), "{replay}");
+        assert_eq!(replay["delivery"], body["delivery"]);
+        // Another key cannot reissue either.
+        let (status, again) = f
+            .action(&operation, "issue-credentials", "issue-2", grant)
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{again}");
+        assert_eq!(again["error"]["code"], "delivery_candidate_exists");
+        assert!(!again.to_string().contains(secret_of(&token)));
+        let delivery = f.deployments().ops.delivery(&id).unwrap().unwrap();
+        assert_eq!((delivery.generation, delivery.credential_id.as_str()), (1, credential.as_str()));
+        f.assert_nowhere(secret_of(&token));
+    }
+
+    /// DD-002: the grant is explicit and bounded, the seed must be recorded,
+    /// and only an administrator of an open, reserved create may issue.
+    #[tokio::test]
+    async fn issue_credentials_needs_an_explicit_grant_a_seed_and_an_administrator() {
+        let f = fixture();
+        let unseeded = f.create("onboard-unseeded").await;
+        let grant = json!({"grant": delivery_grant()});
+        let (status, body) = f
+            .action(&unseeded, "issue-credentials", "issue-unseeded", grant.clone())
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"]["code"], "seed_unrecorded");
+
+        let operation = f.seeded("onboard-contoso").await;
+        let id = operation["operation_id"].as_str().unwrap().to_owned();
+        // No default grant: absent, or broader than the 365-day maximum.
+        let (status, body) = f
+            .action(&operation, "issue-credentials", "issue-nogrant", json!({}))
+            .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert_eq!(body["error"]["code"], "operation_request_invalid");
+        let mut long = delivery_grant();
+        long["expires_unix_ms"] = json!(now() + 366 * DAY);
+        let (status, body) = f
+            .action(&operation, "issue-credentials", "issue-long", json!({"grant": long}))
+            .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        let mut unknown = delivery_grant();
+        unknown["tenant_id"] = json!(ROUTED);
+        let (status, _) = f
+            .action(&operation, "issue-credentials", "issue-unknown", json!({"grant": unknown}))
+            .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        // Delivery fields belong to other verbs.
+        let (status, _) = f
+            .action(&operation, "cancel", "cancel-grant", grant.clone())
+            .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(f.deployments().ops.delivery(&id).unwrap().is_none());
+
+        // Only the administrator: read-only and unauthenticated are refused.
+        let reader = "tenant_deployment_reader_0123456789_ABCDEFGHIJ";
+        f.service.admin.auth.lock().unwrap().read_only = Some(BearerToken::new(reader).unwrap());
+        let path = format!("/v1/admin/tenant-deployment-operations/{id}/issue-credentials");
+        let mut input = json!({
+            "idempotency_key": "issue-reader",
+            "expected_operation_generation": operation["operation_generation"],
+            "expected_lifecycle_generation": operation["lifecycle_generation"],
+            "grant": delivery_grant(),
+        });
+        let (status, body) = f.call_as(Some(reader), "POST", &path, Some(input.clone())).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        let (status, _) = f.call_as(None, "POST", &path, Some(input.clone())).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let open = fixture_with(true, None);
+        input["idempotency_key"] = json!("issue-open");
+        let (status, body) = open.call_as(None, "POST", &path, Some(input)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+        assert!(f.deployments().ops.delivery(&id).unwrap().is_none());
+
+        // A cancelled create issues nothing.
+        let (status, body) = f.action(&operation, "cancel", "cancel-1", json!({})).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (status, body) = f
+            .action(&body["operation"], "issue-credentials", "issue-late", grant)
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"]["code"], "operation_terminal");
+        assert!(f.deployments().ops.delivery(&id).unwrap().is_none());
+    }
+
+    /// DD-002: acknowledgement quotes the exact generation and credential ID
+    /// the view publishes; activation's `delivered` follows it.
+    #[tokio::test]
+    async fn acknowledge_delivery_needs_the_exact_published_generation_and_id() {
+        let f = fixture();
+        let operation = f.seeded("onboard-contoso").await;
+        let id = operation["operation_id"].as_str().unwrap().to_owned();
+        let (status, issued) = f
+            .action(&operation, "issue-credentials", "issue-1", json!({"grant": delivery_grant()}))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{issued}");
+        let credential = issued["delivery"]["credential_id"].clone();
+        let (status, body) = f
+            .action(&operation, "acknowledge-delivery", "ack-0", json!({}))
+            .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        for (key, generation, credential_id) in [
+            ("ack-gen", json!(2), credential.clone()),
+            ("ack-id", json!(1), json!("not-the-candidate")),
+        ] {
+            let quoted = json!({"delivery_generation": generation, "credential_id": credential_id});
+            let (status, body) = f.action(&operation, "acknowledge-delivery", key, quoted).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{key}: {body}");
+            assert_eq!(body["error"]["code"], "delivery_stale");
+        }
+        assert_eq!(
+            f.deployments().ops.delivered(&id).unwrap_err().code,
+            "credential_delivery_unacknowledged"
+        );
+        let quoted = json!({"delivery_generation": 1, "credential_id": credential});
+        let (status, body) = f
+            .action(&operation, "acknowledge-delivery", "ack-1", quoted.clone())
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body.get("token").is_none());
+        assert_eq!(body["delivery"]["acknowledged"], true);
+        assert_eq!(
+            body["operation"]["observed"]["credential_delivery"]["acknowledged"],
+            true
+        );
+        f.deployments().ops.delivered(&id).unwrap();
+        // Still unrouted: acknowledgement does not activate (OD-005).
+        assert_eq!(body["operation"]["phase"], "reserved");
+        assert_eq!(body["operation"]["observed"]["routed"], false);
+        // An acknowledged candidate is never replaced.
+        let replace = json!({
+            "delivery_generation": 1, "credential_id": credential,
+            "ack_irreversible": true, "grant": delivery_grant(),
+        });
+        let (status, body) = f
+            .action(&operation, "replace-credentials", "replace-1", replace)
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"]["code"], "delivery_stale");
+        assert!(body.get("token").is_none());
+    }
+
+    /// DD-002: a lost, unacknowledged token is replaced only by quoting it
+    /// and acknowledging its revocation; the replacement is delivered once.
+    #[tokio::test]
+    async fn replace_credentials_explicitly_revokes_the_unacknowledged_generation() {
+        let f = fixture();
+        let operation = f.seeded("onboard-contoso").await;
+        let (id, tenant) = (
+            operation["operation_id"].as_str().unwrap().to_owned(),
+            operation["tenant_id"].as_str().unwrap().to_owned(),
+        );
+        let (status, issued) = f
+            .action(&operation, "issue-credentials", "issue-1", json!({"grant": delivery_grant()}))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{issued}");
+        let lost = issued["token"].as_str().unwrap().to_owned();
+        let old = id_of(&lost).to_owned();
+        let mut replace = json!({
+            "delivery_generation": 1, "credential_id": old, "grant": delivery_grant(),
+        });
+        let (status, body) = f
+            .action(&operation, "replace-credentials", "replace-noack", replace.clone())
+            .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert_eq!(body["error"]["code"], "irreversible_ack_required");
+        replace["ack_irreversible"] = json!(true);
+        let mut wrong = replace.clone();
+        wrong["credential_id"] = json!("someone-else");
+        let (status, body) = f
+            .action(&operation, "replace-credentials", "replace-wrong", wrong)
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"]["code"], "delivery_stale");
+        let mut nogrant = replace.clone();
+        nogrant.as_object_mut().unwrap().remove("grant");
+        let (status, _) = f
+            .action(&operation, "replace-credentials", "replace-nogrant", nogrant)
+            .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(f.deployments().ops.delivery(&id).unwrap().unwrap().generation, 1);
+
+        let (status, body) = f
+            .action(&operation, "replace-credentials", "replace-1", replace.clone())
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let token = body["token"].as_str().unwrap().to_owned();
+        let new = id_of(&token).to_owned();
+        assert_ne!(new, old);
+        assert_eq!(
+            body["delivery"],
+            json!({"generation": 2, "credential_id": new, "acknowledged": false, "revoked": [old]})
+        );
+        let snapshot = f.snapshot();
+        assert_eq!(snapshot.live_credential(&old, now()), None, "the lost token is revoked");
+        assert_eq!(
+            snapshot.live_credential(&new, now()),
+            Some((Some(tenant.clone()), LINEAGE))
+        );
+        assert!(snapshot.records_publication(&tenant, &id, 2, &new, std::slice::from_ref(&old)));
+        assert!(snapshot.record_for(&tenant).is_none());
+        f.assert_nowhere(secret_of(&lost));
+        f.assert_nowhere(secret_of(&token));
+        // Retries never reissue: the replay is redacted, a new key is stale.
+        let (status, replay) = f
+            .action(&operation, "replace-credentials", "replace-1", replace.clone())
+            .await;
+        assert_eq!(status, StatusCode::OK, "{replay}");
+        assert!(replay.get("token").is_none());
+        let (status, body) = f
+            .action(&operation, "replace-credentials", "replace-2", replace)
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"]["code"], "delivery_stale");
+        // The revoked generation can no longer be acknowledged.
+        let (status, _) = f
+            .action(
+                &operation,
+                "acknowledge-delivery",
+                "ack-old",
+                json!({"delivery_generation": 1, "credential_id": old}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let (status, body) = f
+            .action(
+                &operation,
+                "acknowledge-delivery",
+                "ack-new",
+                json!({"delivery_generation": 2, "credential_id": new}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        f.deployments().ops.delivered(&id).unwrap();
+    }
+
+    /// DD-002: an action accepted but never finished (its result write was
+    /// lost) is applied again on replay, and that re-apply is refused by the
+    /// delivery record: a retry never mints a second token.
+    #[tokio::test]
+    async fn a_lost_finish_never_reissues_the_candidate() {
+        let f = fixture();
+        let operation = f.seeded("onboard-contoso").await;
+        let id = operation["operation_id"].as_str().unwrap().to_owned();
+        let grant = json!({"grant": delivery_grant()});
+        let (status, issued) = f
+            .action(&operation, "issue-credentials", "issue-1", grant.clone())
+            .await;
+        assert_eq!(status, StatusCode::OK, "{issued}");
+        let ops = f.deployments().ops;
+        let actions: Vec<String> = f
+            .memory
+            .names()
+            .into_iter()
+            .filter(|name| name.contains(&id) && name.contains("/actions/"))
+            .collect();
+        assert_eq!(actions.len(), 1, "{actions:?}");
+        let (bytes, etag) = ops.get(&actions[0]).unwrap().unwrap();
+        let mut record: Value = serde_json::from_slice(&bytes).unwrap();
+        record.as_object_mut().unwrap().remove("result").unwrap();
+        ops.store
+            .put(&actions[0], &serde_json::to_vec(&record).unwrap(), Cond::Match(&etag))
+            .unwrap();
+        let (status, body) = f
+            .action(&operation, "issue-credentials", "issue-1", grant)
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"]["code"], "delivery_candidate_exists");
+        assert!(body.get("token").is_none());
+        let delivery = ops.delivery(&id).unwrap().unwrap();
+        assert_eq!(delivery.generation, 1);
+        assert_eq!(delivery.credential_id, issued["delivery"]["credential_id"].as_str().unwrap());
+    }
+
+    /// A create whose retained writer profile carries the DD-001
+    /// `seed_configuration` and whose manifest is the strict empty one, so
+    /// the real seed engine can seed it.
+    async fn seedable(f: &Fixture, key: &str, name: &str) -> Value {
+        const WRITER: &str = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-1/providers/Microsoft.App/containerApps/tenant-a-writer";
+        const EMPTY: &str = r#"{"mode":"empty"}"#;
+        let profile = json!({
+            "resources": [{
+                "id": WRITER,
+                "ownership": "owned",
+                "body": {"location": "westus2", "properties": {
+                    "environmentId": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-1/providers/Microsoft.App/managedEnvironments/vlite-env",
+                    "configuration": {"activeRevisionsMode": "Single"},
+                    "template": {
+                        "containers": [{"name": "vlite", "image": "example.azurecr.io/vlite@sha256:0000000000000000000000000000000000000000000000000000000000000000", "resources": {"cpu": 0.5, "memory": "1Gi"}}],
+                        "scale": {"minReplicas": 1, "maxReplicas": 1}
+                    }
+                }}
+            }],
+            "seed_configuration": {"dimensions": 3, "encryption": {"mode": "none"}},
+        })
+        .to_string();
+        let request = json!({
+            "idempotency_key": key,
+            "request": {
+                "kind": "create",
+                "name": name,
+                "max_vectors": 1000,
+                "writer_profile": sha(&profile),
+                "initialization": sha(EMPTY),
+                "resources": [WRITER],
+                "secret_versions": [SECRET],
+            },
+            "contents": [profile, EMPTY],
+        });
+        let (status, body) = f
+            .call("POST", "/v1/admin/tenant-deployments", Some(request))
+            .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+        body["operation"].clone()
+    }
+
+    /// ITEM-010 local end-to-end: the real offline seed engine creates the
+    /// create's VLite database and create-only receipt from its retained
+    /// writer profile, `seed::seed_create` journals the receipt's seed in
+    /// the operation store the admin routes read, and the admin REST
+    /// actions issue and acknowledge a candidate bound to the receipt's
+    /// lineage. A crash before the durable receipt is refused and leaves
+    /// issuance at `seed_unrecorded`; a crash after it is journaled on
+    /// rerun; a changed database is refused. Activation still refuses
+    /// without a qualified clock proof (OD-005): no route is published.
+    /// Nothing here records a seed, issues a credential or proves readiness
+    /// by hand.
+    #[tokio::test]
+    async fn a_real_seed_receipt_drives_delivery_and_activation_still_refuses() {
+        use super::super::seed::{self, SeedConfig};
+        let f = fixture();
+        let ops = f.deployments().ops;
+        let grant = json!({"grant": delivery_grant()});
+        let files = |dir: &std::path::Path, id: &str| {
+            (
+                dir.join(format!("{id}.vlite")),
+                dir.join(format!("{id}.seed-receipt.json")),
+            )
+        };
+
+        // Crash before the receipt is durable: the database is preserved
+        // and refused, nothing is journaled, so nothing can be issued.
+        let lost = seedable(&f, "onboard-fabrikam", "fabrikam").await;
+        let lost_id = lost["operation_id"].as_str().unwrap().to_owned();
+        ops.claim(&lost_id, "worker-a", None).unwrap();
+        let lost_dir = tempfile::tempdir().unwrap();
+        let config = SeedConfig::from_loaded(&ops.load(&lost_id).unwrap()).unwrap();
+        seed::seed(lost_dir.path(), &lost_id, &config, None).unwrap();
+        let (database, receipt) = files(lost_dir.path(), &lost_id);
+        std::fs::remove_file(&receipt).unwrap();
+        let bytes = std::fs::read(&database).unwrap();
+        for _ in 0..2 {
+            let error = seed::seed_create(&ops, &lost_id, "worker-a", lost_dir.path(), None)
+                .unwrap_err();
+            assert_eq!(error.code, "seed_artifact_unverified");
+            assert_eq!(std::fs::read(&database).unwrap(), bytes);
+            assert!(!receipt.exists());
+        }
+        assert_eq!(recorded_seed(&ops.journal(&lost_id).unwrap()), None);
+        let lost = f.status(&lost_id).await;
+        let (status, body) = f
+            .action(&lost, "issue-credentials", "issue-lost", grant.clone())
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"]["code"], "seed_unrecorded");
+        assert!(ops.delivery(&lost_id).unwrap().is_none());
+
+        // Crash after the durable receipt, before the journal step: still
+        // unissuable until the rerun journals the verified receipt.
+        let operation = seedable(&f, "onboard-contoso", "contoso").await;
+        let (id, tenant) = (
+            operation["operation_id"].as_str().unwrap().to_owned(),
+            operation["tenant_id"].as_str().unwrap().to_owned(),
+        );
+        ops.claim(&id, "worker-a", None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let config = SeedConfig::from_loaded(&ops.load(&id).unwrap()).unwrap();
+        let made = seed::seed(dir.path(), &id, &config, None).unwrap();
+        let operation = f.status(&id).await;
+        let (status, body) = f
+            .action(
+                &operation,
+                "issue-credentials",
+                "issue-early",
+                grant.clone(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"]["code"], "seed_unrecorded");
+        let journaled = seed::seed_create(&ops, &id, "worker-a", dir.path(), None).unwrap();
+        assert_eq!(journaled, made);
+        assert_eq!(recorded_seed(&ops.journal(&id).unwrap()), Some(made.seed()));
+        let journal = ops.journal(&id).unwrap();
+        assert_eq!(
+            seed::seed_create(&ops, &id, "worker-a", dir.path(), None).unwrap(),
+            made
+        );
+        assert_eq!(ops.journal(&id).unwrap(), journal);
+        let (database, _) = files(dir.path(), &id);
+        let db = crate::Database::open(&database).unwrap();
+        assert_eq!(db.lineage(), Some(made.lineage));
+        drop(db);
+        assert_eq!(seed::verify(dir.path(), &id, &config, None).unwrap(), made);
+
+        // Issuance over the admin route binds the candidate to the
+        // receipt's lineage; a replay never reissues the token.
+        let operation = f.status(&id).await;
+        let (status, issued) = f
+            .action(&operation, "issue-credentials", "issue-1", grant.clone())
+            .await;
+        assert_eq!(status, StatusCode::OK, "{issued}");
+        let token = issued["token"].as_str().unwrap().to_owned();
+        let credential = id_of(&token).to_owned();
+        let snapshot = f.snapshot();
+        assert_eq!(
+            snapshot.live_credential(&credential, now()),
+            Some((Some(tenant.clone()), made.lineage))
+        );
+        assert!(snapshot.records_publication(&tenant, &id, 1, &credential, &[]));
+        let (status, replay) = f
+            .action(&operation, "issue-credentials", "issue-1", grant)
+            .await;
+        assert_eq!(status, StatusCode::OK, "{replay}");
+        assert!(replay.get("token").is_none(), "{replay}");
+
+        // Acknowledgement validates the published, live candidate.
+        let quoted = json!({"delivery_generation": 1, "credential_id": credential});
+        let (status, body) = f
+            .action(&operation, "acknowledge-delivery", "ack-1", quoted)
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let delivered = ops.delivered(&id).unwrap();
+        assert_eq!(
+            (delivered.credential_id.as_str(), delivered.generation),
+            (credential.as_str(), 1)
+        );
+
+        // A changed database no longer matches its receipt: refused, the
+        // journal is unchanged and nothing is re-seeded.
+        let journal = ops.journal(&id).unwrap();
+        let original = std::fs::read(&database).unwrap();
+        let mut changed = original.clone();
+        changed.push(0);
+        std::fs::write(&database, &changed).unwrap();
+        assert_eq!(
+            seed::verify(dir.path(), &id, &config, None)
+                .unwrap_err()
+                .code,
+            "seed_artifact_unverified"
+        );
+        let error = seed::seed_create(&ops, &id, "worker-a", dir.path(), None).unwrap_err();
+        assert_eq!(error.code, "seed_artifact_unverified");
+        assert_eq!(std::fs::read(&database).unwrap(), changed);
+        assert_eq!(ops.journal(&id).unwrap(), journal);
+        std::fs::write(&database, &original).unwrap();
+
+        // Activation needs a readiness proof, and without a qualified clock
+        // proof (OD-005) none can be made, whatever is observed.
+        let intent = intent_of(&f, &id);
+        let route = Route {
+            reader: None,
+            lineage: made.lineage,
+            ..Route::dedicated_for_test(&tenant, 1)
+        };
+        let readiness = Readiness {
+            archive_manifest_sha256: "1".repeat(64),
+            writer: aca::Observed {
+                owner: Some(format!("{}:{tenant}", aca::OWNER_TAG)),
+                config_digest: sha("writer"),
+                succeeded: true,
+                revisions: aca::Revisions::Complete(Vec::new()),
+                mounts: false,
+            },
+            policy_generation_required: 1,
+            policy_generation_observed: 1,
+            route,
+        };
+        let authority =
+            crate::server::authority::AuthorityStore::new(f.memory.clone(), "target/".into());
+        let error = prove(&ops, &authority, &intent, &readiness, None).unwrap_err();
+        assert_eq!(
+            (error.status, error.code),
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "projection_freshness_unproven"
+            )
+        );
+        let operation = f.status(&id).await;
+        assert_eq!(operation["phase"], "reserved");
+        assert_eq!(operation["observed"]["routed"], false);
+        assert!(f.snapshot().record_for(&tenant).is_none());
+        assert!(ops.terminal(&id).unwrap().is_none());
+        f.assert_nowhere(secret_of(&token));
+    }
+
+    /// Runs `between` once, inside the minting action, after its view
+    /// publication and before its response is assembled: just before the
+    /// first delivery-record read that follows the control-state write.
+    fn after_publication(f: &Fixture, between: impl FnOnce() + Send + 'static) {
+        let memory = f.memory.clone();
+        f.memory.hook(Op::Put, CONTROL, move || {
+            memory.hook(Op::Get, "delivery.json", between);
+        });
+    }
+
+    fn intent_of(f: &Fixture, id: &str) -> Intent {
+        f.deployments().ops.load(id).unwrap().intent
+    }
+
+    fn direct_grant() -> super::super::CandidateGrant {
+        super::super::CandidateGrant {
+            name: "contoso-other".into(),
+            operations: vec!["read".into()],
+            graphs: None,
+            expires_unix_ms: now() + 30 * DAY,
+        }
+    }
+
+    /// Reviewer finding: the token of a candidate that a concurrent
+    /// replacement, a replacement's record alone, or a cancellation
+    /// superseded after its publication is dropped (409
+    /// `candidate_superseded`), never paired with the newer candidate's ID
+    /// and generation nor handed out once revoked; a replay mints nothing.
+    #[tokio::test]
+    async fn a_token_superseded_before_its_response_is_never_returned() {
+        for case in ["replace", "record", "cancel"] {
+            let f = fixture();
+            let operation = f.seeded("onboard-contoso").await;
+            let id = operation["operation_id"].as_str().unwrap().to_owned();
+            let tenant = operation["tenant_id"].as_str().unwrap().to_owned();
+            let intent = intent_of(&f, &id);
+            let deployments = f.deployments();
+            let other = Arc::new(std::sync::Mutex::new(None::<String>));
+            let slot = other.clone();
+            after_publication(&f, move || {
+                let (ops, objects) = (&deployments.ops, &deployments.objects);
+                match case {
+                    "replace" => {
+                        let minted = super::super::replace_published_candidate(
+                            ops, objects, &intent, 1, &direct_grant(), now(),
+                        )
+                        .unwrap();
+                        let (token, _) = minted.deliver(ops, objects, &intent, now()).unwrap();
+                        *slot.lock().unwrap() = Some(token);
+                    }
+                    "record" => {
+                        ops.replace_candidate(&intent.operation_id, 1, "zzzzzzzzzzzz")
+                            .unwrap();
+                    }
+                    _ => request_cancel(ops, objects, &intent, now()).unwrap(),
+                }
+            });
+            let grant = json!({"grant": delivery_grant()});
+            let (status, body) = f
+                .action(&operation, "issue-credentials", "issue-1", grant.clone())
+                .await;
+            assert_eq!(status, StatusCode::CONFLICT, "{case}: {body}");
+            assert_eq!(body["error"]["code"], "candidate_superseded", "{case}");
+            assert!(body.get("token").is_none(), "{case}: {body}");
+            let delivery = f.deployments().ops.delivery(&id).unwrap().unwrap();
+            let first = if case == "cancel" {
+                assert_eq!(delivery.generation, 1);
+                delivery.credential_id.clone()
+            } else {
+                assert_eq!(delivery.generation, 2, "{case}");
+                delivery.revoked[0].clone()
+            };
+            let snapshot = f.snapshot();
+            if case != "record" {
+                assert_eq!(snapshot.live_credential(&first, now()), None, "{case}");
+            }
+            if case == "replace" {
+                let token = other.lock().unwrap().clone().unwrap();
+                assert_eq!(id_of(&token), delivery.credential_id);
+                assert!(snapshot.authenticate(&token, now()).is_ok());
+                assert_eq!(
+                    snapshot.live_credential(&delivery.credential_id, now()),
+                    Some((Some(tenant.clone()), LINEAGE))
+                );
+                f.assert_nowhere(secret_of(&token));
+            }
+            // A replay re-applies and is refused: nothing is minted again.
+            let (status, replay) = f
+                .action(&operation, "issue-credentials", "issue-1", grant)
+                .await;
+            assert_eq!(status, StatusCode::CONFLICT, "{case}: {replay}");
+            assert!(replay.get("token").is_none(), "{case}: {replay}");
+            assert_eq!(
+                f.deployments().ops.delivery(&id).unwrap().unwrap(),
+                delivery,
+                "{case}"
+            );
+        }
+    }
+
+    /// Review finding: `deliver` reads the delivery record, then the control
+    /// state last as its final validation. A cancellation just before either
+    /// read, after the operation view, revokes the token while leaving the
+    /// delivery record unchanged; it is still caught and the token dropped.
+    /// A replacement recorded after the delivery read but not yet published
+    /// at the final read is the documented race after that point: the token
+    /// is returned with the generation it was published as, and the
+    /// acknowledgement of that superseded generation is refused.
+    #[tokio::test]
+    async fn a_cancellation_before_the_final_control_read_drops_the_token() {
+        for case in ["cancel-before-delivery", "cancel-before-control", "record-before-control"] {
+            let f = fixture();
+            let operation = f.seeded("onboard-contoso").await;
+            let id = operation["operation_id"].as_str().unwrap().to_owned();
+            let intent = intent_of(&f, &id);
+            let deployments = f.deployments();
+            let change = move || {
+                let (ops, objects) = (&deployments.ops, &deployments.objects);
+                if case == "record-before-control" {
+                    ops.replace_candidate(&intent.operation_id, 1, "zzzzzzzzzzzz")
+                        .unwrap();
+                } else {
+                    request_cancel(ops, objects, &intent, now()).unwrap();
+                }
+            };
+            // After the publication the operation view reads the delivery
+            // record first; `deliver` reads it second, then the control state.
+            let memory = f.memory.clone();
+            after_publication(&f, move || {
+                let inner = memory.clone();
+                memory.hook(Op::Get, "delivery.json", move || {
+                    if case == "cancel-before-delivery" {
+                        change();
+                    } else {
+                        inner.hook(Op::Get, CONTROL, change);
+                    }
+                });
+            });
+            let (status, body) = f
+                .action(&operation, "issue-credentials", "issue-1", json!({"grant": delivery_grant()}))
+                .await;
+            let delivery = f.deployments().ops.delivery(&id).unwrap().unwrap();
+            if case == "record-before-control" {
+                assert_eq!(status, StatusCode::OK, "{case}: {body}");
+                let token = body["token"].as_str().unwrap();
+                let first = &delivery.revoked[0];
+                assert_eq!(id_of(token), first);
+                assert_eq!(body["delivery"]["generation"], 1, "{body}");
+                assert_eq!(body["delivery"]["credential_id"], first.as_str());
+                let observed = &body["operation"]["observed"];
+                assert_eq!(observed["credential_delivery"]["generation"], 1, "{body}");
+                assert_eq!(observed["cancellation_requested"], false, "{body}");
+                assert_eq!(delivery.generation, 2);
+                let (status, ack) = f
+                    .action(
+                        &operation,
+                        "acknowledge-delivery",
+                        "ack-1",
+                        json!({"delivery_generation": 1, "credential_id": first}),
+                    )
+                    .await;
+                assert_eq!(status, StatusCode::CONFLICT, "{ack}");
+                assert_eq!(ack["error"]["code"], "delivery_stale");
+                continue;
+            }
+            assert_eq!(status, StatusCode::CONFLICT, "{case}: {body}");
+            assert_eq!(body["error"]["code"], "candidate_superseded", "{case}");
+            assert!(body.get("token").is_none(), "{case}: {body}");
+            // The delivery record never changed; only the view revoked it.
+            assert_eq!(delivery.generation, 1, "{case}");
+            assert!(!delivery.acknowledged, "{case}");
+            assert_eq!(
+                f.snapshot().live_credential(&delivery.credential_id, now()),
+                None,
+                "{case}"
+            );
+        }
+    }
+
+    /// The same for a replacement overtaken by another replacement: its
+    /// token is dropped, the acknowledgement of its ID is refused, and only
+    /// the winner's exact generation and ID can be acknowledged.
+    #[tokio::test]
+    async fn a_replacement_overtaken_by_another_returns_no_token() {
+        let f = fixture();
+        let operation = f.seeded("onboard-contoso").await;
+        let id = operation["operation_id"].as_str().unwrap().to_owned();
+        let (status, issued) = f
+            .action(&operation, "issue-credentials", "issue-1", json!({"grant": delivery_grant()}))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{issued}");
+        let first = issued["delivery"]["credential_id"].as_str().unwrap().to_owned();
+        let intent = intent_of(&f, &id);
+        let deployments = f.deployments();
+        after_publication(&f, move || {
+            let (ops, objects) = (&deployments.ops, &deployments.objects);
+            super::super::replace_published_candidate(
+                ops, objects, &intent, 2, &direct_grant(), now(),
+            )
+            .unwrap();
+        });
+        let replace = json!({
+            "delivery_generation": 1, "credential_id": first,
+            "ack_irreversible": true, "grant": delivery_grant(),
+        });
+        let (status, body) = f
+            .action(&operation, "replace-credentials", "replace-1", replace)
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"]["code"], "candidate_superseded");
+        assert!(body.get("token").is_none());
+        let delivery = f.deployments().ops.delivery(&id).unwrap().unwrap();
+        assert_eq!(delivery.generation, 3);
+        let second = delivery.revoked[1].clone();
+        let snapshot = f.snapshot();
+        assert_eq!(snapshot.live_credential(&first, now()), None);
+        assert_eq!(snapshot.live_credential(&second, now()), None);
+        let (status, body) = f
+            .action(
+                &operation,
+                "acknowledge-delivery",
+                "ack-overtaken",
+                json!({"delivery_generation": 2, "credential_id": second}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"]["code"], "delivery_stale");
+        let (status, body) = f
+            .action(
+                &operation,
+                "acknowledge-delivery",
+                "ack-winner",
+                json!({"delivery_generation": 3, "credential_id": delivery.credential_id}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["delivery"]["credential_id"], json!(delivery.credential_id));
+        assert_eq!(body["delivery"]["generation"], 3);
+    }
+
+    /// A concurrent acknowledgement of the same candidate does not supersede
+    /// it: the token is returned beside exactly its own ID and generation.
+    #[tokio::test]
+    async fn a_token_is_returned_only_beside_its_own_candidate() {
+        let f = fixture();
+        let operation = f.seeded("onboard-contoso").await;
+        let id = operation["operation_id"].as_str().unwrap().to_owned();
+        let deployments = f.deployments();
+        let op = id.clone();
+        after_publication(&f, move || {
+            let delivery = deployments.ops.delivery(&op).unwrap().unwrap();
+            deployments
+                .ops
+                .acknowledge_delivery(&op, delivery.generation, &delivery.credential_id)
+                .unwrap();
+        });
+        let (status, body) = f
+            .action(&operation, "issue-credentials", "issue-1", json!({"grant": delivery_grant()}))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let token = body["token"].as_str().unwrap();
+        assert_eq!(
+            body["delivery"],
+            json!({"generation": 1, "credential_id": id_of(token), "acknowledged": true, "revoked": []})
+        );
+        assert_eq!(
+            body["operation"]["observed"]["credential_delivery"],
+            json!({"generation": 1, "credential_id": id_of(token), "acknowledged": true})
+        );
+        assert!(f.snapshot().authenticate(token, now()).is_ok());
+    }
+
+    /// Every stored object and its bytes: a refusal must leave them as is.
+    fn stored(f: &Fixture) -> Vec<(String, Vec<u8>)> {
+        let mut names = f.memory.names();
+        names.sort();
+        names
+            .into_iter()
+            .map(|name| {
+                let bytes = f.memory.raw(&name).unwrap();
+                (name, bytes)
+            })
+            .collect()
+    }
+
+    async fn mint_refused(f: &Fixture, operation: &Value, key: &str) {
+        for (verb, extra) in [
+            ("issue-credentials", json!({"grant": delivery_grant()})),
+            (
+                "replace-credentials",
+                json!({
+                    "delivery_generation": 1, "credential_id": "aaaaaaaaaaaa",
+                    "grant": delivery_grant(), "ack_irreversible": true,
+                }),
+            ),
+        ] {
+            let (status, body) = f.action(operation, verb, key, extra).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{verb}: {body}");
+            assert_eq!(body["error"]["code"], "insecure_transport", "{verb}");
+            assert!(body.get("token").is_none());
+        }
+    }
+
+    /// Review finding 1: `no-store` is not HTTPS. Over plain HTTP (a
+    /// loopback-only listener included) issue and replace are refused
+    /// before anything is minted, recorded or published, and a client's
+    /// own `X-Forwarded-Proto` is not trusted without a configured proxy.
+    #[tokio::test]
+    async fn minting_over_plain_http_is_refused_before_anything_is_persisted() {
+        let mut f = fixture_over(true, Some(TOKEN), false, false);
+        let operation = f.seeded("onboard-contoso").await;
+        let id = operation["operation_id"].as_str().unwrap().to_owned();
+        let before = stored(&f);
+        mint_refused(&f, &operation, "issue-plain").await;
+        f.headers = vec![("x-forwarded-proto", "https")];
+        mint_refused(&f, &operation, "issue-forged").await;
+        assert_eq!(stored(&f), before, "a refusal persists nothing");
+        assert!(f.deployments().ops.delivery(&id).unwrap().is_none());
+        // Non-minting actions are unaffected.
+        let (status, body) = f.action(&operation, "resume", "issue-plain", json!({})).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
+    /// Review finding 1: behind `VLITE_TRUSTED_PROXY=1` only the proxy's
+    /// own (last) `X-Forwarded-Proto: https` proves HTTPS.
+    #[tokio::test]
+    async fn minting_behind_a_trusted_proxy_needs_its_https_forwarding() {
+        let mut f = fixture_over(true, Some(TOKEN), false, true);
+        let operation = f.seeded("onboard-contoso").await;
+        let id = operation["operation_id"].as_str().unwrap().to_owned();
+        let before = stored(&f);
+        for (key, headers) in [
+            ("issue-none", vec![]),
+            ("issue-http", vec![("x-forwarded-proto", "http")]),
+            // A client-sent value the proxy appended `http` to.
+            ("issue-spoofed", vec![("x-forwarded-proto", "https, http")]),
+        ] {
+            f.headers = headers;
+            mint_refused(&f, &operation, key).await;
+        }
+        assert_eq!(stored(&f), before);
+        f.headers = vec![("x-forwarded-proto", "https")];
+        let (status, body) = f
+            .action(&operation, "issue-credentials", "issue-1", json!({"grant": delivery_grant()}))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let token = body["token"].as_str().unwrap();
+        assert_eq!(
+            f.deployments().ops.delivery(&id).unwrap().unwrap().credential_id,
+            id_of(token)
+        );
+    }
+
+    /// Review finding 2: cancelling an issued create revokes its candidate
+    /// in the cancellation's own CAS, so a lost release cannot leave it
+    /// live and the completed release never does.
+    #[tokio::test]
+    async fn cancel_after_issue_leaves_no_live_candidate() {
+        let f = fixture();
+        let operation = f.seeded("onboard-contoso").await;
+        let tenant = operation["tenant_id"].as_str().unwrap().to_owned();
+        let (status, issued) = f
+            .action(&operation, "issue-credentials", "issue-1", json!({"grant": delivery_grant()}))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{issued}");
+        let token = issued["token"].as_str().unwrap().to_owned();
+        let credential = id_of(&token).to_owned();
+        assert!(f.snapshot().authenticate(&token, now()).is_ok());
+        // The cancellation request lands; the release after the seal fails.
+        f.memory.fault(Op::Put, CONTROL, Fault::Refuse, 1, 1);
+        let (status, body) = f
+            .action(&issued["operation"], "cancel", "cancel-1", json!({}))
+            .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        let snapshot = f.snapshot();
+        assert!(matches!(
+            snapshot.lifecycle(&tenant).map(|entry| &entry.slot),
+            Some(Slot::Reserved {
+                cancellation_requested: true,
+                ..
+            })
+        ));
+        assert_eq!(snapshot.live_credential(&credential, now()), None);
+        assert!(snapshot.authenticate(&token, now()).is_err());
+        let (status, body) = f
+            .action(&issued["operation"], "cancel", "cancel-1", json!({}))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["operation"]["observed"]["reserved"], false);
+        let snapshot = f.snapshot();
+        assert!(matches!(
+            snapshot.lifecycle(&tenant).map(|entry| &entry.slot),
+            Some(Slot::Released { .. })
+        ));
+        assert_eq!(snapshot.live_credential(&credential, now()), None);
+        assert!(snapshot.authenticate(&token, now()).is_err());
+    }
+
+    /// DD-002: the command line never prints a credential; it may only
+    /// acknowledge. Nothing is persisted by the refusal.
+    #[test]
+    fn cli_never_mints_a_candidate_credential() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = tenants::Store::load(directory.path()).unwrap();
+        let credentials = credentials::Store::load(directory.path()).unwrap();
+        let memory = Arc::new(Memory::default());
+        Objects::new(memory.clone(), CONTROL)
+            .create(Snapshot::import(&credentials, Some(&store)).unwrap(), NOW)
+            .unwrap();
+        let deployments = Deployments::new(memory.clone(), CONTROL, PREFIX);
+        let submit = Command::Submit {
+            kind: Kind::Create,
+            tenant: None,
+            request: create_request("cli-key", "contoso")
+                .to_string()
+                .into_bytes(),
+        };
+        let created = run(&deployments, &store, None, submit, NOW).unwrap();
+        let id = created["operation"]["operation_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        deployments.ops.claim(&id, "worker-a", None).unwrap();
+        let seed = Seed {
+            lineage: LINEAGE,
+            digest: sha256_hex(b"seed"),
+        };
+        deployments.ops.record_seed(&id, "worker-a", &seed).unwrap();
+        let operation = status(&deployments, &id).unwrap();
+        let before = memory.names();
+        for verb in ["issue-credentials", "replace-credentials"] {
+            let request = json!({
+                "idempotency_key": verb,
+                "expected_operation_generation": operation["operation_generation"],
+                "expected_lifecycle_generation": operation["lifecycle_generation"],
+                "delivery_generation": 1,
+                "credential_id": "abc",
+                "ack_irreversible": true,
+                "grant": {
+                    "name": "contoso-initial",
+                    "operations": ["read"],
+                    "expires_unix_ms": NOW + DAY,
+                },
+            });
+            let mut request = request;
+            if verb == "issue-credentials" {
+                let fields = request.as_object_mut().unwrap();
+                fields.remove("delivery_generation");
+                fields.remove("credential_id");
+                fields.remove("ack_irreversible");
+            }
+            let command = Command::Act {
+                operation: id.clone(),
+                verb: verb.into(),
+                request: request.to_string().into_bytes(),
+            };
+            let error = run(&deployments, &store, None, command, NOW).unwrap_err();
+            assert_eq!(error.code, "transition_unavailable", "{verb}");
+        }
+        assert_eq!(memory.names(), before, "nothing was persisted");
+        assert!(deployments.ops.delivery(&id).unwrap().is_none());
     }
 
     #[tokio::test]
@@ -1751,12 +3412,12 @@ mod tests {
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     }
 
-    /// ITEM-008: a reader fleet would pin sets with whole-record writes in
-    /// the writer's coordination scope, so it cannot advance; it can still
-    /// be read, and removing readers needs no pins. R1: a reader submission
-    /// takes no slot (only its plan-anchored actuator reserves); EPIC-005:
-    /// cancelling it withdraws it without a slot, so later lifecycle
-    /// anchoring is never poisoned.
+    /// ITEM-008: the legacy reader-pin path rewrites whole set records;
+    /// isolated pins and an offline scoped-grant template exist, but
+    /// production scope and mount enforcement remain unproven. R1: a reader
+    /// submission takes no slot (only its plan-anchored actuator reserves);
+    /// EPIC-005: cancelling it withdraws it without a slot, so later
+    /// lifecycle anchoring is never poisoned.
     #[tokio::test]
     async fn reader_fleets_are_denied_until_pin_scope_is_proven() {
         let f = fixture();
@@ -1842,6 +3503,51 @@ mod tests {
             )
             .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    /// Capabilities advertise `features.tenant_deployments` exactly when the
+    /// managed routes are configured, so the dashboard need not probe for 404.
+    #[test]
+    fn capabilities_advertise_whether_tenant_deployments_are_configured() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        for (configured, token) in [
+            (true, Some(TOKEN)),
+            (false, Some(TOKEN)),
+            (true, None),
+            (false, None),
+        ] {
+            let f = fixture_with(configured, token);
+            let (status, body) =
+                runtime.block_on(f.call_as(token, "GET", "/v1/capabilities", None));
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(
+                body["features"]["tenant_deployments"],
+                json!(configured),
+                "configured={configured} token={token:?}: {body}"
+            );
+        }
+        // The flag follows the managed runtime wiring too.
+        let directory = tempfile::tempdir().unwrap();
+        let (config, _) = runtime_files(directory.path());
+        let opened = TenantDeploymentsConfig::read(&config)
+            .unwrap()
+            .open(&directory.path().join("admin"))
+            .unwrap();
+        let mut served = fixture_with(false, Some(TOKEN));
+        served.app = crate::server::configured_routes(
+            served
+                .service
+                .clone()
+                .with_managed_tenant_deployments(&opened),
+        );
+        let (status, body) = runtime.block_on(served.call("GET", "/v1/capabilities", None));
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["features"]["tenant_deployments"], true, "{body}");
+        drop(served);
+        drop(runtime);
     }
 
     const LIST: &str = "/v1/admin/tenant-deployment-operations";

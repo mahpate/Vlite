@@ -443,23 +443,14 @@ fn pins_sets(payload: &Payload) -> bool {
     )
 }
 
-/// ITEM-008: reader fleets are denied until a reader's pin scope is proven.
-///
-/// A reader pins its set by rewriting the whole set record
-/// (`{p}sets/{id}/record.json`, `Sets::pin`): the same object carries the
-/// publication and deletion state, the manifest digest and the verification,
-/// and it lives in the same coordination store and prefix as the writer
-/// authority, the auto-failover state and the lifecycle guard. A Blob grant
-/// is per object at best, so no grant on this layout allows the pin without
-/// those writes, and offline fixtures prove neither Azure RBAC nor mount
-/// enforcement. Bounded follow-up before ACA execution: broker pin and
-/// release through the VLite control role as an operation-bound request, or
-/// move pins to per-replica objects a reader may write alone; then qualify
-/// the grants and mounts in the cloud.
+/// ITEM-008: reader fleets remain denied until production pin-scope proofs
+/// and effective grant and mount enforcement are qualified. Isolated reader
+/// pin objects and an opt-in runtime path exist, but their scope proofs are
+/// test-only; the legacy record-pin path remains the default.
 fn pin_scope_unproven() -> ApiError {
     conflict(
         "pin_scope_unproven",
-        "reader fleets are denied: reader pins rewrite the whole set record in the writer's coordination scope, and no tenant-scoped pin grant or brokered pin path is proven yet (ITEM-008); cancel to release the reservation",
+        "reader fleets are denied: isolated reader-pin objects and an opt-in runtime path exist, but production pin-scope proofs and effective grant and mount enforcement are not qualified (ITEM-008); cancel to release the reservation",
     )
 }
 
@@ -585,6 +576,9 @@ impl Operations {
                 intent: check(Self::parse(&bytes)?)?,
                 duplicate: true,
             });
+        }
+        if let Payload::Create { writer_profile, .. } = payload {
+            aca::writer_input(supplied[writer_profile])?;
         }
         for (digest, content) in &supplied {
             let content_name = self.content_name(digest);
@@ -1028,7 +1022,7 @@ impl Operations {
             objects,
             now,
             |snapshot| released(snapshot, &sealed),
-            |current| current.release_lifecycle(&sealed),
+            |current| current.release_lifecycle(&sealed, now),
         )?;
         Ok(sealed)
     }
@@ -1156,6 +1150,14 @@ pub(super) fn request_cancel(
     now: u64,
 ) -> Result<(), ApiError> {
     let withdrawable = matches!(intent.kind(), Kind::SetReaders | Kind::Retire);
+    // ITEM-013: read before the CAS; the journal only grows, and the
+    // update step is recorded before it is sent, after the withdrawal.
+    let (endpoint, dispatched) = match intent.kind() {
+        Kind::SetReaders => {
+            aca::reader_cancel_facts(&ops.journal(&intent.operation_id)?, &intent.payload)
+        }
+        _ => (None, false),
+    };
     lifecycle_cas(
         objects,
         now,
@@ -1170,7 +1172,13 @@ pub(super) fn request_cancel(
         },
         |current| {
             if !withdrawable || holds(current, intent).is_some() {
-                return current.request_cancel(&intent.tenant_id, &intent.operation_id);
+                return current.request_cancel_readers(
+                    &intent.tenant_id,
+                    &intent.operation_id,
+                    now,
+                    endpoint.as_deref(),
+                    dispatched,
+                );
             }
             // Read after `current`: a slot is released only after its
             // holder sealed, so no terminal means this never held it.
@@ -1183,15 +1191,28 @@ pub(super) fn request_cancel(
     .map(drop)
 }
 
-/// ITEM-002: publishes the route and its receipt in one generation and
-/// returns the receipt (the same one on every retry).
-pub(super) fn activate(
+/// Fixture setup for tests that start with an activated route.
+#[cfg(test)]
+fn activate(
     ops: &Operations,
     objects: &Objects,
     intent: &Intent,
     route: &Route,
     proof_digest: &str,
     now: u64,
+) -> Result<Receipt, ApiError> {
+    activate_checked(ops, objects, intent, route, proof_digest, now, |_| Ok(()))
+}
+
+/// The credential checks and the route/receipt write share a CAS generation.
+fn activate_checked(
+    ops: &Operations,
+    objects: &Objects,
+    intent: &Intent,
+    route: &Route,
+    proof_digest: &str,
+    now: u64,
+    mut validate: impl FnMut(&Snapshot) -> Result<(), ApiError>,
 ) -> Result<Receipt, ApiError> {
     if ops.read_terminal(&intent.operation_id)?.is_some() {
         return Err(ended());
@@ -1210,7 +1231,10 @@ pub(super) fn activate(
         objects,
         now,
         |snapshot| receipt(snapshot).is_some(),
-        |current| current.activate(&intent.tenant_id, &intent.operation_id, route, proof_digest),
+        |current| {
+            validate(current)?;
+            current.activate(&intent.tenant_id, &intent.operation_id, route, proof_digest)
+        },
     )?;
     receipt(&snapshot).ok_or_else(indeterminate)
 }
@@ -1259,6 +1283,40 @@ pub(super) fn publish_readers(
             reader,
             proof,
         )
+    })
+    .map(drop)
+}
+
+/// EPIC-005 ITEM-013: withdraws the reader endpoint `endpoint` from the
+/// reserved route `planned` before the reader app is updated in place
+/// (`Snapshot::withdraw_reader`). Already done when this operation still
+/// holds its unsealed reservation over the withdrawn route.
+pub(super) fn withdraw_readers(
+    ops: &Operations,
+    objects: &Objects,
+    intent: &Intent,
+    planned: &str,
+    endpoint: &str,
+    now: u64,
+) -> Result<(), ApiError> {
+    if ops.read_terminal(&intent.operation_id)?.is_some() {
+        return Err(ended());
+    }
+    let done = |snapshot: &Snapshot| {
+        matches!(
+            holds(snapshot, intent),
+            Some(Slot::Reserved {
+                receipt: None,
+                cancellation_requested: false,
+                expected_route: Some(expected),
+                ..
+            }) if expected == planned
+        ) && snapshot
+            .record_for(&intent.tenant_id)
+            .is_some_and(|route| control_state::reader_withdrawn(route, planned, endpoint))
+    };
+    lifecycle_cas(objects, now, done, |current| {
+        current.withdraw_reader(&intent.tenant_id, &intent.operation_id, planned, endpoint)
     })
     .map(drop)
 }
@@ -1546,6 +1604,7 @@ pub(super) struct Delivery {
 #[derive(Debug)]
 pub(super) struct Delivered {
     operation_id: String,
+    generation: u64,
     credential_id: String,
     revoked: Vec<String>,
 }
@@ -1706,6 +1765,7 @@ impl Operations {
         match self.delivery(operation_id)? {
             Some(delivery) if delivery.acknowledged => Ok(Delivered {
                 operation_id: delivery.operation_id,
+                generation: delivery.generation,
                 credential_id: delivery.credential_id,
                 revoked: delivery.revoked,
             }),
@@ -1717,13 +1777,351 @@ impl Operations {
     }
 }
 
+/// The policy of a create's first tenant credential (OD-004/OD-006 decide
+/// it): what `credentials::candidate` mints, bound to the tenant's every
+/// collection and seeded lineage.
+#[derive(Clone, Debug)]
+pub(super) struct CandidateGrant {
+    pub(super) name: String,
+    pub(super) operations: Vec<String>,
+    pub(super) graphs: Option<Vec<String>>,
+    pub(super) expires_unix_ms: u64,
+}
+
+/// The recorded seed of a create that may publish a candidate, with the
+/// published state that admitted it.
+fn candidate_seed(
+    ops: &Operations,
+    objects: &Objects,
+    intent: &Intent,
+) -> Result<(Seed, Snapshot), ApiError> {
+    if intent.kind() != Kind::Create {
+        return Err(invalid(
+            "only a create operation issues a candidate credential",
+        ));
+    }
+    if ops.terminal(&intent.operation_id)?.is_some() {
+        return Err(ended());
+    }
+    let (snapshot, _) = objects.read()?;
+    if !matches!(
+        holds(&snapshot, intent),
+        Some(Slot::Reserved {
+            cancellation_requested: false,
+            receipt: None,
+            ..
+        })
+    ) || snapshot.record_for(&intent.tenant_id).is_some()
+    {
+        return Err(conflict(
+            "operation_not_provisionable",
+            "the operation does not hold an uncancelled reservation of an unrouted tenant",
+        ));
+    }
+    let seed = recorded_seed(&ops.journal(&intent.operation_id)?).ok_or_else(seed_unrecorded)?;
+    Ok((seed, snapshot))
+}
+
+/// Mints a candidate for the seeded tenant at the delivery generation after
+/// `expected` (the first when `None`), returning it with its token, that
+/// generation and every candidate it replaces: the expected generation's
+/// whole revoked list and its current ID. The delivery record is checked
+/// before anything is minted, and the published state must take exactly
+/// this publication, so a knowable refusal records nothing.
+fn mint_candidate(
+    ops: &Operations,
+    objects: &Objects,
+    intent: &Intent,
+    grant: &CandidateGrant,
+    expected: Option<u64>,
+    now: u64,
+) -> Result<(super::credentials::Candidate, String, u64, Vec<String>, u64), ApiError> {
+    let (seed, snapshot) = candidate_seed(ops, objects, intent)?;
+    let revoked = match (ops.delivery(&intent.operation_id)?, expected) {
+        (None, None) => Vec::new(),
+        (Some(_), None) => return Err(candidate_recorded()),
+        (Some(delivery), Some(expected))
+            if delivery.generation == expected && !delivery.acknowledged =>
+        {
+            let mut revoked = delivery.revoked;
+            revoked.push(delivery.credential_id);
+            revoked
+        }
+        _ => return Err(delivery_stale()),
+    };
+    let generation = expected
+        .map_or(Some(1), |expected| expected.checked_add(1))
+        .ok_or_else(delivery_stale)?;
+    let (candidate, token) = super::credentials::candidate(
+        &intent.tenant_id,
+        seed.lineage,
+        &grant.name,
+        &grant.operations,
+        grant.graphs.as_deref(),
+        grant.expires_unix_ms,
+        now,
+    )?;
+    snapshot.with_candidate(
+        &intent.tenant_id,
+        &intent.operation_id,
+        generation,
+        &candidate,
+        &revoked,
+        now,
+    )?;
+    Ok((candidate, token, generation, revoked, seed.lineage))
+}
+
+/// ITEM-010: a token as minted, bound to the exact delivery generation,
+/// credential ID and replaced candidates it was recorded and published as.
+/// The token leaves the server only through [`Minted::deliver`], which
+/// re-checks that binding, so it is never paired with another candidate's
+/// delivery record. A concurrent replacement or cancellation can still
+/// supersede the candidate after its corresponding check.
+pub(super) struct Minted {
+    token: String,
+    generation: u64,
+    credential_id: String,
+    revoked: Vec<String>,
+    lineage: u64,
+}
+
+impl std::fmt::Debug for Minted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Minted")
+            .field("token", &"<redacted>")
+            .field("generation", &self.generation)
+            .field("credential_id", &self.credential_id)
+            .field("revoked", &self.revoked)
+            .finish()
+    }
+}
+
+impl Minted {
+    /// The token with the delivery record that names exactly this candidate.
+    /// The delivery record is read first and must still be this generation
+    /// and ID with the same replaced candidates (it may be acknowledged).
+    /// The control-state view is read last, and that read is the final
+    /// validation: the view must still publish the token live for the tenant
+    /// and seeded lineage as this operation's candidate at its generation,
+    /// with the reservation uncancelled and unreleased. Cancellation and
+    /// revocation happen only in the view, and a replacement is recorded in
+    /// the delivery record before it is published there. A cancellation or
+    /// published replacement visible in the final view is refused (409
+    /// `candidate_superseded`).
+    ///
+    /// Nothing is checked after that read. A cancellation, or a
+    /// replacement's publication, that lands later still revokes the token
+    /// in the view; the client may receive a token that no longer
+    /// authenticates, and receiving it never prevents that revocation. A
+    /// replacement recorded after the delivery read but published after the
+    /// view read is the same race: the returned delivery then names a
+    /// superseded generation, so acknowledging it is refused
+    /// (`delivery_stale`).
+    pub(super) fn deliver(
+        self,
+        ops: &Operations,
+        objects: &Objects,
+        intent: &Intent,
+        now: u64,
+    ) -> Result<(String, Delivery), ApiError> {
+        let superseded = || {
+            conflict(
+                "candidate_superseded",
+                "the minted candidate was replaced, revoked or cancelled when checked; the token was discarded",
+            )
+        };
+        let delivery = match ops.delivery(&intent.operation_id)? {
+            Some(delivery)
+                if delivery.generation == self.generation
+                    && delivery.credential_id == self.credential_id
+                    && delivery.revoked == self.revoked =>
+            {
+                delivery
+            }
+            _ => return Err(superseded()),
+        };
+        // The final validation: read after the delivery record.
+        let (snapshot, _) = objects.read()?;
+        let live = matches!(
+            holds(&snapshot, intent),
+            Some(Slot::Reserved {
+                cancellation_requested: false,
+                receipt: None,
+                ..
+            })
+        ) && snapshot.records_publication(
+            &intent.tenant_id,
+            &intent.operation_id,
+            self.generation,
+            &self.credential_id,
+            &self.revoked,
+        ) && snapshot.live_credential(&self.credential_id, now)
+            == Some((Some(intent.tenant_id.clone()), self.lineage));
+        if !live {
+            return Err(superseded());
+        }
+        Ok((self.token, delivery))
+    }
+
+    #[cfg(test)]
+    pub(super) fn token(&self) -> &str {
+        &self.token
+    }
+}
+
+fn candidate_recorded() -> ApiError {
+    conflict(
+        "delivery_candidate_exists",
+        "another candidate credential is already being delivered",
+    )
+}
+
+fn delivery_stale() -> ApiError {
+    conflict(
+        "delivery_stale",
+        "the candidate changed, was acknowledged or the ID was used before",
+    )
+}
+
+/// Records the minted candidate in the delivery record through `record`
+/// (an idempotent `issue_candidate` or `replace_candidate`), which must
+/// leave exactly delivery `generation` naming `credential_id` with
+/// `revoked` replaced. An uncertain write is reconciled while the caller
+/// still holds the token, by re-running `record` until it confirms that
+/// state or a settled refusal. The token is never reissued: if the outcome
+/// stays unknown it is dropped (`operation_indeterminate`), and only a
+/// replacement issues another.
+fn record_delivery(
+    mut record: impl FnMut() -> Result<Delivery, ApiError>,
+    generation: u64,
+    credential_id: &str,
+    revoked: &[String],
+) -> Result<(), ApiError> {
+    let mut uncertain = false;
+    for _ in 0..CAS_ATTEMPTS {
+        match record() {
+            Ok(delivery) => {
+                return if delivery.generation == generation
+                    && delivery.credential_id == credential_id
+                    && delivery.revoked == revoked
+                {
+                    Ok(())
+                } else {
+                    Err(delivery_stale())
+                };
+            }
+            Err(error) if matches!(error.code, "delivery_candidate_exists" | "delivery_stale") => {
+                return Err(error);
+            }
+            Err(error) if !uncertain && !outcome_unknown(&error) => return Err(error),
+            Err(_) => uncertain = true,
+        }
+    }
+    Err(indeterminate())
+}
+
+/// Publishes candidate `generation`, hash-only, revokes the replaced ones
+/// in the control-state view and records the publication, in one CAS that
+/// refuses a superseded generation. Done only when the view publishes
+/// exactly this candidate as that generation; a lost acknowledgement is
+/// resolved by reading back.
+fn publish_view(
+    objects: &Objects,
+    intent: &Intent,
+    generation: u64,
+    candidate: &super::credentials::Candidate,
+    revoked: &[String],
+    now: u64,
+) -> Result<(), ApiError> {
+    let (tenant, operation_id) = (&intent.tenant_id, &intent.operation_id);
+    lifecycle_cas(
+        objects,
+        now,
+        |snapshot| {
+            snapshot.publishes_candidate(tenant, operation_id, generation, candidate, revoked, now)
+        },
+        |current| current.with_candidate(tenant, operation_id, generation, candidate, revoked, now),
+    )
+    .map(drop)
+}
+
+/// ITEM-010 (PRD §3.4 step 7): issues a reserved, seeded create's first
+/// candidate credential once. Its ID is recorded in the delivery record
+/// first, then the credential is published hash-only into the control-state
+/// view, bound to the tenant and seeded lineage; the tenant stays unrouted.
+/// Returns the token, the only copy of its secret, bound to its delivery
+/// ([`Minted::deliver`] releases it for the private delivery, OD-004). A
+/// retry never mints silently: once a candidate is recorded it
+/// is refused (`delivery_candidate_exists`) before anything is minted, and
+/// only [`replace_published_candidate`] issues another. No production
+/// caller yet; activation still needs readiness proof (OD-005).
+pub(super) fn publish_candidate(
+    ops: &Operations,
+    objects: &Objects,
+    intent: &Intent,
+    grant: &CandidateGrant,
+    now: u64,
+) -> Result<Minted, ApiError> {
+    let (candidate, token, generation, revoked, lineage) =
+        mint_candidate(ops, objects, intent, grant, None, now)?;
+    record_delivery(
+        || ops.issue_candidate(&intent.operation_id, candidate.id()),
+        generation,
+        candidate.id(),
+        &revoked,
+    )?;
+    publish_view(objects, intent, generation, &candidate, &revoked, now)?;
+    Ok(Minted {
+        token,
+        generation,
+        credential_id: candidate.id().to_owned(),
+        revoked,
+        lineage,
+    })
+}
+
+/// ITEM-010: replaces the unacknowledged candidate at `expected_generation`
+/// (a lost or unpublished one included) with a newly minted one, and
+/// revokes every replaced candidate in the view in the same publication.
+pub(super) fn replace_published_candidate(
+    ops: &Operations,
+    objects: &Objects,
+    intent: &Intent,
+    expected_generation: u64,
+    grant: &CandidateGrant,
+    now: u64,
+) -> Result<Minted, ApiError> {
+    let (candidate, token, generation, revoked, lineage) =
+        mint_candidate(ops, objects, intent, grant, Some(expected_generation), now)?;
+    record_delivery(
+        || ops.replace_candidate(&intent.operation_id, expected_generation, candidate.id()),
+        generation,
+        candidate.id(),
+        &revoked,
+    )?;
+    publish_view(objects, intent, generation, &candidate, &revoked, now)?;
+    Ok(Minted {
+        token,
+        generation,
+        credential_id: candidate.id().to_owned(),
+        revoked,
+        lineage,
+    })
+}
+
 /// ITEM-010: activates a create once readiness is proven and the credential
 /// delivery acknowledged: publishes the writer-only route (no reader is
 /// ever started here; EPIC-005), releases the guard and seals `succeeded`.
 /// The acknowledged credential must already be live in the published view,
-/// bound to the tenant and seeded lineage, and every replaced candidate
-/// revoked there; nothing here can publish it for a reserved tenant
-/// (OD-004), so production fails closed with `credential_view_unpublished`.
+/// bound to the tenant and seeded lineage, recorded there as this
+/// operation's candidate at the acknowledged delivery generation with
+/// exactly the delivery's replaced candidates, and every replaced candidate
+/// revoked there; only [`publish_candidate`] publishes it for a reserved
+/// tenant, and it has no production caller yet (OD-004), so production
+/// still fails closed with `credential_view_unpublished`.
+/// `now` timestamps bookkeeping; only a new route write needs a fresh
+/// credential observation from `clock`. A committed receipt needs none.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn activate_create(
     ops: &Operations,
@@ -1734,6 +2132,7 @@ pub(super) fn activate_create(
     proof: &Proof,
     delivered: &Delivered,
     now: u64,
+    mut clock: impl FnMut() -> Result<u64, ApiError>,
 ) -> Result<Sealed, ApiError> {
     if intent.kind() != Kind::Create || delivered.operation_id != intent.operation_id {
         return Err(invalid("not this create operation's proof or delivery"));
@@ -1778,26 +2177,50 @@ pub(super) fn activate_create(
     {
         return Err(route_invalid());
     }
-    let tenant = Some(intent.tenant_id.clone());
-    if snapshot.live_credential(&delivered.credential_id, now) != Some((tenant, seed.lineage)) {
-        return Err(conflict(
-            "credential_view_unpublished",
-            "the acknowledged credential is not live in the published view for this tenant and lineage",
-        ));
-    }
-    if delivered
-        .revoked
-        .iter()
-        .any(|id| snapshot.live_credential(id, now).is_some())
-    {
-        return Err(conflict(
-            "candidate_revocation_unconfirmed",
-            "a replaced candidate credential is still live",
-        ));
-    }
-    activate(ops, objects, intent, route, &proof.digest, now)?;
+    let mut previous = now;
+    activate_checked(ops, objects, intent, route, &proof.digest, now, |current| {
+        let at = clock()?;
+        if at < previous {
+            return Err(conflict(
+                "activation_clock_regressed",
+                "the clock moved backwards during activation",
+            ));
+        }
+        previous = at;
+        if current.live_credential(&delivered.credential_id, at)
+            != Some((Some(intent.tenant_id.clone()), seed.lineage))
+        {
+            return Err(conflict(
+                "credential_view_unpublished",
+                "the acknowledged credential is not live in the published view for this tenant and lineage",
+            ));
+        }
+        if delivered
+            .revoked
+            .iter()
+            .any(|id| current.live_credential(id, at).is_some())
+        {
+            return Err(conflict(
+                "candidate_revocation_unconfirmed",
+                "a replaced candidate credential is still live",
+            ));
+        }
+        if !current.records_publication(
+            &intent.tenant_id,
+            &intent.operation_id,
+            delivered.generation,
+            &delivered.credential_id,
+            &delivered.revoked,
+        ) {
+            return Err(conflict(
+                "credential_view_unpublished",
+                "the published view does not record the acknowledged credential as this operation's candidate at its delivery generation",
+            ));
+        }
+        Ok(())
+    })?;
     guards.release(&intent.tenant_id, &intent.operation_id)?;
-    ops.release(objects, intent, now)
+    ops.release(objects, intent, previous)
 }
 
 // ---------------------------------------------------------------- routes
@@ -1809,6 +2232,7 @@ mod digest;
 pub(super) mod guard;
 pub(super) mod projection;
 mod resource_id;
+mod seed;
 mod worker;
 
 pub(super) use admin::Deployments;
@@ -1844,5 +2268,9 @@ pub(super) fn routes() -> Router<Service> {
         )
 }
 
+#[cfg(test)]
+mod candidate_tests;
+#[cfg(test)]
+mod seed_tests;
 #[cfg(test)]
 mod tests;
